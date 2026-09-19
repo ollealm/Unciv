@@ -38,6 +38,13 @@ tasks.register<JavaExec>("run") {
     isIgnoreExitValue = true
 }
 
+tasks.register<JavaExec>("rulerHost") {
+    dependsOn(tasks.getByName("classes"))
+    mainClass.set("com.unciv.app.desktop.ruler.RulerHost")
+    classpath = sourceSets.main.get().runtimeClasspath
+    workingDir = assetsDir
+}
+
 tasks.register<JavaExec>("debug") {
     dependsOn(tasks.getByName("classes"))
     mainClass.set(mainClassName)

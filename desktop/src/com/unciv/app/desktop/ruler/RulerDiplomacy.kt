@@ -1,0 +1,181 @@
+package com.unciv.app.desktop.ruler
+
+import com.badlogic.gdx.utils.JsonValue
+import com.unciv.Constants
+import com.unciv.logic.civilization.AlertType
+import com.unciv.logic.civilization.Civilization
+import com.unciv.logic.civilization.PopupAlert
+import com.unciv.logic.civilization.diplomacy.DiplomacyFlags
+import com.unciv.logic.civilization.diplomacy.DiplomaticStatus
+import com.unciv.logic.trade.Trade
+import com.unciv.logic.trade.TradeEvaluation
+import com.unciv.logic.trade.TradeLogic
+import com.unciv.logic.trade.TradeOffer
+import com.unciv.logic.trade.TradeOfferType
+import com.unciv.logic.trade.TradeRequest
+
+/**
+ *  Diplomacy a ruler can order. Proposals to other civs are answered by that civ on its own turn
+ *  (its automation evaluates them), and the answer shows up in the chancery log.
+ */
+class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
+
+    private val hiddenOffers = setOf(TradeOfferType.City, TradeOfferType.Introduction, TradeOfferType.WarDeclaration, TradeOfferType.Technology)
+
+    /** Our open proposals: (our civ, their civ, terms) - checked each turn to report how they ended */
+    val pending = ArrayList<Triple<String, String, String>>()
+
+    fun TradeOffer.brief() = name + (if (type.numberType != TradeOfferType.TradeTypeNumberType.None) " x$amount" else "") + (if (duration > 0) " for $duration turns" else "")
+    fun Trade.brief() = "we give ${ourOffers.joinToString { it.brief() }.ifEmpty { "nothing" }} for ${theirOffers.joinToString { it.brief() }.ifEmpty { "nothing" }}"
+
+    /** Called after each turn: proposals that are no longer waiting were answered - say how, with the terms */
+    fun settleAnswers(civ: Civilization, notifications: List<String>) {
+        for (entry in pending.filter { it.first == civ.civName }.toList()) {
+            val other = civ.gameInfo.civilizations.firstOrNull { it.civName == entry.second } ?: continue
+            if (other.tradeRequests.any { it.requestingCiv == civ.civID }) continue // still waiting
+            pending.remove(entry)
+            val answer = when {
+                notifications.any { it.contains("[${other.civName}] has accepted your trade request") } -> "was accepted - the deal is in force"
+                notifications.any { it.contains("[${other.civName}] has denied your trade request") } -> "was refused"
+                notifications.any { it.contains("[${other.civName}] has made a counteroffer") } -> "got a counteroffer, which the officials will weigh"
+                notifications.any { it.contains("no longer relevant") } -> "lapsed: one side could no longer supply what was offered (a resource ran out, or a treaty state changed)"
+                else -> "ended without a recorded answer"
+            }
+            log(civ, "Our proposal to ${other.civName} (${entry.third}) $answer.")
+        }
+    }
+
+    private fun Civilization.known(name: String): Civilization =
+        getKnownCivs().firstOrNull { it.civName == name && it.isAlive() } ?: throw IllegalArgumentException("We have not met $name, or they are gone")
+
+    /** {with, give: [offers], want: [offers]}; an offer is {item, amount?} - see options.diplomacy for what can be traded */
+    fun proposeTrade(civ: Civilization, json: JsonValue): String {
+        val other = civ.known(json.getString("with"))
+        if (other.isCityState) throw IllegalArgumentException("City-states do not trade; send them a gift instead")
+        val logic = TradeLogic(civ, other)
+        val trade = Trade()
+        fun add(list: JsonValue?, available: List<TradeOffer>, into: MutableList<TradeOffer>, side: String) {
+            list?.forEach { entry ->
+                val item = entry.getString("item")
+                val offer = available.firstOrNull { it.name.equals(item, ignoreCase = true) && it.amount > 0 }
+                    ?: throw IllegalArgumentException("$side cannot offer '$item' right now; tradeable: ${available.filter { it.amount > 0 && it.type !in hiddenOffers }.joinToString { it.name + " x" + it.amount }}")
+                val copy = offer.copy()
+                val wanted = if (entry.has("amount")) entry.getInt("amount") else if (offer.type.numberType == TradeOfferType.TradeTypeNumberType.Gold) throw IllegalArgumentException("'$item' needs an amount") else 1
+                if (wanted < 1 || wanted > offer.amount) throw IllegalArgumentException("$side can offer at most ${offer.amount} of '$item', not $wanted")
+                copy.amount = wanted
+                into.add(copy)
+            }
+        }
+        add(json.get("give"), logic.ourAvailableOffers, trade.ourOffers, "We")
+        add(json.get("want"), logic.theirAvailableOffers, trade.theirOffers, other.civName)
+        if (trade.ourOffers.isEmpty() && trade.theirOffers.isEmpty()) throw IllegalArgumentException("An empty trade")
+        if (!TradeEvaluation().isTradeValid(trade, civ, other)) throw IllegalArgumentException("That trade is not valid right now")
+        // A TradeRequest holds the trade as the receiver sees it, so it goes out reversed
+        val acceptable = TradeEvaluation().isTradeAcceptable(trade.reverse(), other, civ)
+        other.tradeRequests.add(TradeRequest(civ.civID, trade.reverse()))
+        val summary = trade.brief()
+        pending += Triple(civ.civName, other.civName, summary)
+        log(civ, "We proposed a trade to ${other.civName}: $summary.")
+        val balance = TradeEvaluation().getTradeAcceptability(trade.reverse(), other, civ, true)
+        return "Proposed to ${other.civName}: $summary. They answer on their turn; by their own reckoning this deal is worth $balance to them (they accept at 0 or more), so they are ${if (acceptable) "likely to accept" else "likely to refuse - sweeten it or ask for less"}."
+    }
+
+    fun proposePeace(civ: Civilization, name: String): String {
+        val other = civ.known(name)
+        if (!civ.isAtWarWith(other)) throw IllegalArgumentException("We are not at war with $name")
+        val diplomacy = civ.getDiplomacyManager(other)!!
+        if (diplomacy.hasFlag(DiplomacyFlags.DeclaredWar)) throw IllegalArgumentException("Too soon: ${diplomacy.getFlag(DiplomacyFlags.DeclaredWar)} more turns of war before peace can be discussed")
+        if (diplomacy.hasFlag(DiplomacyFlags.DeclinedPeace)) throw IllegalArgumentException("$name declined peace recently; wait ${diplomacy.getFlag(DiplomacyFlags.DeclinedPeace)} turns")
+        val trade = Trade()
+        val treaty = TradeOffer(Constants.peaceTreaty, TradeOfferType.Treaty, speed = civ.gameInfo.speed)
+        trade.ourOffers.add(treaty)
+        trade.theirOffers.add(treaty)
+        val acceptable = TradeEvaluation().isTradeAcceptable(trade.reverse(), other, civ)
+        other.tradeRequests.add(TradeRequest(civ.civID, trade.reverse()))
+        pending += Triple(civ.civName, other.civName, "peace")
+        log(civ, "We proposed peace to ${other.civName}.")
+        return "Peace proposed to $name; they answer on their turn and seem ${if (acceptable) "willing" else "unwilling"}."
+    }
+
+    fun proposeFriendship(civ: Civilization, name: String): String {
+        val other = civ.known(name)
+        if (!civ.diplomacyFunctions.canSignDeclarationOfFriendshipWith(other)) throw IllegalArgumentException("A declaration of friendship with $name is not possible now (at war, already friends, or recently declined)")
+        if (other.popupAlerts.any { it.type == AlertType.DeclarationOfFriendship && it.value == civ.civID }) throw IllegalArgumentException("Already proposed; $name answers on their turn")
+        other.popupAlerts.add(PopupAlert(AlertType.DeclarationOfFriendship, civ.civID))
+        log(civ, "We proposed a declaration of friendship to ${other.civName}.")
+        return "Friendship proposed to $name; they answer on their turn."
+    }
+
+    fun giftGold(civ: Civilization, name: String, gold: Int): String {
+        val other = civ.known(name)
+        if (!other.isCityState) throw IllegalArgumentException("$name is not a city-state; trade with them instead")
+        if (gold <= 0) throw IllegalArgumentException("Gift must be positive")
+        if (civ.gold < gold) throw IllegalArgumentException("Treasury has only ${civ.gold} gold")
+        val influence = other.cityStateFunctions.influenceGainedByGift(civ, gold)
+        other.cityStateFunctions.receiveGoldGift(civ, gold)
+        val now = other.getDiplomacyManager(civ)!!.getInfluence().toInt()
+        log(civ, "We gave $gold gold to ${other.civName} (+$influence influence, now $now).")
+        return "Gave $gold gold to $name: +$influence influence, now $now" + (other.allyCiv?.let { ally -> "; their ally is ${ally.civName}" } ?: "")
+    }
+
+    /** Standing relations for the briefing */
+    fun relations(civ: Civilization): List<Map<String, Any?>> =
+        civ.getKnownCivs().filter { !it.isBarbarian && !it.isSpectator() && it.isAlive() }.map { other ->
+            val ours = civ.getDiplomacyManager(other)!!
+            val theirs = other.getDiplomacyManager(civ)
+            val entry = linkedMapOf<String, Any?>(
+                "civ" to other.civName,
+                "status" to ours.diplomaticStatus.name,
+                "theirAttitude" to theirs?.relationshipLevel()?.name,
+            )
+            if (other.isCityState) {
+                entry["cityState"] = other.cityStateType.name
+                entry["influence"] = theirs?.getInfluence()?.toInt()
+                entry["ally"] = other.allyCiv?.civName
+                entry["protectedByUs"] = ours.diplomaticStatus == DiplomaticStatus.Protector
+            } else {
+                entry["cities"] = other.cities.size
+                entry["score"] = other.calculateTotalScore().toInt()
+                entry["militaryStrength"] = other.getStatForRanking(com.unciv.ui.screens.victoryscreen.RankingType.Force)
+                entry["techs"] = other.tech.techsResearched.size
+                entry["friendship"] = ours.hasFlag(DiplomacyFlags.DeclarationOfFriendship)
+                entry["openBordersForUs"] = theirs?.hasOpenBorders ?: false
+                entry["theirGrievances"] = theirs?.diplomaticModifiers?.filter { it.value < 0 }?.keys?.toList()
+                entry["atWarWith"] = other.getKnownCivs().filter { it.isMajorCiv() && other.isAtWarWith(it) }.map { it.civName }.toList()
+                entry["dealsInForce"] = ours.trades.map { it.brief() }
+                val ourLuxuries = luxuries(civ); val theirLuxuries = luxuries(other)
+                entry["luxuriesTheyLack"] = (ourLuxuries.keys - theirLuxuries.keys).toList()
+                entry["luxuriesWeLack"] = (theirLuxuries.keys - ourLuxuries.keys).toList()
+            }
+            entry
+        }.toList()
+
+    /** Every deal in force, as "Civ: terms" - compared turn to turn so the log can say exactly what began and ended */
+    fun dealsInForce(civ: Civilization): Set<String> =
+        civ.diplomacy.values.flatMap { manager -> manager.trades.map { "${manager.otherCivName}: ${it.brief().replace(Regex(" for \\d+ turns"), "")}" } }.toSet() // durations tick down, the deal is the same
+
+    private fun luxuries(civ: Civilization) = civ.getCivResourcesByName()
+        .filter { it.value > 0 && civ.gameInfo.ruleset.tileResources[it.key]?.resourceType?.name == "Luxury" }
+
+    /** What could be traded with each major civ, for the options */
+    fun tradeOptions(civ: Civilization): Map<String, Any?> {
+        val resources = civ.getCivResourcesByName()
+        return mapOf(
+            "ourLuxuries" to luxuries(civ),
+            "ourSpareLuxuries" to resources.filter { it.value > 1 && civ.gameInfo.ruleset.tileResources[it.key]?.resourceType?.name == "Luxury" }.keys.toList(),
+            "ourGold" to civ.gold,
+            "with" to civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() && !civ.isAtWarWith(it) }.map { other ->
+                val logic = TradeLogic(civ, other)
+                mapOf("civ" to other.civName,
+                    "weCanOffer" to logic.ourAvailableOffers.filter { it.type !in hiddenOffers && it.amount > 0 }.map { it.name + if (it.amount > 1) " x${it.amount}" else "" },
+                    "theyCanOffer" to logic.theirAvailableOffers.filter { it.type !in hiddenOffers && it.amount > 0 }.map { it.name + if (it.amount > 1) " x${it.amount}" else "" })
+            }.toList(),
+            "cityStates" to civ.getKnownCivs().filter { it.isCityState && it.isAlive() }.map { state ->
+                mapOf("civ" to state.civName, "type" to state.cityStateType.name,
+                    "influence" to state.getDiplomacyManager(civ)?.getInfluence()?.toInt(),
+                    "influenceFor250Gold" to state.cityStateFunctions.influenceGainedByGift(civ, 250))
+            }.toList(),
+            "note" to "Offers: luxury/strategic resource names, 'Gold' (amount), 'Gold per turn' (amount), 'Open Borders', 'Research Agreement', 'Defensive Pact', 'Embassy'. Friendship, peace and trades are answered by the other civ on its turn - watch the log."
+        )
+    }
+}

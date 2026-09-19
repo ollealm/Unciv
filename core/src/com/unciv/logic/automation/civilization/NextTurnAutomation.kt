@@ -2,6 +2,7 @@ package com.unciv.logic.automation.civilization
 
 import com.unciv.UncivGame
 import com.unciv.logic.automation.Automation
+import com.unciv.logic.automation.RulerOverrides
 import com.unciv.logic.automation.ThreatLevel
 import com.unciv.logic.automation.Timers.Companion.timeThis
 import com.unciv.logic.automation.unit.CivilianUnitAutomation
@@ -415,7 +416,10 @@ object NextTurnAutomation {
         for (unit in sortedUnits) {
             // settlers need to move before automateSettlerEscorting(),
             // move spaceship parts before that to make sure we're not blocking them
-            if (unit.hasUnique(UniqueType.SpaceshipPart) || unit.hasUnique(UniqueType.FoundCity)) UnitAutomation.automateUnitMoves(unit)
+            if (unit.hasUnique(UniqueType.SpaceshipPart) || unit.hasUnique(UniqueType.FoundCity)) {
+                if (RulerOverrides.unitHandler?.invoke(unit) == true) continue // the ruler gave this unit its own orders
+                UnitAutomation.automateUnitMoves(unit)
+            }
         }
 
         if (civInfo.cities.isNotEmpty()) automateSettlerEscorting(civInfo)
@@ -424,7 +428,10 @@ object NextTurnAutomation {
 
         for (unit in sortedUnits) {
             // spaceship parts and settlers have already moved
-            if (!unit.hasUnique(UniqueType.SpaceshipPart) && !unit.hasUnique(UniqueType.FoundCity)) UnitAutomation.automateUnitMoves(unit)
+            if (!unit.hasUnique(UniqueType.SpaceshipPart) && !unit.hasUnique(UniqueType.FoundCity)) {
+                if (RulerOverrides.unitHandler?.invoke(unit) == true) continue
+                UnitAutomation.automateUnitMoves(unit)
+            }
         }
     }
 

@@ -4,6 +4,7 @@ import com.unciv.Constants
 import com.unciv.UncivGame
 import com.unciv.json.LastSeenImprovement
 import com.unciv.logic.*
+import com.unciv.logic.automation.RulerOverrides
 import com.unciv.logic.automation.unit.WorkerAutomation
 import com.unciv.logic.city.City
 import com.unciv.logic.city.managers.CityFounder
@@ -469,6 +470,7 @@ class Civilization : IsPartOfGameInfoSerialization {
 
     @Readonly
     fun getPersonality(): Personality {
+        RulerOverrides.personalities[civID]?.let { return it }
         return if (isAIOrAutoPlaying()) gameInfo.ruleset.personalities[nation.personality] ?: Personality.neutralPersonality
         else Personality.neutralPersonality
     }
@@ -1159,7 +1161,8 @@ class Civilization : IsPartOfGameInfoSerialization {
      *  @param notificationIcons Zero or more icons to decorate the notification with - see [NotificationIcon]
      */
     fun addNotification(text: String, actions: Iterable<NotificationAction>?, category: NotificationCategory, vararg notificationIcons: String) {
-        if (playerType == PlayerType.AI) return // no point in lengthening the saved game info if no one will read it
+        // no point in lengthening the saved game info if no one will read it - but a ruled civ's advisor does
+        if (playerType == PlayerType.AI && civID !in RulerOverrides.ruledCivs) return
         notifications.add(Notification(text, notificationIcons, actions, category))
     }
     // endregion
