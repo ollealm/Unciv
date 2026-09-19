@@ -91,12 +91,41 @@ object MapRenderer {
         fun line(g: Graphics2D, segment: Pair<Pair<Float, Float>, Pair<Float, Float>>) =
             g.drawLine(segment.first.first.toInt(), segment.first.second.toInt(), segment.second.first.toInt(), segment.second.second.toInt())
 
+        var landMaskForBorders: BufferedImage? = null
         if (drawTerrain) {
-        // Terrain
-        for (tile in known) {
-            // For a repaint, all water is one flat colour: per-tile shades would be copied as a hex pattern
-            g.color = if (style == "reference" && tile.isWater) terrainColors["Coast"]!! else terrainColors[tile.baseTerrain] ?: Color(180, 170, 150)
-            g.fillPolygon(hexagon(tile, RADIUS))
+        // Terrain without cells: land and water are painted as two soft layers, and a blurred land mask decides
+        // per pixel which one shows - so coasts come out as natural curves instead of hexagon edges
+        fun layer(background: Color, paint: (Tile) -> Color?): BufferedImage {
+            val img = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+            val lg = img.createGraphics()
+            lg.color = background; lg.fillRect(0, 0, width, height)
+            for (tile in known) { lg.color = paint(tile) ?: continue; lg.fillPolygon(hexagon(tile, RADIUS + 1.5f)) }
+            lg.dispose()
+            return img
+        }
+        val meanLand = Color(196, 188, 140); val shallows = terrainColors["Coast"]!!
+        val landLayer = blur(layer(meanLand) { if (it.isWater) meanLand else terrainColors[it.baseTerrain] ?: meanLand }, (HEX * 0.45f).toInt())
+        val waterLayer = blur(layer(shallows) { if (it.isWater && style != "reference") terrainColors[it.baseTerrain] ?: shallows else shallows }, (HEX * 0.7f).toInt())
+        val knownMask = blur(layer(Color.BLACK) { Color.WHITE }, (HEX * 0.5f).toInt())
+        val landMask = blur(layer(Color.BLACK) { if (it.isWater) null else Color.WHITE }, (HEX * 0.5f).toInt())
+        landMaskForBorders = landMask
+        val wobble = java.util.Random(11)
+        val coarse = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+        for (y in 0 until height step 6) for (x in 0 until width step 6) {
+            val v = wobble.nextInt(256); val c = Color(v, v, v).rgb
+            for (dy in 0 until 6) for (dx in 0 until 6) if (x + dx < width && y + dy < height) coarse.setRGB(x + dx, y + dy, c)
+        }
+        val noise = blur(coarse, 7)
+        for (y in 0 until height) for (x in 0 until width) {
+            val jitter = ((noise.getRGB(x, y) and 0xff) - 128) / 4 // breaks up the last straight runs of shore
+            if ((knownMask.getRGB(x, y) and 0xff) + jitter < 128) continue // unknown stays parchment
+            val land = (landMask.getRGB(x, y) and 0xff) + jitter
+            image.setRGB(x, y, when {
+                land in 120..134 -> ink.rgb                     // the shoreline
+                land > 134 -> landLayer.getRGB(x, y)
+                land > 60 -> lighter(waterLayer.getRGB(x, y))  // pale shallows hugging the coast
+                else -> waterLayer.getRGB(x, y)
+            })
         }
         // Features as small ink glyphs
         for (tile in known) {
@@ -126,16 +155,6 @@ object MapRenderer {
                 g.fillOval((x + RADIUS * 0.45f - 2.5f).toInt(), (y - RADIUS * 0.45f - 2.5f).toInt(), 5, 5)
             }
         }
-        // Coastlines: ink where land meets water, and where the known world ends
-        g.color = ink
-        g.stroke = BasicStroke(1.6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
-        for (tile in known) {
-            if (tile.isWater) continue
-            for (neighbor in tile.neighbors) if (neighbor in points && neighbor.isExplored(civ) && neighbor.isWater) line(g, edge(tile, neighbor))
-        }
-        g.color = Color(120, 100, 70, 110)
-        g.stroke = BasicStroke(1f)
-        for (tile in known) for (neighbor in tile.neighbors) if (neighbor in points && !neighbor.isExplored(civ)) line(g, edge(tile, neighbor))
         // Rivers run along hex edges, on the lower side of a tile
         g.color = Color(70, 120, 170)
         g.stroke = BasicStroke(2.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
@@ -153,24 +172,27 @@ object MapRenderer {
             g.dispose()
             return ByteArrayOutputStream().also { ImageIO.write(image, "png", it) }.toByteArray()
         }
-        // Territory: a faint wash and a dashed border in the nation's colour
-        if (base == null) for (tile in known) {
-            val owner = tile.getOwner() ?: continue
+        // Territory: a soft wash and outline per realm, from a blurred mask so borders flow instead of zigzagging
+        if (base == null) for (owner in known.mapNotNull { it.getOwner() }.distinct()) {
+            val mask = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+            val mg = mask.createGraphics(); mg.color = Color.WHITE
+            for (tile in known) if (tile.getOwner() == owner) mg.fillPolygon(hexagon(tile, RADIUS + 1.5f))
+            mg.dispose()
+            val soft = blur(mask, (HEX * 0.5f).toInt())
             val c = owner.nation.getOuterColor()
-            g.color = Color(c.r, c.g, c.b, 0.16f)
-            g.fillPolygon(hexagon(tile, RADIUS))
+            val tint = Color(c.r, c.g, c.b)
+            for (y in 0 until height) for (x in 0 until width) {
+                val inside = soft.getRGB(x, y) and 0xff
+                if (inside < 118) continue
+                val under = Color(image.getRGB(x, y))
+                val onLand = landMaskForBorders?.let { (it.getRGB(x, y) and 0xff) > 134 } ?: true
+                // a thin firm line at the edge; within, a light wash on land and barely a breath of it at sea
+                val weight = if (inside < 127) 0.7f else if (onLand) 0.16f else 0.05f
+                image.setRGB(x, y, Color(
+                    (under.red + (tint.red - under.red) * weight).toInt(), (under.green + (tint.green - under.green) * weight).toInt(),
+                    (under.blue + (tint.blue - under.blue) * weight).toInt()).rgb)
+            }
         }
-        g.stroke = BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 1f, floatArrayOf(5f, 4f), 0f)
-        for (tile in known) {
-            val owner = tile.getOwner() ?: continue
-            val c = owner.nation.getOuterColor()
-            g.color = Color(c.r, c.g, c.b, 0.85f)
-            for (neighbor in tile.neighbors) if (neighbor in points && neighbor.getOwner() != owner) line(g, edge(tile, neighbor))
-        }
-        // The fog of memory: known but out of sight fades towards parchment
-        g.color = Color(parchment.red, parchment.green, parchment.blue, 70)
-        if (base == null) for (tile in known) if (tile !in visible) g.fillPolygon(hexagon(tile, RADIUS))
-
         // Units in sight, as small map markers
         for (tile in visible) {
             if (tile !in points) continue
@@ -201,7 +223,7 @@ object MapRenderer {
             g.drawOval(x - size / 2, y - size / 2, size, size)
             if (city.isCapital()) { g.color = parchment; g.fillOval(x - 3, y - 3, 6, 6) }
             g.font = Font(Font.SERIF, if (city.civ == civ) Font.BOLD else Font.PLAIN, if (city.isCapital()) 14 else 12)
-            val label = if (city.civ == civ || city.civ.isCityState) city.name else "${city.name} · ${city.civ.civName}"
+            val label = city.name // whose it is shows in the colour of its mark and its border
             val textWidth = g.fontMetrics.stringWidth(label)
             g.color = Color(parchment.red, parchment.green, parchment.blue, 200)
             g.fillRoundRect(x - textWidth / 2 - 3, y + size / 2 + 1, textWidth + 6, 15, 6, 6)
@@ -219,11 +241,28 @@ object MapRenderer {
         g.drawRoundRect(10, 10, g.fontMetrics.stringWidth(title) + 20, 30, 8, 8)
         g.drawString(title, 20, 31)
         g.font = Font(Font.SERIF, Font.ITALIC, 11)
-        if (base == null) g.drawString("Shields are soldiers, discs civilians, in their nation's colour. Faded land is remembered, not seen.", 12, height - 10)
+
         g.dispose()
 
         val bytes = ByteArrayOutputStream()
         ImageIO.write(image, "png", bytes)
         return bytes.toByteArray()
+    }
+
+    /** Three box blurs, separable: close to a gaussian and fast */
+    private fun blur(source: BufferedImage, radius: Int): BufferedImage {
+        if (radius < 1) return source
+        val size = radius * 2 + 1
+        val weights = FloatArray(size) { 1f / size }
+        val horizontal = java.awt.image.ConvolveOp(java.awt.image.Kernel(size, 1, weights), java.awt.image.ConvolveOp.EDGE_NO_OP, null)
+        val vertical = java.awt.image.ConvolveOp(java.awt.image.Kernel(1, size, weights), java.awt.image.ConvolveOp.EDGE_NO_OP, null)
+        var result = source
+        repeat(3) { result = vertical.filter(horizontal.filter(result, null), null) }
+        return result
+    }
+
+    private fun lighter(rgb: Int): Int {
+        val c = Color(rgb)
+        return Color((c.red + 16).coerceAtMost(255), (c.green + 16).coerceAtMost(255), (c.blue + 12).coerceAtMost(255)).rgb
     }
 }
