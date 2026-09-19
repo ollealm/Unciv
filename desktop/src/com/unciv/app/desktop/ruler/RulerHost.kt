@@ -286,9 +286,17 @@ object RulerHost {
 
         val done = ArrayList<String>()
         val failed = ArrayList<String>()
+        /** Each item stands alone: a bad one is reported under "failed" and the rest still go through */
+        fun tryEach(list: JsonValue?, action: (JsonValue) -> String) {
+            list?.forEach { entry ->
+                try { done += action(entry) }
+                catch (ex: IllegalArgumentException) { failed += ex.message ?: "failed" }
+                catch (ex: ApiError) { failed += ex.message ?: "failed" }
+            }
+        }
 
         // Replace a city's whole build queue; the officials then leave it alone until it runs out
-        json.get("queue")?.forEach { order ->
+        tryEach(json.get("queue")) { order ->
             val city = civ.city(order.getString("city"))
             val items = order.get("items").asStringArray().toList()
             val constructions = items.map { civ.construction(it) }
@@ -299,10 +307,10 @@ object RulerHost {
             city.cityConstructions.constructionQueue.clear()
             for (construction in constructions) city.cityConstructions.addToQueue(construction)
             city.cityConstructions.currentConstructionIsUserSet = true
-            done += "${city.name} queue is now: ${city.cityConstructions.constructionQueue.joinToString()}"
+            "${city.name} queue is now: ${city.cityConstructions.constructionQueue.joinToString()}"
         }
         // Put something at the front of a city's build queue
-        json.get("build")?.forEach { order ->
+        tryEach(json.get("build")) { order ->
             val city = civ.city(order.getString("city"))
             val item = order.getString("item")
             val construction = civ.construction(item)
@@ -311,7 +319,7 @@ object RulerHost {
             city.cityConstructions.constructionQueue.remove(item)
             city.cityConstructions.addToQueue(construction, addToTop = true)
             city.cityConstructions.currentConstructionIsUserSet = true
-            done += "${city.name} queue is now: ${city.cityConstructions.constructionQueue.joinToString()}"
+            "${city.name} queue is now: ${city.cityConstructions.constructionQueue.joinToString()}"
         }
         // Buy outright with gold
         json.get("purchase")?.forEach { order ->
@@ -333,19 +341,15 @@ object RulerHost {
                 log(civ, "Bought $item in ${city.name} for $cost gold.")
             } else failed += "Could not buy $item in ${city.name}: no room to place it"
         }
-        // Unit orders, diplomacy - each reports its own success or failure
-        fun tryEach(list: JsonValue?, action: (JsonValue) -> String) {
-            list?.forEach { entry ->
-                try { done += action(entry) } catch (ex: IllegalArgumentException) { failed += ex.message ?: "failed" }
-            }
-        }
+        // Unit orders, diplomacy
         tryEach(json.get("units")) { units.give(civ, it) }
         tryEach(json.get("trade")) { diplomacy.proposeTrade(civ, it) }
         tryEach(json.get("peace")) { diplomacy.proposePeace(civ, it.asString()) }
         tryEach(json.get("friendship")) { diplomacy.proposeFriendship(civ, it.asString()) }
         tryEach(json.get("gift")) { diplomacy.giftGold(civ, it.getString("cityState"), it.getInt("gold")) }
         // Declare war
-        json.get("declareWar")?.asStringArray()?.forEach { targetName ->
+        tryEach(json.get("declareWar")) { entry ->
+            val targetName = entry.asString()
             val target = civ.getKnownCivs().firstOrNull { it.civName == targetName } ?: throw ApiError(400, "We have not met $targetName")
             val diplomacy = civ.getDiplomacyManager(target)!!
             if (diplomacy.diplomaticStatus == DiplomaticStatus.War) throw ApiError(400, "Already at war with $targetName")
@@ -353,21 +357,21 @@ object RulerHost {
             diplomacy.declareWar()
             addPublicEvent("${civ.civName} has declared war on $targetName!")
             log(civ, "We declared war on $targetName.")
-            done += "Declared war on $targetName"
+            "Declared war on $targetName"
         }
-        applyStandingOrders(civ)
-        save()
         if (alreadyKnown.isNotEmpty()) failed += "Already known, dropped from the research goals: ${alreadyKnown.joinToString()}"
         standing.research.removeAll { civ.tech.isResearched(it) }
         // City focus: which yields the citizens work for
-        json.get("cityFocus")?.forEach { order ->
+        tryEach(json.get("cityFocus")) { order ->
             val city = civ.city(order.getString("city"))
             val focus = com.unciv.logic.city.CityFocus.entries.firstOrNull { it.name.equals(order.getString("focus"), ignoreCase = true) || it.name.equals(order.getString("focus") + "Focus", ignoreCase = true) }
                 ?: throw ApiError(400, "Unknown focus; use ${com.unciv.logic.city.CityFocus.entries.joinToString { it.name }}")
             city.setCityFocus(focus)
             city.reassignAllPopulation()
-            done += "${city.name} now works its tiles for ${focus.name}"
+            "${city.name} now works its tiles for ${focus.name}"
         }
+        applyStandingOrders(civ)
+        save()
         return mapOf("orders" to standing.toMap(civ), "done" to done, "failed" to failed,
             "researchQueue" to civ.tech.techsToResearch, "gold" to civ.gold)
     }
@@ -447,16 +451,16 @@ object RulerHost {
         for (city in civ.cities) if (city.name !in before.queues) log(civ, "Founded ${city.name}.")
         val alive = civ.units.getCivUnits().map { it.id }.toSet()
         for ((id, unit) in before.units) if (id !in alive && unit.first != "Settler") // settlers vanish by founding
-            log(civ, if (unit.first.startsWith("Great ")) "Our ${unit.first} is gone ${describeWhere(civ, unit.second)} - spent on its ability, or captured."
-                else "Our ${unit.first} was lost ${describeWhere(civ, unit.second)}.")
+        {
+            val fell = (notifications.map { it.text } + civ.notifications.map { it.text })
+                .any { unit.first in it && (("destroyed" in it) || ("captured" in it) || ("was killed" in it)) }
+            log(civ, if (fell) "Our ${unit.first} was lost in action ${describeWhere(civ, unit.second)}."
+                else "Our ${unit.first} ${describeWhere(civ, unit.second)} is no longer in service.")
+        }
         applyStandingOrders(civ) // a finished goal leaves the queue empty until the next goal's path is set - not idleness
         val researching = civ.tech.currentTechnologyName()
         if (researching == null) {
-            val cheapest = civ.gameInfo.ruleset.technologies.values.filter { civ.tech.canBeResearched(it.name) }.minByOrNull { it.cost }
-            if (cheapest != null) {
-                civ.tech.techsToResearch.add(cheapest.name)
-                log(civ, "Research had run out of goals, so the officials started ${cheapest.name}. Give new research goals.")
-            }
+            if (before.researching != null) log(civ, "No research goal remains; the officials choose the next technology themselves until goals are given.")
         } else if (before.researching != researching && researching !in (orders[civ.civName]?.research ?: emptyList()))
             log(civ, "Research is now on $researching.")
         // Deals: say exactly what came into force and what ended

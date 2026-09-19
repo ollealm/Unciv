@@ -48,6 +48,19 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             orders.remove(unit.id)
             return true
         }
+        if (target != null && unit.getTile() != target && order.action == "garrison"
+            && target.militaryUnit?.civ == civ && unit.movement.canUnitSwapTo(target)) {
+            val relieved = target.militaryUnit!!
+            unit.movement.swapMoveToTile(target)
+            orders.remove(relieved.id)
+            log(civ, "Our ${unit.name} relieved the ${relieved.name} as garrison of ${target.getCity()?.name}.")
+        }
+        if (target != null && unit.getTile() != target && order.action == "garrison" && target.militaryUnit?.civ == civ
+            && !unit.movement.canReach(target)) {
+            // The city is held by one of ours: walk up beside it, the swap happens once we are adjacent
+            val beside = target.neighbors.filter { unit.movement.canReach(it) }.minByOrNull { it.aerialDistanceTo(unit.getTile()) }
+            if (beside != null) { if (beside != unit.getTile()) unit.movement.headTowards(beside); return true }
+        }
         if (target != null && unit.getTile() != target) {
             if (!unit.movement.canReach(target)) {
                 log(civ, "Our ${unit.name} cannot reach ${where(civ, target)}; the order is dropped and the officials take it back.")
@@ -123,10 +136,11 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         if (action == "settle") settleProblem(civ, target)?.let { throw IllegalArgumentException("Cannot found a city at ${where(civ, target)}: $it" + nearestSiteHint(civ, unit, target)) }
         if (action == "garrison" && !target.isCityCenter()) throw IllegalArgumentException("garrison needs a city")
         if (action == "garrison" && unit.isCivilian()) throw IllegalArgumentException("Only soldiers can garrison")
-        if (action == "garrison") target.militaryUnit?.takeIf { it != unit }?.let { holder ->
-            throw IllegalArgumentException("${target.getCity()!!.name} is already held by ${holder.name} #${holder.id}; release or move that unit first, or station this one beside the city with fortify")
+        if (action == "garrison") target.militaryUnit?.takeIf { it != unit && it.civ != civ }?.let { holder ->
+            throw IllegalArgumentException("${target.getCity()!!.name} is held by ${holder.civ.civName}'s ${holder.name}")
         }
-        if (target != unit.getTile() && !unit.movement.canReach(target)) throw IllegalArgumentException("${unit.name} cannot reach ${where(civ, target)} (water, mountains or foreign borders in the way)")
+        val willSwap = action == "garrison" && target.militaryUnit?.civ == civ
+        if (target != unit.getTile() && !willSwap && !unit.movement.canReach(target)) throw IllegalArgumentException("${unit.name} cannot reach ${where(civ, target)} (water, mountains or foreign borders in the way)")
         orders[unitId] = Order(action, x, y)
         val turns = if (target == unit.getTile()) 0 else kotlin.math.ceil(unit.movement.getShortestPath(target).size / unit.getMaxMovement().coerceAtLeast(1).toFloat()).toInt()
         return "${unit.name} #$unitId will $action at ${where(civ, target)}" + (if (turns > 0) ", about $turns turns away" else "")
