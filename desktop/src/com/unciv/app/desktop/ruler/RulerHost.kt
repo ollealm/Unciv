@@ -594,7 +594,7 @@ object RulerHost {
 
     /** Something a ruler must hear about right away, ending the round early */
     private fun councilEvent(ruled: String, roundStart: WorldSnapshot, now: WorldSnapshot): String? {
-        if (ruled !in now.alive) return "$ruled has been destroyed"
+        if (ruled !in now.alive) return if (ruled in roundStart.alive) "$ruled has been destroyed" else null // a realm falls only once
         val newEnemies = (now.wars - roundStart.wars).filter { ruled in it }.flatten().filter { it != ruled }
             .filter { enemy -> game().civilizations.first { it.civName == enemy }.isMajorCiv() }
         if (newEnemies.isNotEmpty()) return "$ruled is now at war with ${newEnemies.joinToString()}"
