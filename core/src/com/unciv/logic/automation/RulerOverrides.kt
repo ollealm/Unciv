@@ -15,6 +15,9 @@ object RulerOverrides {
     /** civIDs of AI civs that have a ruler - these keep their notifications, as the advisor reports from them */
     val ruledCivs: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
+    /** ids of cities whose build queue was set by the ruler - the automation must not overwrite its front item */
+    val lockedCities: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     /**
      *  Asked before the automation moves each unit of a ruled civ. Returning true means the ruler's own order
      *  handled this unit this turn and the automation must leave it alone.

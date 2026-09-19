@@ -176,6 +176,7 @@ object RulerHost {
         publicEvents.clear()
         chancery.clear()
         units.orders.clear()
+        RulerOverrides.lockedCities.clear()
         for (name in ruled) orders[name] = StandingOrders()
         registerRuledCivs()
         save()
@@ -203,7 +204,8 @@ object RulerHost {
             "orders" to orders.mapValues { it.value.toMap() },
             "publicEvents" to publicEvents,
             "chancery" to chancery,
-            "unitOrders" to units.toMap()
+            "unitOrders" to units.toMap(),
+            "lockedCities" to RulerOverrides.lockedCities.toList()
         )))
     }
 
@@ -222,6 +224,8 @@ object RulerHost {
             chancery[civLog.name] = ArrayList(civLog.map { mapOf("turn" to it.getInt("turn"), "text" to it.getString("text")) })
         }
         units.load(host.get("unitOrders"))
+        RulerOverrides.lockedCities.clear()
+        host.get("lockedCities")?.asStringArray()?.let { RulerOverrides.lockedCities += it }
         registerRuledCivs()
         println("Loaded game at turn ${loaded.turns}, ruled: ${orders.keys}")
     }
@@ -307,6 +311,7 @@ object RulerHost {
             city.cityConstructions.constructionQueue.clear()
             for (construction in constructions) city.cityConstructions.addToQueue(construction)
             city.cityConstructions.currentConstructionIsUserSet = true
+            RulerOverrides.lockedCities += city.id
             "${city.name} queue is now: ${city.cityConstructions.constructionQueue.joinToString()}"
         }
         // Put something at the front of a city's build queue
@@ -319,10 +324,11 @@ object RulerHost {
             city.cityConstructions.constructionQueue.remove(item)
             city.cityConstructions.addToQueue(construction, addToTop = true)
             city.cityConstructions.currentConstructionIsUserSet = true
+            RulerOverrides.lockedCities += city.id
             "${city.name} queue is now: ${city.cityConstructions.constructionQueue.joinToString()}"
         }
         // Buy outright with gold
-        json.get("purchase")?.forEach { order ->
+        tryEach(json.get("purchase")) { order ->
             val city = civ.city(order.getString("city"))
             val item = order.getString("item")
             val construction = civ.construction(item)
@@ -334,12 +340,10 @@ object RulerHost {
                 civ.gold < cost -> "$item costs $cost gold, treasury has ${civ.gold}"
                 else -> null
             }
-            if (problem != null) {
-                failed += "Could not buy $item in ${city.name}: $problem"
-            } else if (city.cityConstructions.purchaseConstruction(construction, -1, false)) {
-                done += "Bought $item in ${city.name} for $cost gold (${civ.gold} left)"
-                log(civ, "Bought $item in ${city.name} for $cost gold.")
-            } else failed += "Could not buy $item in ${city.name}: no room to place it"
+            if (problem != null) throw ApiError(400, "Could not buy $item in ${city.name}: $problem")
+            if (!city.cityConstructions.purchaseConstruction(construction, -1, false)) throw ApiError(400, "Could not buy $item in ${city.name}: no room to place it")
+            log(civ, "Bought $item in ${city.name} for $cost gold.")
+            "Bought $item in ${city.name} for $cost gold (${civ.gold} left)"
         }
         // Unit orders, diplomacy
         tryEach(json.get("units")) { units.give(civ, it) }
@@ -435,6 +439,9 @@ object RulerHost {
             if (noise.any { it in notification.text }) continue
             log(civ, notification.text.replace("[", "").replace("]", ""))
         }
+        // A ruler's queue binds until it has run out
+        for (city in civ.cities) if (city.cityConstructions.constructionQueue.isEmpty()
+            || city.cityConstructions.getCurrentConstruction() is com.unciv.models.ruleset.PerpetualConstruction) RulerOverrides.lockedCities -= city.id
         // Then what the officials changed on their own
         for (city in civ.cities) {
             val was = before.queues[city.name] ?: continue

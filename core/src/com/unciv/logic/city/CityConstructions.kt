@@ -72,6 +72,8 @@ class CityConstructions : IsPartOfGameInfoSerialization {
 
     @Readonly fun currentConstructionName() = if (constructionQueue.isEmpty()) "" else constructionQueue.first()
     fun setCurrentConstruction(value: String) {
+        // A queue ordered by the civ's ruler is binding: the automation may only fill it once it has run out
+        if (constructionQueue.isNotEmpty() && city.id in com.unciv.logic.automation.RulerOverrides.lockedCities) return
         if (constructionQueue.isEmpty()) constructionQueue.add(value) else constructionQueue[0] = value
     }
 

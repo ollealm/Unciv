@@ -45,6 +45,12 @@ tasks.register<JavaExec>("rulerHost") {
     workingDir = assetsDir
 }
 
+// Prints the runtime classpath so RulerHost can be started with plain `java` (several instances, no Gradle lock)
+tasks.register("rulerClasspath") {
+    dependsOn(tasks.getByName("classes"))
+    doLast { println("CLASSPATH=" + sourceSets.main.get().runtimeClasspath.asPath) }
+}
+
 tasks.register<JavaExec>("debug") {
     dependsOn(tasks.getByName("classes"))
     mainClass.set(mainClassName)
