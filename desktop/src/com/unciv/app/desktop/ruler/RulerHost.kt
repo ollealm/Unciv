@@ -137,6 +137,8 @@ object RulerHost {
         val since = query["since"]?.toIntOrNull() ?: -1
         return when ("$method $path") {
             "GET /state" -> state()
+            "GET /nations" -> RulesetCache[com.unciv.models.metadata.BaseRuleset.Civ_V_GnK.fullName]!!.nations.values
+                .filter { it.isMajorCiv }.map { mapOf("name" to it.name, "leader" to it.leaderName) }
             "POST /new" -> newGame(json)
             "POST /advance" -> advance(json.getInt("turns", 10))
             "GET /briefing" -> briefing(civ(), query["since"]?.toIntOrNull())
