@@ -102,7 +102,18 @@ object RulerHost {
     private fun handle(exchange: HttpExchange) {
         var status = 200
         val response: Any? = try {
-            val body = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
+            val raw = exchange.requestBody.readBytes()
+            if (exchange.requestURI.path == "/map/overlay") {
+                // body: a repaint of the reference map; answer: the same with borders, units, cities and names on top
+                val civName = java.net.URLDecoder.decode((exchange.requestURI.rawQuery ?: "").substringAfter("civ=").substringBefore("&"), "UTF-8")
+                val base = javax.imageio.ImageIO.read(java.io.ByteArrayInputStream(raw)) ?: throw ApiError(400, "Body is not an image")
+                val png = MapRenderer.render(ruledCiv(civName), "overlay", base)
+                exchange.responseHeaders.add("Content-Type", "image/png")
+                exchange.sendResponseHeaders(200, png.size.toLong())
+                exchange.responseBody.use { it.write(png) }
+                return
+            }
+            val body = raw.toString(Charsets.UTF_8)
             val json = if (body.isBlank()) JsonValue(JsonValue.ValueType.`object`) else JsonReader().parse(body)
             val query = (exchange.requestURI.rawQuery ?: "").split("&").filter { "=" in it }
                 .associate { it.substringBefore("=") to java.net.URLDecoder.decode(it.substringAfter("="), "UTF-8") }
@@ -131,7 +142,7 @@ object RulerHost {
             "GET /briefing" -> briefing(civ(), query["since"]?.toIntOrNull())
             "GET /options" -> options(civ())
             "GET /log" -> chanceryLog(civ(), since)
-            "GET /map.png" -> Png(MapRenderer.render(civ()))
+            "GET /map.png" -> Png(MapRenderer.render(civ(), query["style"] ?: "atlas"))
             "GET /orders" -> civ().let { orders.getOrPut(it.civName) { StandingOrders() }.toMap(it) }
             "POST /orders" -> setOrders(civ(), json)
             "GET /events" -> publicEvents.filter { (it["turn"] as Int) > since }
@@ -483,7 +494,7 @@ object RulerHost {
         val forbidden = orders[civ.civName]?.neverBuild ?: emptyList<String>()
         if (forbidden.isNotEmpty()) for (city in civ.cities) repeat(3) {
             val current = city.cityConstructions.currentConstructionName()
-            if (current in forbidden && !city.cityConstructions.currentConstructionIsUserSet) {
+            if (current in forbidden && city.id !in RulerOverrides.lockedCities) { // the user-set flag outlives the ruler's queue, the lock does not
                 city.cityConstructions.constructionQueue.remove(current)
                 log(civ, "The officials wanted $current in ${city.name}; it is on the never-build list, so it was struck.")
                 if (city.cityConstructions.constructionQueue.isEmpty()) city.cityConstructions.chooseNextConstruction()

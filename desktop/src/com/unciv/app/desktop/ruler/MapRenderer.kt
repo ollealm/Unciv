@@ -32,7 +32,13 @@ object MapRenderer {
         "Tundra" to Color(198, 198, 176), "Snow" to Color(238, 238, 232), "Mountain" to Color(160, 150, 138),
     )
 
-    fun render(civ: Civilization): ByteArray {
+    /**
+     *  atlas: the whole map drawn by us. reference: terrain, coasts and rivers only, for an image model to repaint.
+     *  overlay: borders, units, cities and names drawn on top of [base] (a repaint of the reference, any size).
+     */
+    fun render(civ: Civilization, style: String = "atlas", base: BufferedImage? = null): ByteArray {
+        val drawTerrain = style != "overlay"
+        val drawOverlay = style != "reference"
         val game = civ.gameInfo
         val tiles = game.tileMap.values
         val explored = tiles.filter { it.isExplored(civ) }.ifEmpty { tiles }
@@ -54,10 +60,15 @@ object MapRenderer {
         g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE)
         g.color = parchment
         g.fillRect(0, 0, width, height)
-        // a faint mottle so the parchment is not flat
-        val mottle = java.util.Random(7)
-        g.color = Color(200, 185, 150, 40)
-        repeat(width * height / 900) { val x = mottle.nextInt(width); val y = mottle.nextInt(height); g.fillOval(x, y, 3, 3) }
+        if (base != null) {
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC)
+            g.drawImage(base, 0, 0, width, height, null) // the repaint keeps our layout, so our coordinates still hold
+        } else if (style == "atlas") {
+            // a faint mottle so the parchment is not flat
+            val mottle = java.util.Random(7)
+            g.color = Color(200, 185, 150, 40)
+            repeat(width * height / 900) { val x = mottle.nextInt(width); val y = mottle.nextInt(height); g.fillOval(x, y, 3, 3) }
+        }
 
         val visible = civ.viewableTiles
         val known = points.keys.filter { it.isExplored(civ) }
@@ -80,9 +91,11 @@ object MapRenderer {
         fun line(g: Graphics2D, segment: Pair<Pair<Float, Float>, Pair<Float, Float>>) =
             g.drawLine(segment.first.first.toInt(), segment.first.second.toInt(), segment.second.first.toInt(), segment.second.second.toInt())
 
+        if (drawTerrain) {
         // Terrain
         for (tile in known) {
-            g.color = terrainColors[tile.baseTerrain] ?: Color(180, 170, 150)
+            // For a repaint, all water is one flat colour: per-tile shades would be copied as a hex pattern
+            g.color = if (style == "reference" && tile.isWater) terrainColors["Coast"]!! else terrainColors[tile.baseTerrain] ?: Color(180, 170, 150)
             g.fillPolygon(hexagon(tile, RADIUS))
         }
         // Features as small ink glyphs
@@ -107,7 +120,7 @@ object MapRenderer {
                 g.color = Color(235, 235, 235)
                 g.fillPolygon(Polygon(intArrayOf((x - 3).toInt(), x.toInt(), (x + 3).toInt()), intArrayOf((y - 4).toInt(), (y - 9).toInt(), (y - 4).toInt()), 3))
             }
-            tile.resource?.let { name ->
+            if (drawOverlay) tile.resource?.let { name ->
                 val resource = game.ruleset.tileResources[name] ?: return@let
                 g.color = when (resource.resourceType.name) { "Luxury" -> Color(190, 140, 30); "Strategic" -> Color(150, 50, 40); else -> Color(90, 80, 60, 120) }
                 g.fillOval((x + RADIUS * 0.45f - 2.5f).toInt(), (y - RADIUS * 0.45f - 2.5f).toInt(), 5, 5)
@@ -135,8 +148,13 @@ object MapRenderer {
             )
             for (neighbor in riverEdges) if (neighbor in points) line(g, edge(tile, neighbor))
         }
+        } // drawTerrain
+        if (!drawOverlay) {
+            g.dispose()
+            return ByteArrayOutputStream().also { ImageIO.write(image, "png", it) }.toByteArray()
+        }
         // Territory: a faint wash and a dashed border in the nation's colour
-        for (tile in known) {
+        if (base == null) for (tile in known) {
             val owner = tile.getOwner() ?: continue
             val c = owner.nation.getOuterColor()
             g.color = Color(c.r, c.g, c.b, 0.16f)
@@ -151,7 +169,7 @@ object MapRenderer {
         }
         // The fog of memory: known but out of sight fades towards parchment
         g.color = Color(parchment.red, parchment.green, parchment.blue, 70)
-        for (tile in known) if (tile !in visible) g.fillPolygon(hexagon(tile, RADIUS))
+        if (base == null) for (tile in known) if (tile !in visible) g.fillPolygon(hexagon(tile, RADIUS))
 
         // Units in sight, as small map markers
         for (tile in visible) {
@@ -183,7 +201,7 @@ object MapRenderer {
             g.drawOval(x - size / 2, y - size / 2, size, size)
             if (city.isCapital()) { g.color = parchment; g.fillOval(x - 3, y - 3, 6, 6) }
             g.font = Font(Font.SERIF, if (city.civ == civ) Font.BOLD else Font.PLAIN, if (city.isCapital()) 14 else 12)
-            val label = if (city.civ == civ) city.name else "${city.name} · ${city.civ.civName}"
+            val label = if (city.civ == civ || city.civ.isCityState) city.name else "${city.name} · ${city.civ.civName}"
             val textWidth = g.fontMetrics.stringWidth(label)
             g.color = Color(parchment.red, parchment.green, parchment.blue, 200)
             g.fillRoundRect(x - textWidth / 2 - 3, y + size / 2 + 1, textWidth + 6, 15, 6, 6)
@@ -201,7 +219,7 @@ object MapRenderer {
         g.drawRoundRect(10, 10, g.fontMetrics.stringWidth(title) + 20, 30, 8, 8)
         g.drawString(title, 20, 31)
         g.font = Font(Font.SERIF, Font.ITALIC, 11)
-        g.drawString("Shields are soldiers, discs civilians, in their nation's colour. Faded land is remembered, not seen.", 12, height - 10)
+        if (base == null) g.drawString("Shields are soldiers, discs civilians, in their nation's colour. Faded land is remembered, not seen.", 12, height - 10)
         g.dispose()
 
         val bytes = ByteArrayOutputStream()
