@@ -454,8 +454,14 @@ object RulerHost {
             log(civ, notification.text.replace("[", "").replace("]", ""))
         }
         // A ruler's queue binds until it has run out
-        for (city in civ.cities) if (city.cityConstructions.constructionQueue.isEmpty()
-            || city.cityConstructions.getCurrentConstruction() is com.unciv.models.ruleset.PerpetualConstruction) RulerOverrides.lockedCities -= city.id
+        // (a queue that ran out mid-turn is refilled by the officials at once, so "empty" is not enough of a test:
+        //  a front item the ruler never ordered means the ruler's queue is spent)
+        for (city in civ.cities) {
+            val queue = city.cityConstructions.constructionQueue
+            val ordered = before.queues[city.name] ?: emptyList()
+            if (queue.isEmpty() || city.cityConstructions.getCurrentConstruction() is com.unciv.models.ruleset.PerpetualConstruction
+                || queue.first() !in ordered) RulerOverrides.lockedCities -= city.id
+        }
         // Then what the officials changed on their own
         for (city in civ.cities) {
             val was = before.queues[city.name] ?: continue
