@@ -560,8 +560,10 @@ object RulerHost {
     }
 
     /** Log lines an advisor would want to see at once, not at the next scheduled look-in */
-    private val wakeWorthy = listOf("^Our proposal to", "counteroffer", "dropped .* because", "declared war", "denounced", "lost in action",
-        "awaits orders", "captured", "has been destroyed", "demands", "is stuck|has been stuck").map { Regex(it, RegexOption.IGNORE_CASE) }
+    // Not answers to our own proposals: acting on one sends another, and the advisor would be woken by his own echo every turn.
+    // Not "demands": that is a city asking for a luxury, not a neighbour asking for tribute.
+    private val wakeWorthy = listOf("dropped .* because", "declared war", "denounced", "lost in action",
+        "awaits orders", "captured", "has been destroyed", "has been stuck").map { Regex(it, RegexOption.IGNORE_CASE) }
 
     private fun advance(turns: Int, wakeOnEvents: Boolean = false): Any? {
         val game = game()
