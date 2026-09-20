@@ -297,9 +297,22 @@ object RulerHost {
         standing.goldReserve?.let { RulerOverrides.goldReserve[civ.civID] = it } ?: RulerOverrides.goldReserve.remove(civ.civID)
     }
 
+    /** "Railroad" -> Railroads: the names agents reach for are usually one slip away from the real one */
+    private fun didYouMean(name: String, candidates: Collection<String>): String {
+        fun distance(a: String, b: String): Int {
+            val row = IntArray(b.length + 1) { it }
+            for (i in 1..a.length) { var previous = row[0]; row[0] = i
+                for (j in 1..b.length) { val keep = row[j]; row[j] = minOf(row[j] + 1, row[j - 1] + 1, previous + if (a[i - 1] == b[j - 1]) 0 else 1); previous = keep } }
+            return row[b.length]
+        }
+        val wanted = name.lowercase()
+        val close = candidates.filter { val c = it.lowercase(); c.contains(wanted) || wanted.contains(c) || distance(c, wanted) <= 2 }.take(3)
+        return if (close.isEmpty()) "" else " (did you mean ${close.joinToString(" or ")}?)"
+    }
+
     private fun Civilization.city(name: String): City = cities.firstOrNull { it.name == name } ?: throw ApiError(400, "No city named $name")
     private fun Civilization.construction(name: String): INonPerpetualConstruction =
-        (gameInfo.ruleset.buildings[name] ?: gameInfo.ruleset.units[name]) ?: throw ApiError(400, "Unknown building or unit $name")
+        (gameInfo.ruleset.buildings[name] ?: gameInfo.ruleset.units[name]) ?: throw ApiError(400, "Unknown building or unit $name" + didYouMean(name, gameInfo.ruleset.buildings.keys + gameInfo.ruleset.units.keys))
     private fun whyNot(city: City, construction: INonPerpetualConstruction) =
         construction.getRejectionReasons(city.cityConstructions).filter { it.type.shouldShow }.map { it.errorMessage }.toList()
 
@@ -310,7 +323,7 @@ object RulerHost {
         val rejected = ArrayList<String>()
         json.get("research")?.let { goals ->
             val kept = goals.asStringArray().filter { goal ->
-                if (goal !in ruleset.technologies) rejected += "No technology is called '$goal'" + (if (goal in ruleset.policies) " - that is a policy; put it in policyBranches" else "; see get_options.futureTechs") + ". The other research goals were kept."
+                if (goal !in ruleset.technologies) rejected += "No technology is called '$goal'" + (if (goal in ruleset.policies) " - that is a policy; put it in policyBranches" else didYouMean(goal, ruleset.technologies.keys).ifEmpty { " in this world; get_options.futureTechs lists every technology still ahead of us" }) + ". The other research goals were kept."
                 if (goal in ruleset.technologies && reached(civ, goal)) alreadyKnown += goal
                 goal in ruleset.technologies
             }
@@ -445,13 +458,14 @@ object RulerHost {
         if (standing.garrisonEveryCity) for (city in civ.cities) {
             val centre = city.getCenterTile()
             val position = centre.position
-            if (centre.militaryUnit != null) continue
+            val holder = centre.militaryUnit
+            if (holder != null && !poorDefender(civ, holder)) continue
             if (units.orders.values.any { it.action == "garrison" && it.x == position.x.toInt() && it.y == position.y.toInt() }) continue // someone is on the way
             val soldier = civ.units.getCivUnits()
-                .filter { it.isMilitary() && it.baseUnit.isLandUnit && it.id !in units.orders && !it.getTile().isCityCenter() && it.getTile().getContinent() == centre.getContinent() } // same landmass: a spent unit cannot be asked for a path
+                .filter { it.isMilitary() && it.baseUnit.isLandUnit && it.id !in units.orders && !it.getTile().isCityCenter() && !poorDefender(civ, it) && it.getTile().getContinent() == centre.getContinent() } // same landmass: a spent unit cannot be asked for a path
                 .minByOrNull { it.getTile().aerialDistanceTo(centre) } ?: continue
             units.orders[soldier.id] = RulerUnits.Order("garrison", position.x.toInt(), position.y.toInt())
-            log(civ, "By your standing order: ${city.name} stood empty, so our ${soldier.name} #${soldier.id} marches in to garrison it.")
+            log(civ, "By your standing order: ${city.name} ${if (holder == null) "stood empty" else "was held only by a ${holder.name}"}, so our ${soldier.name} #${soldier.id} marches in to garrison it.")
         }
 
         while (civ.policies.canAdoptPolicy()) {
@@ -554,7 +568,8 @@ object RulerHost {
             val current = city.cityConstructions.getCurrentConstruction() as? INonPerpetualConstruction ?: continue
             if (city.id in RulerOverrides.lockedCities || !isForbidden(civ, current)) continue // the user-set flag outlives the ruler's queue, the lock does not
             city.cityConstructions.constructionQueue.remove(current.name)
-            log(civ, "The officials wanted ${current.name} in ${city.name}; it is on the never-build list, so it was struck.")
+            log(civ, if ((current as? com.unciv.models.ruleset.unit.BaseUnit)?.isCityFounder() == true && !units.hasLandForACity(civ)) "The officials wanted ${current.name} in ${city.name}, but there is no land left for a new city, so it was struck."
+                else "The officials wanted ${current.name} in ${city.name}; it is on the never-build list, so it was struck.")
             if (city.cityConstructions.constructionQueue.isEmpty()) city.cityConstructions.chooseNextConstruction()
         }
         val paid = spending.remove(civ.civName) ?: emptyList<Pair<Int, String>>()
@@ -566,6 +581,8 @@ object RulerHost {
     }
 
     private fun isForbidden(civ: Civilization, construction: INonPerpetualConstruction): Boolean {
+        // The officials would go on training settlers for ever; with no land left they sit idle or get disbanded, a city's growth thrown away each time
+        if ((construction as? com.unciv.models.ruleset.unit.BaseUnit)?.isCityFounder() == true && !units.hasLandForACity(civ)) return true
         val forbidden = orders[civ.civName]?.neverBuild ?: return false
         return forbidden.any { entry ->
             entry.equals(construction.name, ignoreCase = true)
@@ -743,6 +760,12 @@ object RulerHost {
         )
     }
 
+    /** A soldier who would not hold a wall in this age: far behind our best arms, a scout, or a siege piece (which cannot defend itself) */
+    private fun poorDefender(civ: Civilization, unit: com.unciv.logic.map.mapunit.MapUnit): Boolean {
+        val best = civ.units.getCivUnits().filter { !it.baseUnit.isProbablySiegeUnit() }.maxOfOrNull { it.baseUnit.strength.coerceAtLeast(it.baseUnit.rangedStrength) } ?: 0
+        return unit.baseUnit.strength.coerceAtLeast(unit.baseUnit.rangedStrength) * 2 < best || unit.name == "Scout" || unit.baseUnit.isProbablySiegeUnit()
+    }
+
     private fun warnings(civ: Civilization): List<String> {
         val warnings = ArrayList<String>()
         if (civ.getHappiness() < 0) warnings += "The people are unhappy (${civ.getHappiness()}): growth and production suffer. Luxuries, happiness buildings or fewer new cities help."
@@ -751,15 +774,16 @@ object RulerHost {
         val goalsLeft = standing?.research?.count { !reached(civ, it) } ?: 0
         if (standing != null && goalsLeft == 0) warnings += "All research goals are reached - the officials pick techs themselves until new goals are given."
         else if (goalsLeft == 1) warnings += "Only one research goal left - add more."
-        val bestStrength = civ.units.getCivUnits().maxOfOrNull { it.baseUnit.strength.coerceAtLeast(it.baseUnit.rangedStrength) } ?: 0
         for (city in civ.cities) {
             val defender = city.getCenterTile().militaryUnit
             if (defender == null) warnings += "${city.name} has no defender in it."
-            else if (defender.baseUnit.strength.coerceAtLeast(defender.baseUnit.rangedStrength) * 2 < bestStrength || defender.name == "Scout")
+            else if (poorDefender(civ, defender))
                 warnings += "${city.name} is only held by a ${defender.name} - weak for this age."
         }
         for (unit in civ.units.getCivUnits()) if (unit.name.startsWith("Great ") && units.orders[unit.id]?.action == "hold")
             warnings += "${unit.name} #${unit.id} ${describeWhere(civ, unit.getTile())} awaits orders."
+        if (!units.hasLandForACity(civ)) for (unit in civ.units.getCivUnits()) if (unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.FoundCity))
+            warnings += "${unit.name} #${unit.id} has nowhere to go: no land is left for a new city on our shores. It costs upkeep - disband it, or keep it only if you mean to take it overseas."
         if (civ.policies.canAdoptPolicy()) warnings += "A policy can be adopted but none of the preferred branches has one available - add a branch to the policy order."
         if (civ.units.getCivUnits().any { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.FoundCity) } && units.citySites(civ).isEmpty())
             warnings += "We have a Settler but no free land for a city within reach - every site is too close to an existing city or unexplored. Explore further, or disband/keep the Settler."

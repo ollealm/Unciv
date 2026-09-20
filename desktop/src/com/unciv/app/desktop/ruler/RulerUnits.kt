@@ -220,6 +220,17 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         return ranked.entries.sortedByDescending { it.value }.take(5).map { (tile, rank) -> describeSite(civ, tile, rank) }
     }
 
+    /** Is there anywhere left to found a city, on a landmass we already live on? Reckoned once a turn per civ. */
+    private val landLeft = HashMap<String, Pair<Int, Boolean>>()
+    fun hasLandForACity(civ: Civilization): Boolean {
+        val turn = civ.gameInfo.turns
+        landLeft[civ.civName]?.takeIf { it.first == turn }?.let { return it.second }
+        val home = civ.cities.map { it.getCenterTile().getContinent() }.toSet()
+        val any = civ.cities.isEmpty() || survey(civ).keys.any { it.getContinent() in home }
+        landLeft[civ.civName] = Pair(turn, any)
+        return any
+    }
+
     /** Land within reach of our cities that could take a city, scored by what lies around it */
     private fun survey(civ: Civilization): Map<Tile, Float> {
         if (civ.cities.isEmpty()) return emptyMap()
