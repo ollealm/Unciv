@@ -72,12 +72,17 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         if (!TradeEvaluation().isTradeValid(trade, civ, other)) throw IllegalArgumentException("That trade is not valid right now")
         // A TradeRequest holds the trade as the receiver sees it, so it goes out reversed
         val acceptable = TradeEvaluation().isTradeAcceptable(trade.reverse(), other, civ)
+        // A second offer for the same goods replaces the first - otherwise both can be accepted and paid for
+        val asked = trade.theirOffers.map { it.name }.toSet()
+        val superseded = other.tradeRequests.filter { request -> request.requestingCiv == civ.civID && request.trade.ourOffers.any { it.name in asked } }
+        other.tradeRequests.removeAll(superseded.toSet())
         other.tradeRequests.add(TradeRequest(civ.civID, trade.reverse()))
         val summary = trade.brief()
+        if (superseded.isNotEmpty()) log(civ, "Our earlier offer to ${other.civName} for ${asked.joinToString()} was withdrawn in favour of the new one.")
         pending += Triple(civ.civName, other.civName, summary)
         log(civ, "We proposed a trade to ${other.civName}: $summary.")
         val balance = TradeEvaluation().getTradeAcceptability(trade.reverse(), other, civ, true)
-        return "Proposed to ${other.civName}: $summary. They answer on their turn; by their own reckoning this deal is worth $balance to them (they accept at 0 or more), so they are ${if (acceptable) "likely to accept" else "likely to refuse - sweeten it or ask for less"}."
+        return (if (superseded.isNotEmpty()) "Your earlier pending offer for the same goods was withdrawn. " else "") + "Proposed to ${other.civName}: $summary. They answer on their turn; by their own reckoning this deal is worth $balance to them (they accept at 0 or more), so they are ${if (acceptable) "likely to accept" else "likely to refuse - sweeten it or ask for less"}."
     }
 
     fun proposePeace(civ: Civilization, name: String): String {
@@ -153,6 +158,22 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
     /** Every deal in force, as "Civ: terms" - compared turn to turn so the log can say exactly what began and ended */
     fun dealsInForce(civ: Civilization): Set<String> =
         civ.diplomacy.values.flatMap { manager -> manager.trades.map { "${manager.otherCivName}: ${it.brief().replace(Regex(" for \\d+ turns"), "")}" } }.toSet() // durations tick down, the deal is the same
+
+    /** The running account of all deals: what goes out and comes in each turn, and which deals are about to end */
+    fun ledger(civ: Civilization): Map<String, Any?> {
+        val trades = civ.diplomacy.values.flatMap { manager -> manager.trades.map { manager.otherCivName to it } }
+        fun goldPerTurn(offers: List<TradeOffer>) = offers.filter { it.type == TradeOfferType.Gold_Per_Turn }.sumOf { it.amount }
+        return mapOf(
+            "goldPerTurnWePay" to trades.sumOf { goldPerTurn(it.second.ourOffers) },
+            "goldPerTurnWeReceive" to trades.sumOf { goldPerTurn(it.second.theirOffers) },
+            "endingSoon" to endingSoon(civ, 5))
+    }
+
+    /** Deals with at most this many turns left - the time to decide whether they are worth renewing */
+    fun endingSoon(civ: Civilization, within: Int): List<String> =
+        civ.diplomacy.values.flatMap { manager -> manager.trades
+            .filter { trade -> (trade.ourOffers + trade.theirOffers).any { it.duration in 1..within } }
+            .map { "${manager.otherCivName}: ${it.brief()}" } }
 
     private fun luxuries(civ: Civilization) = civ.getCivResourcesByName()
         .filter { it.value > 0 && civ.gameInfo.ruleset.tileResources[it.key]?.resourceType?.name == "Luxury" }

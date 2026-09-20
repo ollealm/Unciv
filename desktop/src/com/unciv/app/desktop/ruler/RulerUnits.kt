@@ -47,6 +47,15 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             orders[unit.id] = Order("hold", null, null)
             log(unit.civ, "A ${unit.name} #${unit.id} is at ${where(unit.civ, unit.getTile())} and awaits orders (use, move, or release to the officials).")
         }
+        // Re-arming replaces a unit with a new one, under a new number: a garrison's orders pass to the soldier now standing in its place
+        if (unit.id !in orders && unit.isMilitary()) {
+            val here = unit.getTile().position
+            val orphan = orders.entries.firstOrNull { (id, order) ->
+                order.action in listOf("garrison", "fortify") && order.x == here.x.toInt() && order.y == here.y.toInt()
+                    && unit.civ.gameInfo.civilizations.none { it.units.getUnitById(id) != null }
+            }
+            if (orphan != null) { orders.remove(orphan.key); orders[unit.id] = orphan.value }
+        }
         val order = orders[unit.id] ?: return false
         val civ = unit.civ
         val target = if (order.x != null && order.y != null) civ.gameInfo.tileMap.getIfTileExistsOrNull(order.x, order.y) else null

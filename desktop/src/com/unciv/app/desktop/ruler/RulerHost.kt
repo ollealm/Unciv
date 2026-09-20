@@ -61,11 +61,14 @@ object RulerHost {
         var neverBuild = ArrayList<String>()
         /** Gold the officials must leave untouched; null = they spend as they see fit */
         var goldReserve: Int? = null
+        /** Keep a soldier inside every city: when one stands empty, the nearest free soldier is sent in under a garrison order */
+        var garrisonEveryCity = false
         fun toMap(civ: Civilization? = null) = mapOf(
             "goldReserve" to goldReserve,
+            "garrisonEveryCity" to garrisonEveryCity,
             "personality" to personality,
             "neverBuild" to neverBuild,
-            "research" to research.filter { civ == null || !civ.tech.isResearched(it) },
+            "research" to research.filter { civ == null || !civ.tech.isResearched(it) || civ.gameInfo.ruleset.technologies[it]?.isContinuallyResearchable() == true },
             "policyBranches" to policyBranches)
     }
 
@@ -283,6 +286,7 @@ object RulerHost {
         json.get("policyBranches")?.let { policyBranches = ArrayList(it.asStringArray().toList()) }
         json.get("neverBuild")?.let { neverBuild = ArrayList(it.asStringArray().toList()) }
         json.get("goldReserve")?.let { goldReserve = if (it.isNull) null else it.asInt().coerceAtLeast(0) }
+        json.get("garrisonEveryCity")?.takeUnless { it.isNull }?.let { garrisonEveryCity = it.asBoolean() }
     }
 
     private fun applyPersonality(civ: Civilization, standing: StandingOrders) {
@@ -307,7 +311,7 @@ object RulerHost {
         json.get("research")?.let { goals ->
             val kept = goals.asStringArray().filter { goal ->
                 if (goal !in ruleset.technologies) rejected += "No technology is called '$goal'" + (if (goal in ruleset.policies) " - that is a policy; put it in policyBranches" else "; see get_options.futureTechs") + ". The other research goals were kept."
-                if (goal in ruleset.technologies && civ.tech.isResearched(goal)) alreadyKnown += goal
+                if (goal in ruleset.technologies && reached(civ, goal)) alreadyKnown += goal
                 goal in ruleset.technologies
             }
             goals.remove(); json.addChild("research", JsonValue(JsonValue.ValueType.array).also { array -> kept.forEach { array.addChild(JsonValue(it)) } })
@@ -338,13 +342,17 @@ object RulerHost {
         tryEach(json.get("queue")) { order ->
             val city = civ.city(order.getString("city"))
             val items = order.get("items").asStringArray().toList()
-            val constructions = items.map { civ.construction(it) }
+            // "Science", "Gold" and the like turn production into that yield for good - so only ever as the closing item
+            val perpetual = com.unciv.models.ruleset.PerpetualConstruction.perpetualConstructionsMap[items.lastOrNull() ?: ""]
+            if (perpetual != null && !perpetual.isBuildable(city.cityConstructions)) throw ApiError(400, "${city.name} cannot turn production into ${perpetual.name} yet")
+            val constructions = (if (perpetual != null) items.dropLast(1) else items).map { civ.construction(it) }
             for ((index, construction) in constructions.withIndex()) {
                 val reasons = whyNot(city, construction)
                 if (reasons.isNotEmpty()) throw ApiError(400, "${city.name} cannot build ${items[index]}: ${reasons.joinToString()}")
             }
             city.cityConstructions.constructionQueue.clear()
             for (construction in constructions) city.cityConstructions.addToQueue(construction)
+            if (perpetual != null) city.cityConstructions.addToQueue(perpetual)
             city.cityConstructions.currentConstructionIsUserSet = true
             RulerOverrides.lockedCities += city.id
             "${city.name} queue is now: ${city.cityConstructions.constructionQueue.joinToString()}"
@@ -399,7 +407,7 @@ object RulerHost {
             "Declared war on $targetName"
         }
         if (alreadyKnown.isNotEmpty()) failed += "Already known, dropped from the research goals: ${alreadyKnown.joinToString()}"
-        standing.research.removeAll { civ.tech.isResearched(it) }
+        standing.research.removeAll { reached(civ, it) }
         // City focus: which yields the citizens work for
         tryEach(json.get("cityFocus")) { order ->
             val city = civ.city(order.getString("city"))
@@ -417,17 +425,33 @@ object RulerHost {
     }
 
     /** Called before every turn so the automation finds research and policies already chosen the ruler's way */
+    /** A research goal is reached once known - except the repeatable ones (Future Tech), which are never done */
+    private fun reached(civ: Civilization, tech: String) =
+        civ.tech.isResearched(tech) && civ.gameInfo.ruleset.technologies[tech]?.isContinuallyResearchable() != true
+
     private fun applyStandingOrders(civ: Civilization) {
         val standing = orders[civ.civName] ?: return
         val ruleset = civ.gameInfo.ruleset
 
-        val goal = standing.research.firstOrNull { !civ.tech.isResearched(it) }
+        val goal = standing.research.firstOrNull { !reached(civ, it) }
         if (goal != null) {
             val path = civ.tech.getRequiredTechsToDestination(ruleset.technologies[goal]!!).map { it.name }
             if (path.isNotEmpty() && civ.tech.techsToResearch != path) {
                 civ.tech.techsToResearch.clear()
                 civ.tech.techsToResearch.addAll(path)
             }
+        }
+
+        if (standing.garrisonEveryCity) for (city in civ.cities) {
+            val centre = city.getCenterTile()
+            val position = centre.position
+            if (centre.militaryUnit != null) continue
+            if (units.orders.values.any { it.action == "garrison" && it.x == position.x.toInt() && it.y == position.y.toInt() }) continue // someone is on the way
+            val soldier = civ.units.getCivUnits()
+                .filter { it.isMilitary() && it.baseUnit.isLandUnit && it.id !in units.orders && !it.getTile().isCityCenter() && it.getTile().getContinent() == centre.getContinent() } // same landmass: a spent unit cannot be asked for a path
+                .minByOrNull { it.getTile().aerialDistanceTo(centre) } ?: continue
+            units.orders[soldier.id] = RulerUnits.Order("garrison", position.x.toInt(), position.y.toInt())
+            log(civ, "By your standing order: ${city.name} stood empty, so our ${soldier.name} #${soldier.id} marches in to garrison it.")
         }
 
         while (civ.policies.canAdoptPolicy()) {
@@ -489,20 +513,20 @@ object RulerHost {
         for (city in civ.cities) {
             val queue = city.cityConstructions.constructionQueue
             val ordered = before.queues[city.name] ?: emptyList()
-            if (queue.isEmpty() || city.cityConstructions.getCurrentConstruction() is com.unciv.models.ruleset.PerpetualConstruction
-                || queue.first() !in ordered) RulerOverrides.lockedCities -= city.id
+            if (queue.isEmpty() || queue.first() !in ordered) RulerOverrides.lockedCities -= city.id
         }
         // Then what the officials changed on their own
         for (city in civ.cities) {
             val was = before.queues[city.name] ?: continue
             val now = city.cityConstructions.constructionQueue
             val built = notifications.filter { "has been built in [${city.name}]" in it.text }.map { it.text.substringAfter("[").substringBefore("]") }
-            for (item in was) if (item !in now && item !in built) {
+            val isPerpetual = { name: String -> com.unciv.models.ruleset.PerpetualConstruction.isNamePerpetual(name) }
+            for (item in was) if (item !in now && item !in built && !(isPerpetual(item) && city.id !in RulerOverrides.lockedCities)) {
                 val construction = civ.gameInfo.ruleset.buildings[item] ?: civ.gameInfo.ruleset.units[item]
                 val reasons = construction?.let { whyNot(city, it) } ?: emptyList()
                 log(civ, "The officials dropped $item from ${city.name}'s queue" + (if (reasons.isNotEmpty()) " because ${reasons.joinToString()}." else ", replacing it with their own choice."))
             }
-            for (item in now) if (item !in was)
+            for (item in now) if (item !in was && !isPerpetual(item))
                 log(civ, "The officials queued $item in ${city.name}.")
         }
         for (city in civ.cities) if (city.name !in before.queues) log(civ, "Founded ${city.name}.")
@@ -522,6 +546,7 @@ object RulerHost {
             log(civ, "Research is now on $researching.")
         // Deals: say exactly what came into force and what ended
         val dealsNow = diplomacy.dealsInForce(civ)
+        for (deal in diplomacy.endingSoon(civ, 5) - diplomacy.endingSoon(civ, 4).toSet()) log(civ, "A deal ends in five turns: $deal. Renew it only if it is still worth its price.")
         for (deal in dealsNow - before.deals) log(civ, "A deal came into force with $deal.")
         for (deal in before.deals - dealsNow) log(civ, "A deal ended with $deal.")
         // The never-build list is applied where the officials choose; this catches what slipped past (an item already in the queue when it was banned)
@@ -713,6 +738,7 @@ object RulerHost {
             "threats" to threats(civ),
             "knownCivs" to diplomacy.relations(civ),
             "log" to chanceryLog(civ, logSince ?: (turn - 12)).map { "T${it["turn"]}: ${it["text"]}" },
+            "dealsLedger" to diplomacy.ledger(civ),
             "standingOrders" to orders[civ.civName]?.toMap(civ)
         )
     }
@@ -722,7 +748,7 @@ object RulerHost {
         if (civ.getHappiness() < 0) warnings += "The people are unhappy (${civ.getHappiness()}): growth and production suffer. Luxuries, happiness buildings or fewer new cities help."
         if (civ.tech.currentTechnologyName() == null) warnings += "Research is idle - give research goals."
         val standing = orders[civ.civName]
-        val goalsLeft = standing?.research?.count { !civ.tech.isResearched(it) } ?: 0
+        val goalsLeft = standing?.research?.count { !reached(civ, it) } ?: 0
         if (standing != null && goalsLeft == 0) warnings += "All research goals are reached - the officials pick techs themselves until new goals are given."
         else if (goalsLeft == 1) warnings += "Only one research goal left - add more."
         val bestStrength = civ.units.getCivUnits().maxOfOrNull { it.baseUnit.strength.coerceAtLeast(it.baseUnit.rangedStrength) } ?: 0
