@@ -102,7 +102,7 @@ class ConstructionAutomation(val cityConstructions: CityConstructions) {
         return this.filter {
             val cache = if (it is Building) buildableBuildings else buildableUnits
             if (cache[it.name] == null) {
-                cache[it.name] = it.isBuildable(cityConstructions)
+                cache[it.name] = it.isBuildable(cityConstructions) && com.unciv.logic.automation.RulerOverrides.forbidden?.invoke(civInfo, it) != true
             }
             cache[it.name]!!
         }

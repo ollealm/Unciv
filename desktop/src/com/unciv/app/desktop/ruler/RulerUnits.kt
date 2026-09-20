@@ -19,11 +19,11 @@ import kotlin.math.roundToInt
 class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
     /** action: move (then release), settle, fortify/garrison, hold, explore (then release), use (a great person's ability, then release) */
-    class Order(val action: String, val x: Int?, val y: Int?) {
+    class Order(val action: String, val x: Int?, val y: Int?, val ability: String? = null) {
         /** Where the unit stood last turn and for how many turns, to notice an order that is going nowhere */
         var lastSpot: String? = null
         var turnsStuck = 0
-        fun toMap() = mapOf("action" to action, "x" to x, "y" to y)
+        fun toMap() = mapOf("action" to action, "x" to x, "y" to y, "ability" to ability)
     }
 
     /** unit id -> order */
@@ -31,7 +31,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
     fun load(json: JsonValue?) {
         orders.clear()
-        json?.forEach { orders[it.name.toInt()] = Order(it.getString("action"), it.get("x")?.takeUnless { v -> v.isNull }?.asInt(), it.get("y")?.takeUnless { v -> v.isNull }?.asInt()) }
+        json?.forEach { orders[it.name.toInt()] = Order(it.getString("action"), it.get("x")?.takeUnless { v -> v.isNull }?.asInt(), it.get("y")?.takeUnless { v -> v.isNull }?.asInt(), it.get("ability")?.takeUnless { v -> v.isNull }?.asString()) }
     }
 
     fun toMap() = orders.mapKeys { it.key.toString() }.mapValues { it.value.toMap() }
@@ -107,7 +107,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             }
             "fortify", "garrison" -> { unit.fortifyIfCan(); true }
             "use" -> {
-                val used = ABILITIES.firstOrNull { UnitActions.invokeUnitAction(unit, it) }
+                // A Great Person can usually be spent more than one way; the ruler says which, or gets the first that works
+                val wanted = ABILITIES.filter { order.ability == null || it in abilitiesNamed(order.ability) }
+                val used = wanted.firstOrNull { UnitActions.invokeUnitAction(unit, it) }
                 if (used != null) log(civ, "Our ${unit.name} used its ability (${used.name}) at ${where(civ, unit.getTile())}.")
                 else log(civ, "Our ${unit.name} could not use its ability at ${where(civ, unit.getTile())}: nothing to use it on here (trade missions need a city-state's city, improvements need an unimproved tile of ours).")
                 orders.remove(unit.id)
@@ -158,7 +160,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         unit.currentMovement = unit.getMaxMovement().toFloat()
         val path = try { if (target == unit.getTile()) listOf() else unit.movement.getShortestPath(target) } finally { unit.currentMovement = spent }
         if (target != unit.getTile() && !willSwap && path.isEmpty()) throw IllegalArgumentException("${unit.name} cannot reach ${where(civ, target)} (water, mountains or foreign borders in the way)")
-        orders[unitId] = Order(action, x, y)
+        val ability = json.get("ability")?.takeUnless { it.isNull }?.asString()
+        if (ability != null && abilitiesNamed(ability).isEmpty()) throw IllegalArgumentException("Unknown ability '$ability'; use one of: ${ABILITY_WORDS.keys.joinToString()}")
+        orders[unitId] = Order(action, x, y, ability)
         val turns = if (target == unit.getTile()) 0 else kotlin.math.ceil(path.size / unit.getMaxMovement().coerceAtLeast(1).toFloat()).toInt()
         return "${unit.name} #$unitId will $action at ${where(civ, target)}" + (if (turns > 0) ", about $turns turns away" else "")
     }
@@ -244,6 +248,17 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         private val ABILITIES = listOf(UnitActionType.ConductTradeMission, UnitActionType.HurryResearch, UnitActionType.HurryWonder,
             UnitActionType.HurryBuilding, UnitActionType.HurryPolicy, UnitActionType.FoundReligion, UnitActionType.EnhanceReligion,
             UnitActionType.TriggerUnique, UnitActionType.CreateImprovement, UnitActionType.SpreadReligion)
+
+        /** The words a ruler may use for the ways of spending a Great Person */
+        private val ABILITY_WORDS = mapOf(
+            "improvement" to listOf(UnitActionType.CreateImprovement), // academy, manufactory, customs house, holy site, citadel
+            "hurry research" to listOf(UnitActionType.HurryResearch),
+            "hurry production" to listOf(UnitActionType.HurryWonder, UnitActionType.HurryBuilding),
+            "hurry policy" to listOf(UnitActionType.HurryPolicy),
+            "trade mission" to listOf(UnitActionType.ConductTradeMission),
+            "religion" to listOf(UnitActionType.FoundReligion, UnitActionType.EnhanceReligion, UnitActionType.SpreadReligion),
+            "golden age" to listOf(UnitActionType.TriggerUnique))
+        private fun abilitiesNamed(word: String) = ABILITY_WORDS[word.lowercase().trim()] ?: emptyList()
 
         /** "(x,y), 3 tiles NE of Rome" */
         fun where(civ: Civilization, tile: Tile): String {

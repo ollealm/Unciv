@@ -18,13 +18,31 @@ object UseGoldAutomation {
 
     /** allow AI to spend money to purchase city-state friendship, buildings & unit */
     fun useGold(civ: Civilization) {
-        // A ruler's treasury reserve: the officials keep their hands off the purse until it holds more than that
-        com.unciv.logic.automation.RulerOverrides.goldReserve[civ.civID]?.let { if (civ.gold <= it) return }
-        for (unit in civ.units.getCivUnits())
-            UnitAutomation.tryUpgradeUnit(unit)
+        // A ruler's treasury reserve is a floor, not a gate: the officials only ever see what lies above it
+        val reserve = com.unciv.logic.automation.RulerOverrides.goldReserve[civ.civID] ?: 0
+        if (reserve > 0 && civ.gold <= reserve) return
+        if (reserve > 0) civ.addGold(-reserve)
+        try { spendGold(civ) } finally { if (reserve > 0) civ.addGold(reserve) }
+    }
 
-        if (civ.isMajorCiv())
-            useGoldForCityStates(civ)
+    /** Tells a ruled civ's chancery what the officials just paid for */
+    private inline fun itemised(civ: Civilization, what: () -> String, spend: () -> Unit) {
+        val before = civ.gold
+        spend()
+        if (civ.gold < before) com.unciv.logic.automation.RulerOverrides.spendingNoted?.invoke(civ, before - civ.gold, what())
+    }
+
+    private fun spendGold(civ: Civilization) {
+        for (unit in civ.units.getCivUnits().toList()) {
+            val name = unit.name
+            val tile = unit.getTile()
+            itemised(civ, { "re-arming a $name as ${(if (unit.isCivilian()) tile.civilianUnit else tile.militaryUnit)?.name ?: "something newer"}" }) { UnitAutomation.tryUpgradeUnit(unit) }
+        }
+
+        if (civ.isMajorCiv()) {
+            val influence = civ.getKnownCivs().filter { it.isCityState }.associateWith { it.getDiplomacyManager(civ)?.getInfluence() ?: 0f }
+            itemised(civ, { "gifts to " + (influence.filter { (it.key.getDiplomacyManager(civ)?.getInfluence() ?: 0f) > it.value + 1 }.keys.joinToString(" and ") { it.civName }.ifEmpty { "the city-states" }) }) { useGoldForCityStates(civ) }
+        }
 
         val acceptableHurryCostModifier = civ.gold.coerceAtLeast(0)/100
         // Ideally we buy things with good gold:production conversion from purchasing and hard-build the rest, but some mods have high hurryCostModifier on everything leading to too much gold being saved. 
@@ -38,10 +56,10 @@ object UseGoldAutomation {
             if (!city.cityConstructions.isConstructionPurchaseAllowed(construction, Stat.Gold, statBuyCost)) continue
             if (civ.gold < statBuyCost || construction.hurryCostModifier > acceptableHurryCostModifier) continue
             if (city.cityConstructions.getWorkDone(construction.name) > 0) continue // Don't buy things we already invested production into (may waste the invested production)
-            city.cityConstructions.purchaseConstruction(construction, 0, true)
+            itemised(civ, { "buying ${construction.name} in ${city.name}" }) { city.cityConstructions.purchaseConstruction(construction, 0, true) }
         }
 
-        maybeBuyCityTiles(civ)
+        itemised(civ, { "buying land around our cities" }) { maybeBuyCityTiles(civ) }
     }
 
     private fun useGoldForCityStates(civ: Civilization) {

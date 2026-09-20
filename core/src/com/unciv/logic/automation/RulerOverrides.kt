@@ -24,6 +24,12 @@ object RulerOverrides {
     /** civID -> gold the officials must leave in the treasury; they spend on their own only what lies above it */
     val goldReserve = ConcurrentHashMap<String, Int>()
 
+    /** True when a ruled civ's never-build list covers this construction: the automation must not choose it at all */
+    @Volatile var forbidden: ((com.unciv.logic.civilization.Civilization, com.unciv.models.ruleset.INonPerpetualConstruction) -> Boolean)? = null
+
+    /** Called with (civ, gold, what for) whenever a ruled civ's automation spends from the treasury */
+    @Volatile var spendingNoted: ((com.unciv.logic.civilization.Civilization, Int, String) -> Unit)? = null
+
     /**
      *  Asked before the automation moves each unit of a ruled civ. Returning true means the ruler's own order
      *  handled this unit this turn and the automation must leave it alone.

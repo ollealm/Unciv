@@ -87,6 +87,8 @@ object RulerHost {
         SkinCache.loadSkinConfigs(true)
 
         load()
+        RulerOverrides.forbidden = { civ, construction -> civ.civID in RulerOverrides.ruledCivs && isForbidden(civ, construction) }
+        RulerOverrides.spendingNoted = { civ, gold, what -> if (civ.civID in RulerOverrides.ruledCivs) spending.getOrPut(civ.civName) { ArrayList() } += Pair(gold, what) }
         RulerOverrides.unitHandler = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.handle(unit) }
 
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0)
@@ -180,6 +182,7 @@ object RulerHost {
                 speed = json.getString("speed", "Quick")
                 difficulty = json.getString("difficulty", "Prince")
                 numberOfCityStates = json.getInt("cityStates", 4)
+                victoryTypes = ArrayList(com.unciv.models.ruleset.RulesetCache[baseRuleset]!!.victories.keys.filter { it != "Time" }) // left empty, no victory exists at all - and no Apollo Program
                 players = ArrayList<Player>().apply {
                     for (nation in ruled + others) add(Player(nation))
                     add(Player(Constants.spectator, PlayerType.Human))
@@ -446,6 +449,9 @@ object RulerHost {
     //endregion
     //region Turns, chancery log and public events
 
+    /** What the officials paid for during the turn being played, per civ - written into the chancery log once the turn is over */
+    private val spending = java.util.concurrent.ConcurrentHashMap<String, MutableList<Pair<Int, String>>>()
+
     private fun log(civ: Civilization, text: String) {
         chancery.getOrPut(civ.civName) { ArrayList() } += mapOf("turn" to civ.gameInfo.turns, "text" to text)
     }
@@ -518,23 +524,29 @@ object RulerHost {
         val dealsNow = diplomacy.dealsInForce(civ)
         for (deal in dealsNow - before.deals) log(civ, "A deal came into force with $deal.")
         for (deal in before.deals - dealsNow) log(civ, "A deal ended with $deal.")
-        // The ruler's never-build list beats the officials' own choices
-        val forbidden = orders[civ.civName]?.neverBuild ?: emptyList<String>()
-        val noWonders = forbidden.any { it.equals("all wonders", ignoreCase = true) || it.equals("wonders", ignoreCase = true) }
-        val noSoldiers = forbidden.any { it.equals("all military units", ignoreCase = true) || it.equals("military units", ignoreCase = true) }
-        if (forbidden.isNotEmpty()) for (city in civ.cities) repeat(3) {
-            val current = city.cityConstructions.currentConstructionName()
-            val banned = current in forbidden
-                || noWonders && civ.gameInfo.ruleset.buildings[current]?.isAnyWonder() == true
-                || noSoldiers && civ.gameInfo.ruleset.units[current]?.isMilitary == true
-            if (banned && city.id !in RulerOverrides.lockedCities) { // the user-set flag outlives the ruler's queue, the lock does not
-                city.cityConstructions.constructionQueue.remove(current)
-                log(civ, "The officials wanted $current in ${city.name}; it is on the never-build list, so it was struck.")
-                if (city.cityConstructions.constructionQueue.isEmpty()) city.cityConstructions.chooseNextConstruction()
-            }
+        // The never-build list is applied where the officials choose; this catches what slipped past (an item already in the queue when it was banned)
+        for (city in civ.cities) {
+            val current = city.cityConstructions.getCurrentConstruction() as? INonPerpetualConstruction ?: continue
+            if (city.id in RulerOverrides.lockedCities || !isForbidden(civ, current)) continue // the user-set flag outlives the ruler's queue, the lock does not
+            city.cityConstructions.constructionQueue.remove(current.name)
+            log(civ, "The officials wanted ${current.name} in ${city.name}; it is on the never-build list, so it was struck.")
+            if (city.cityConstructions.constructionQueue.isEmpty()) city.cityConstructions.chooseNextConstruction()
         }
-        if (civ.gold < before.gold - 40) log(civ, "The officials spent ${before.gold - civ.gold} gold (treasury now ${civ.gold}).")
+        val paid = spending.remove(civ.civName) ?: emptyList<Pair<Int, String>>()
+        for ((what, items) in paid.groupBy { it.second }) log(civ, "The officials spent ${items.sumOf { it.first }} gold on ${what}.")
+        if (paid.isNotEmpty()) log(civ, "The treasury now holds ${civ.gold} gold.")
+        val unexplained = before.gold - civ.gold - paid.sumOf { it.first }
+        if (unexplained > 40) log(civ, "A further $unexplained gold left the treasury this turn without the officials' hand in it (upkeep, payments under our deals, or a deal struck).")
         if (before.happiness >= 0 && civ.getHappiness() < 0) log(civ, "The people have become unhappy (${civ.getHappiness()}).")
+    }
+
+    private fun isForbidden(civ: Civilization, construction: INonPerpetualConstruction): Boolean {
+        val forbidden = orders[civ.civName]?.neverBuild ?: return false
+        return forbidden.any { entry ->
+            entry.equals(construction.name, ignoreCase = true)
+                || entry.lowercase() in listOf("all wonders", "wonders") && (construction as? com.unciv.models.ruleset.Building)?.isAnyWonder() == true
+                || entry.lowercase() in listOf("all military units", "military units") && (construction as? com.unciv.models.ruleset.unit.BaseUnit)?.isMilitary == true
+        }
     }
 
     private fun describeWhere(civ: Civilization, tile: Tile): String {
@@ -672,6 +684,7 @@ object RulerHost {
             "turn" to turn,
             "year" to yearText(turn),
             "era" to civ.getEra().name,
+            "waysToWin" to civ.gameInfo.gameParameters.victoryTypes.toList().ifEmpty { listOf("none - this world was made without victory conditions; nobody can build a spaceship or win a vote") },
             "score" to civ.calculateTotalScore().toInt(),
             "gold" to civ.gold,
             "perTurn" to mapOf("gold" to next.gold.toInt(), "science" to next.science.toInt(), "culture" to next.culture.toInt()),

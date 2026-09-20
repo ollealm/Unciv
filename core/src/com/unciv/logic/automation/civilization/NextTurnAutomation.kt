@@ -621,7 +621,7 @@ object NextTurnAutomation {
             }
         if (settlersInFlight >= maxSettlersInFlight) return
         val settlerUnits = civInfo.gameInfo.ruleset.units.values
-                .filter { it.isCityFounder() && it.isBuildable(civInfo) &&
+                .filter { it.isCityFounder() && it.isBuildable(civInfo) && com.unciv.logic.automation.RulerOverrides.forbidden?.invoke(civInfo, it) != true &&
                     personality.getMatchingUniques(UniqueType.WillNotBuild, civInfo.state)
                         .none { unique -> it.matchesFilter(unique.params[0], civInfo.state) } }
         if (settlerUnits.isEmpty()) return
