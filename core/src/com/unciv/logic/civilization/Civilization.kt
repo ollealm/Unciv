@@ -362,9 +362,12 @@ class Civilization : IsPartOfGameInfoSerialization {
 
 
     //region pure functions
+    /** Humans, and AI civs steered by a ruler: the difficulty level treats both as "the player", so lowering it handicaps only the game's own AI */
+    @Readonly fun hasPlayerStanding() = isHuman() || civID in RulerOverrides.ruledCivs
+
     @Readonly
     fun getDifficulty(): Difficulty {
-        if (isHuman()) return gameInfo.getDifficulty()
+        if (hasPlayerStanding()) return gameInfo.getDifficulty()
         if (gameInfo.ruleset.difficulties.containsKey(gameInfo.getDifficulty().aiDifficultyLevel)) {
             return gameInfo.ruleset.difficulties[gameInfo.getDifficulty().aiDifficultyLevel]!!
         }
