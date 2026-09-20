@@ -153,9 +153,13 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         if (occupant != null && !willSwap) throw IllegalArgumentException(
             "${where(civ, target)} is already held by ${if (occupant.civ == civ) "our" else occupant.civ.civName + "'s"} ${occupant.name} #${occupant.id}; two ${if (unit.isCivilian()) "civilians" else "soldiers"} cannot share a tile. " +
             (if (occupant.civ == civ) "Use garrison to swap places with it, pick a tile beside it, or leave it be - the place is already covered." else "Pick another tile."))
-        if (target != unit.getTile() && !willSwap && !unit.movement.canReach(target)) throw IllegalArgumentException("${unit.name} cannot reach ${where(civ, target)} (water, mountains or foreign borders in the way)")
+        // Orders are given between turns, when a unit has usually spent its movement - and Unciv finds no path at all for a unit with none left
+        val spent = unit.currentMovement
+        unit.currentMovement = unit.getMaxMovement().toFloat()
+        val path = try { if (target == unit.getTile()) listOf() else unit.movement.getShortestPath(target) } finally { unit.currentMovement = spent }
+        if (target != unit.getTile() && !willSwap && path.isEmpty()) throw IllegalArgumentException("${unit.name} cannot reach ${where(civ, target)} (water, mountains or foreign borders in the way)")
         orders[unitId] = Order(action, x, y)
-        val turns = if (target == unit.getTile()) 0 else kotlin.math.ceil(unit.movement.getShortestPath(target).size / unit.getMaxMovement().coerceAtLeast(1).toFloat()).toInt()
+        val turns = if (target == unit.getTile()) 0 else kotlin.math.ceil(path.size / unit.getMaxMovement().coerceAtLeast(1).toFloat()).toInt()
         return "${unit.name} #$unitId will $action at ${where(civ, target)}" + (if (turns > 0) ", about $turns turns away" else "")
     }
 
