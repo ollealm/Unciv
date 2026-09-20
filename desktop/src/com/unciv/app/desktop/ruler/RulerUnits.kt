@@ -37,7 +37,16 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     fun toMap() = orders.mapKeys { it.key.toString() }.mapValues { it.value.toMap() }
 
     /** Called by the automation for every unit of a ruled civ. True = we handled it, leave it alone. */
+    /** Great People the ruler has handed back to the officials */
+    val released = HashSet<Int>()
+
     fun handle(unit: MapUnit): Boolean {
+        // A Great Person is the ruler's to spend: the officials never touch one unless it was released to them.
+        // Caught here, in the automation's own loop, because one born at the start of a turn would otherwise be spent within it.
+        if (unit.id !in orders && unit.id !in released && unit.name.startsWith("Great ")) {
+            orders[unit.id] = Order("hold", null, null)
+            log(unit.civ, "A ${unit.name} #${unit.id} is at ${where(unit.civ, unit.getTile())} and awaits orders (use, move, or release to the officials).")
+        }
         val order = orders[unit.id] ?: return false
         val civ = unit.civ
         val target = if (order.x != null && order.y != null) civ.gameInfo.tileMap.getIfTileExistsOrNull(order.x, order.y) else null
@@ -119,7 +128,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         if (action !in listOf("move", "settle", "fortify", "garrison", "hold", "explore", "use", "disband", "release"))
             throw IllegalArgumentException("Unknown unit action $action; use move, settle, fortify, garrison, hold, explore, use, disband or release")
         if (action == "disband") { orders.remove(unitId); val name = unit.name; unit.disband(); log(civ, "Our $name #$unitId was disbanded."); return "$name #$unitId disbanded." }
-        if (action == "release") { orders.remove(unitId); return "${unit.name} #$unitId is back under the officials." }
+        if (action == "release") { orders.remove(unitId); released += unitId; return "${unit.name} #$unitId is back under the officials." }
         if (action == "settle" && !unit.hasUnique(UniqueType.FoundCity)) throw IllegalArgumentException("${unit.name} cannot found cities")
         if (action == "explore" && unit.isCivilian()) throw IllegalArgumentException("Civilians cannot explore; send a military unit")
 

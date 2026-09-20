@@ -140,10 +140,11 @@ object RulerHost {
             "GET /nations" -> RulesetCache[com.unciv.models.metadata.BaseRuleset.Civ_V_GnK.fullName]!!.nations.values
                 .filter { it.isMajorCiv }.map { mapOf("name" to it.name, "leader" to it.leaderName) }
             "POST /new" -> newGame(json)
-            "POST /advance" -> advance(json.getInt("turns", 10))
+            "POST /advance" -> advance(json.getInt("turns", 10), json.getBoolean("wake", false))
             "GET /briefing" -> briefing(civ(), query["since"]?.toIntOrNull())
             "GET /options" -> options(civ())
             "GET /log" -> chanceryLog(civ(), since)
+            "GET /lookup" -> lookup(civ(), query["name"] ?: throw ApiError(400, "Missing name"))
             "GET /map.png" -> Png(MapRenderer.render(civ(), query["style"] ?: "atlas"))
             "GET /orders" -> civ().let { orders.getOrPut(it.civName) { StandingOrders() }.toMap(it) }
             "POST /orders" -> setOrders(civ(), json)
@@ -355,7 +356,7 @@ object RulerHost {
             }
             if (problem != null) throw ApiError(400, "Could not buy $item in ${city.name}: $problem")
             if (!city.cityConstructions.purchaseConstruction(construction, -1, false)) throw ApiError(400, "Could not buy $item in ${city.name}: no room to place it")
-            log(civ, "Bought $item in ${city.name} for $cost gold.")
+            log(civ, "By your order: bought $item in ${city.name} for $cost gold.")
             "Bought $item in ${city.name} for $cost gold (${civ.gold} left)"
         }
         // Unit orders, diplomacy
@@ -373,7 +374,7 @@ object RulerHost {
             if (!diplomacy.canDeclareWar()) throw ApiError(400, "Cannot declare war on $targetName now")
             diplomacy.declareWar()
             addPublicEvent("${civ.civName} has declared war on $targetName!")
-            log(civ, "We declared war on $targetName.")
+            log(civ, "By your order: we declared war on $targetName.")
             "Declared war on $targetName"
         }
         if (alreadyKnown.isNotEmpty()) failed += "Already known, dropped from the research goals: ${alreadyKnown.joinToString()}"
@@ -487,16 +488,16 @@ object RulerHost {
         val dealsNow = diplomacy.dealsInForce(civ)
         for (deal in dealsNow - before.deals) log(civ, "A deal came into force with $deal.")
         for (deal in before.deals - dealsNow) log(civ, "A deal ended with $deal.")
-        // Great People wait for the ruler's word instead of being spent by the officials
-        for (unit in civ.units.getCivUnits()) if (unit.id !in before.units && unit.name.startsWith("Great ") && unit.id !in units.orders) {
-            units.orders[unit.id] = RulerUnits.Order("hold", null, null)
-            log(civ, "A ${unit.name} #${unit.id} was born ${describeWhere(civ, unit.getTile())} and awaits orders (use, move, or release to the officials).")
-        }
         // The ruler's never-build list beats the officials' own choices
         val forbidden = orders[civ.civName]?.neverBuild ?: emptyList<String>()
+        val noWonders = forbidden.any { it.equals("all wonders", ignoreCase = true) || it.equals("wonders", ignoreCase = true) }
+        val noSoldiers = forbidden.any { it.equals("all military units", ignoreCase = true) || it.equals("military units", ignoreCase = true) }
         if (forbidden.isNotEmpty()) for (city in civ.cities) repeat(3) {
             val current = city.cityConstructions.currentConstructionName()
-            if (current in forbidden && city.id !in RulerOverrides.lockedCities) { // the user-set flag outlives the ruler's queue, the lock does not
+            val banned = current in forbidden
+                || noWonders && civ.gameInfo.ruleset.buildings[current]?.isAnyWonder() == true
+                || noSoldiers && civ.gameInfo.ruleset.units[current]?.isMilitary == true
+            if (banned && city.id !in RulerOverrides.lockedCities) { // the user-set flag outlives the ruler's queue, the lock does not
                 city.cityConstructions.constructionQueue.remove(current)
                 log(civ, "The officials wanted $current in ${city.name}; it is on the never-build list, so it was struck.")
                 if (city.cityConstructions.constructionQueue.isEmpty()) city.cityConstructions.chooseNextConstruction()
@@ -558,13 +559,20 @@ object RulerHost {
         for (civ in before.alive - after.alive) addPublicEvent("$civ has been destroyed.")
     }
 
-    private fun advance(turns: Int): Any? {
+    /** Log lines an advisor would want to see at once, not at the next scheduled look-in */
+    private val wakeWorthy = listOf("^Our proposal to", "counteroffer", "dropped .* because", "declared war", "denounced", "lost in action",
+        "awaits orders", "captured", "has been destroyed", "demands", "is stuck|has been stuck").map { Regex(it, RegexOption.IGNORE_CASE) }
+
+    private fun advance(turns: Int, wakeOnEvents: Boolean = false): Any? {
         val game = game()
         if (game.majorCivs().any { it.victoryManager.hasWon() }) throw ApiError(409, "The game is over")
         val startTurn = game.turns
         val roundStart = WorldSnapshot(game)
         var stopReason: String? = null
-        val ruledCivs = orders.keys.map { name -> game.civilizations.first { it.civName == name } }
+        val ruledCivs = orders.keys.map { name -> game.civilizations.first { it.civName == name } }.filter { it.isAlive() }
+        // What each advisor has already been shown; anything new below is worth waking them for
+        val warningsSeen = ruledCivs.associate { civ -> civ.civName to warnings(civ).map { it.replace(Regex("-?\\d+"), "#") }.toSet() }
+        val wake = LinkedHashMap<String, List<String>>()
 
         for (i in 1..turns) {
             val before = WorldSnapshot(game)
@@ -575,12 +583,17 @@ object RulerHost {
             recordPublicEvents(before, after)
             for (civ in ruledCivs) recordChancery(civ, civSnapshots[civ]!!)
 
+            for (civ in ruledCivs) {
+                val news = chanceryLog(civ, game.turns - 1).map { it["text"] as String }.filter { line -> wakeWorthy.any { it.containsMatchIn(line) } }
+                val fresh = warnings(civ).map { it.replace(Regex("-?\\d+"), "#") }.filter { it !in (warningsSeen[civ.civName] ?: emptySet()) }
+                if (news.isNotEmpty() || fresh.isNotEmpty()) wake[civ.civName] = news + fresh
+            }
             val winner = game.majorCivs().firstOrNull { it.victoryManager.hasWon() }
             stopReason = when {
                 winner != null -> "${winner.civName} has won a ${winner.victoryManager.getVictoryTypeAchieved()} victory"
                 else -> orders.keys.firstNotNullOfOrNull { ruled -> councilEvent(ruled, roundStart, after) }
             }
-            if (stopReason != null) break
+            if (stopReason != null || (wakeOnEvents && wake.isNotEmpty())) break
         }
         save()
         return mapOf(
@@ -589,6 +602,7 @@ object RulerHost {
             "turn" to game.turns,
             "year" to yearText(game.turns),
             "stoppedEarly" to stopReason,
+            "wake" to wake,
             "publicEvents" to publicEvents.filter { (it["turn"] as Int) > startTurn },
             "rankings" to rankings()
         )
@@ -705,6 +719,33 @@ object RulerHost {
             threats += "${unit.civ.civName} ${unit.name} (strength ${unit.baseUnit.strength.coerceAtLeast(unit.baseUnit.rangedStrength)}, $stance) at ${RulerUnits.where(civ, tile)}"
         }
         return threats
+    }
+
+    /** What the rulebook says about a building, wonder, unit or technology - so nobody has to advise from memory */
+    private fun lookup(civ: Civilization, name: String): Map<String, Any?> {
+        val ruleset = civ.gameInfo.ruleset
+        fun <T> find(map: Map<String, T>) = map.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+        find(ruleset.buildings)?.let { b ->
+            return mapOf("kind" to if (b.isWonder) "wonder" else if (b.isNationalWonder) "national wonder" else "building", "name" to b.name,
+                "cost" to b.cost, "maintenance" to b.maintenance, "requiresTech" to b.requiredTech, "requiresBuilding" to b.requiredBuilding,
+                "yields" to b.cloneStats().toString(), "happiness" to b.happiness.toInt(),
+                "effects" to b.uniques, "alreadyBuiltSomewhere" to (b.isWonder && civ.gameInfo.getCities().any { it.cityConstructions.isBuilt(b.name) }),
+                "weHaveTheTech" to (b.requiredTech == null || civ.tech.isResearched(b.requiredTech!!)))
+        }
+        find(ruleset.units)?.let { u ->
+            return mapOf("kind" to "unit", "name" to u.name, "cost" to u.cost, "strength" to u.strength, "rangedStrength" to u.rangedStrength, "range" to u.range,
+                "movement" to u.movement, "requiresTech" to u.requiredTech, "requiresResource" to u.requiredResource, "upgradesTo" to u.upgradesTo,
+                "obsoleteWith" to u.obsoleteTech, "abilities" to u.uniques, "weHaveTheTech" to (u.requiredTech == null || civ.tech.isResearched(u.requiredTech!!)))
+        }
+        find(ruleset.technologies)?.let { t ->
+            return mapOf("kind" to "technology", "name" to t.name, "era" to t.era(), "researched" to civ.tech.isResearched(t.name),
+                "turnsFromHere" to civ.tech.getRequiredTechsToDestination(t).sumOf { civ.tech.turnsToTech(it.name).toIntOrNull() ?: 0 },
+                "prerequisites" to t.prerequisites.toList(),
+                "unlocks" to (ruleset.buildings.values.filter { it.requiredTech == t.name }.map { it.name } + ruleset.units.values.filter { it.requiredTech == t.name }.map { it.name }),
+                "effects" to t.uniques)
+        }
+        find(ruleset.policies)?.let { p -> return mapOf("kind" to "policy", "name" to p.name, "branch" to p.branch.name, "effects" to p.uniques, "adopted" to civ.policies.isAdopted(p.name)) }
+        throw ApiError(404, "The rulebook has nothing called '$name'")
     }
 
     private fun options(civ: Civilization): Map<String, Any?> {
