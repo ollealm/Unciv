@@ -165,10 +165,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             "${where(civ, target)} is already held by ${if (occupant.civ == civ) "our" else occupant.civ.civName + "'s"} ${occupant.name} #${occupant.id}; two ${if (unit.isCivilian()) "civilians" else "soldiers"} cannot share a tile. " +
             (if (occupant.civ == civ) "Use garrison to swap places with it, pick a tile beside it, or leave it be - the place is already covered." else "Pick another tile."))
         // Orders are given between turns, when a unit has usually spent its movement - and Unciv finds no path at all for a unit with none left
-        val spent = unit.currentMovement
-        unit.currentMovement = unit.getMaxMovement().toFloat()
-        val path = try { if (target == unit.getTile()) listOf() else unit.movement.getShortestPath(target) } finally { unit.currentMovement = spent }
-        if (target != unit.getTile() && !willSwap && path.isEmpty()) throw IllegalArgumentException("${unit.name} cannot reach ${where(civ, target)} (water, mountains or foreign borders in the way)")
+        val path = if (target == unit.getTile()) listOf() else pathTo(unit, target)
+        if (target != unit.getTile() && !willSwap && path.isEmpty()) throw IllegalArgumentException("${unit.name} cannot reach ${where(civ, target)} (water, mountains or foreign borders in the way)" + if (action == "settle") nearestSiteHint(civ, unit, target) else "")
         val ability = json.get("ability")?.takeUnless { it.isNull }?.asString()
         if (ability != null && abilitiesNamed(ability).isEmpty()) throw IllegalArgumentException("Unknown ability '$ability'; use one of: ${ABILITY_WORDS.keys.joinToString()}")
         orders[unitId] = Order(action, x, y, ability)
@@ -206,9 +204,16 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
     private fun nearestSiteHint(civ: Civilization, unit: MapUnit, target: Tile): String {
         val best = CityLocationTileRanker.getBestTilesToFoundCity(unit, 8, 0f).tileRankMap.entries
-            .filter { settleProblem(civ, it.key) == null }
-            .minByOrNull { it.key.aerialDistanceTo(target) * 10 - it.value } ?: return ""
+            .filter { settleProblem(civ, it.key) == null && pathTo(unit, it.key).isNotEmpty() }
+            .minByOrNull { it.key.aerialDistanceTo(target) * 10 - it.value } ?: return ". No usable site is within this settler's reach - see citySites in the briefing, or disband it"
         return ". Nearest good site: ${where(civ, best.key)}"
+    }
+
+    /** The way there for a unit given a full turn's movement - orders are given between turns, when units have spent theirs, and Unciv finds no path for a spent unit */
+    private fun pathTo(unit: MapUnit, target: Tile): List<Tile> {
+        val spent = unit.currentMovement
+        unit.currentMovement = unit.getMaxMovement().toFloat()
+        return try { unit.movement.getShortestPath(target) } finally { unit.currentMovement = spent }
     }
 
     /** Best places to found a city near our lands: the officials' ranking when a settler can judge, else our own simple survey */
@@ -217,7 +222,11 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         val ranked: Map<Tile, Float> = settler?.let { CityLocationTileRanker.getBestTilesToFoundCity(it, 8, 0f).tileRankMap }
             ?.filterKeys { settleProblem(civ, it) == null }?.takeIf { it.isNotEmpty() }
             ?: survey(civ)
-        return ranked.entries.sortedByDescending { it.value }.take(5).map { (tile, rank) -> describeSite(civ, tile, rank) }
+        // A site nobody can walk to is no site: asked of the settler if we have one, else judged by landmass
+        val home = civ.cities.map { it.getCenterTile().getContinent() }.toSet()
+        return ranked.entries.sortedByDescending { it.value }.asSequence()
+            .filter { (tile, _) -> if (settler != null) tile == settler.getTile() || pathTo(settler, tile).isNotEmpty() else tile.getContinent() in home }
+            .take(5).map { (tile, rank) -> describeSite(civ, tile, rank) }.toList()
     }
 
     /** Is there anywhere left to found a city, on a landmass we already live on? Reckoned once a turn per civ. */
@@ -225,8 +234,15 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     fun hasLandForACity(civ: Civilization): Boolean {
         val turn = civ.gameInfo.turns
         landLeft[civ.civName]?.takeIf { it.first == turn }?.let { return it.second }
+        // Generous on purpose: this only has to catch the case where there is plainly nowhere to go. The officials' settlers range
+        // far (15 tiles and more), and once our people can embark any shore will do.
         val home = civ.cities.map { it.getCenterTile().getContinent() }.toSet()
-        val any = civ.cities.isEmpty() || survey(civ).keys.any { it.getContinent() in home }
+        val any = civ.cities.isEmpty() || civ.cities.asSequence().flatMap { it.getCenterTile().getTilesInDistance(16) }
+            .any { (civ.tech.unitsCanEmbark || it.getContinent() in home) && settleProblem(civ, it) == null }
+        // Said once each way, so a run can be checked for what this gate did
+        val before = landLeft[civ.civName]?.second ?: true
+        if (before && !any) log(civ, "No land is left within our reach for a new city; the officials will train no settlers until that changes.")
+        if (!before && any) log(civ, "There is land for a new city again; the officials may train settlers.")
         landLeft[civ.civName] = Pair(turn, any)
         return any
     }
