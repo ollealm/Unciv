@@ -18,6 +18,8 @@ object UseGoldAutomation {
 
     /** allow AI to spend money to purchase city-state friendship, buildings & unit */
     fun useGold(civ: Civilization) {
+        // A ruler's treasury reserve: the officials keep their hands off the purse until it holds more than that
+        com.unciv.logic.automation.RulerOverrides.goldReserve[civ.civID]?.let { if (civ.gold <= it) return }
         for (unit in civ.units.getCivUnits())
             UnitAutomation.tryUpgradeUnit(unit)
 

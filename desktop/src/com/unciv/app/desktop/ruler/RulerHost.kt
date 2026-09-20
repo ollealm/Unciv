@@ -59,7 +59,10 @@ object RulerHost {
         var policyBranches = ArrayList<String>()
         /** Buildings and units the officials must never queue on their own */
         var neverBuild = ArrayList<String>()
+        /** Gold the officials must leave untouched; null = they spend as they see fit */
+        var goldReserve: Int? = null
         fun toMap(civ: Civilization? = null) = mapOf(
+            "goldReserve" to goldReserve,
             "personality" to personality,
             "neverBuild" to neverBuild,
             "research" to research.filter { civ == null || !civ.tech.isResearched(it) },
@@ -219,7 +222,8 @@ object RulerHost {
             "publicEvents" to publicEvents,
             "chancery" to chancery,
             "unitOrders" to units.toMap(),
-            "lockedCities" to RulerOverrides.lockedCities.toList()
+            "lockedCities" to RulerOverrides.lockedCities.toList(),
+            "focusedCities" to RulerOverrides.focusedCities.toList()
         )))
     }
 
@@ -240,6 +244,8 @@ object RulerHost {
         units.load(host.get("unitOrders"))
         RulerOverrides.lockedCities.clear()
         host.get("lockedCities")?.asStringArray()?.let { RulerOverrides.lockedCities += it }
+        RulerOverrides.focusedCities.clear()
+        host.get("focusedCities")?.asStringArray()?.let { RulerOverrides.focusedCities += it }
         registerRuledCivs()
         println("Loaded game at turn ${loaded.turns}, ruled: ${orders.keys}")
     }
@@ -273,6 +279,7 @@ object RulerHost {
         json.get("research")?.let { research = ArrayList(it.asStringArray().toList()) }
         json.get("policyBranches")?.let { policyBranches = ArrayList(it.asStringArray().toList()) }
         json.get("neverBuild")?.let { neverBuild = ArrayList(it.asStringArray().toList()) }
+        json.get("goldReserve")?.let { goldReserve = if (it.isNull) null else it.asInt().coerceAtLeast(0) }
     }
 
     private fun applyPersonality(civ: Civilization, standing: StandingOrders) {
@@ -280,6 +287,7 @@ object RulerHost {
         val personality = Personality().apply { this[PersonalityValue.DeclareWar] = 0f }
         for ((name, value) in standing.personality) personality[PersonalityValue.valueOf(name)] = value
         RulerOverrides.personalities[civ.civID] = personality
+        standing.goldReserve?.let { RulerOverrides.goldReserve[civ.civID] = it } ?: RulerOverrides.goldReserve.remove(civ.civID)
     }
 
     private fun Civilization.city(name: String): City = cities.firstOrNull { it.name == name } ?: throw ApiError(400, "No city named $name")
@@ -292,18 +300,28 @@ object RulerHost {
         val ruleset = civ.gameInfo.ruleset
         val standing = orders.getOrPut(civ.civName) { StandingOrders() }
         val alreadyKnown = ArrayList<String>()
-        json.get("research")?.asStringArray()?.forEach {
-            if (it !in ruleset.technologies) throw ApiError(400, "Unknown technology $it")
-            if (civ.tech.isResearched(it)) alreadyKnown += it
+        val rejected = ArrayList<String>()
+        json.get("research")?.let { goals ->
+            val kept = goals.asStringArray().filter { goal ->
+                if (goal !in ruleset.technologies) rejected += "No technology is called '$goal'" + (if (goal in ruleset.policies) " - that is a policy; put it in policyBranches" else "; see get_options.futureTechs") + ". The other research goals were kept."
+                if (goal in ruleset.technologies && civ.tech.isResearched(goal)) alreadyKnown += goal
+                goal in ruleset.technologies
+            }
+            goals.remove(); json.addChild("research", JsonValue(JsonValue.ValueType.array).also { array -> kept.forEach { array.addChild(JsonValue(it)) } })
         }
-        json.get("policyBranches")?.asStringArray()?.forEach {
-            if (it !in ruleset.policyBranches) throw ApiError(400, "Unknown policy branch $it, valid: ${ruleset.policyBranches.keys}")
+        json.get("policyBranches")?.let { wishes ->
+            val kept = wishes.asStringArray().filter { wish ->
+                val known = wish in ruleset.policyBranches || wish in ruleset.policies
+                if (!known) rejected += "No policy or policy branch is called '$wish'; branches: ${ruleset.policyBranches.keys.joinToString()}. The others were kept."
+                known
+            }
+            wishes.remove(); json.addChild("policyBranches", JsonValue(JsonValue.ValueType.array).also { array -> kept.forEach { array.addChild(JsonValue(it)) } })
         }
         standing.readFrom(json)
         applyPersonality(civ, standing)
 
         val done = ArrayList<String>()
-        val failed = ArrayList<String>()
+        val failed = ArrayList<String>(rejected)
         /** Each item stands alone: a bad one is reported under "failed" and the rest still go through */
         fun tryEach(list: JsonValue?, action: (JsonValue) -> String) {
             list?.forEach { entry ->
@@ -385,6 +403,7 @@ object RulerHost {
             val focus = com.unciv.logic.city.CityFocus.entries.firstOrNull { it.name.equals(order.getString("focus"), ignoreCase = true) || it.name.equals(order.getString("focus") + "Focus", ignoreCase = true) }
                 ?: throw ApiError(400, "Unknown focus; use ${com.unciv.logic.city.CityFocus.entries.joinToString { it.name }}")
             city.setCityFocus(focus)
+            if (focus == com.unciv.logic.city.CityFocus.NoFocus) RulerOverrides.focusedCities -= city.id else RulerOverrides.focusedCities += city.id
             city.reassignAllPopulation()
             "${city.name} now works its tiles for ${focus.name}"
         }
@@ -409,11 +428,16 @@ object RulerHost {
         }
 
         while (civ.policies.canAdoptPolicy()) {
-            val policy = standing.policyBranches.asSequence().mapNotNull { ruleset.policyBranches[it] }
-                .firstNotNullOfOrNull { branch ->
-                    if (civ.policies.isAdoptable(branch)) branch
-                    else branch.policies.firstOrNull { civ.policies.isAdoptable(it) }
-                } ?: break // nothing preferred is available - the automation picks
+            val policy = standing.policyBranches.asSequence().firstNotNullOfOrNull { wish ->
+                val branch = ruleset.policyBranches[wish]
+                val named = ruleset.policies[wish]
+                when {
+                    branch != null && civ.policies.isAdoptable(branch) -> branch
+                    branch != null -> branch.policies.firstOrNull { civ.policies.isAdoptable(it) }
+                    named != null && civ.policies.isAdoptable(named) -> named   // a single policy the ruler named, e.g. Monarchy
+                    else -> null
+                }
+            } ?: break // nothing preferred is available - the automation picks
             civ.policies.adopt(policy)
             log(civ, "Adopted the policy ${policy.name}.")
         }
@@ -571,6 +595,8 @@ object RulerHost {
     private val wakeWorthy = listOf("dropped .* because", "declared war", "denounced", "lost in action",
         "awaits orders", "captured", "has been destroyed", "has been stuck").map { Regex(it, RegexOption.IGNORE_CASE) }
 
+    private val warningsWoken = HashMap<String, HashSet<String>>()
+
     private fun advance(turns: Int, wakeOnEvents: Boolean = false): Any? {
         val game = game()
         if (game.majorCivs().any { it.victoryManager.hasWon() }) throw ApiError(409, "The game is over")
@@ -593,7 +619,10 @@ object RulerHost {
 
             for (civ in ruledCivs) {
                 val news = chanceryLog(civ, game.turns - 1).map { it["text"] as String }.filter { line -> wakeWorthy.any { it.containsMatchIn(line) } }
-                val fresh = warnings(civ).map { it.replace(Regex("-?\\d+"), "#") }.filter { it !in (warningsSeen[civ.civName] ?: emptySet()) }
+                // A warning wakes an advisor once per game: many of them flicker on and off between turns, and every look-in shows them all anyway
+                val everSeen = warningsWoken.getOrPut(civ.civName) { HashSet(warningsSeen[civ.civName] ?: emptySet()) }
+                val fresh = warnings(civ).map { it.replace(Regex("-?\\d+"), "#") }.filter { everSeen.add(it) }
+                    .filter { "no defender" in it || "unhappy" in it || "treasury" in it.lowercase() || "no military" in it }
                 if (news.isNotEmpty() || fresh.isNotEmpty()) wake[civ.civName] = news + fresh
             }
             val winner = game.majorCivs().firstOrNull { it.victoryManager.hasWon() }
@@ -635,6 +664,7 @@ object RulerHost {
     //region Briefing
 
     private fun briefing(civ: Civilization, logSince: Int? = null): Map<String, Any?> {
+        for (city in civ.cities) city.cityStats.update() // yields are cached per turn; stale ones showed food 0 and "0 turns left"
         val next = civ.stats.statsForNextTurn
         val turn = civ.gameInfo.turns
         return mapOf(

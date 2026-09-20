@@ -48,7 +48,7 @@ class CityTurnManager(val city: City) {
             city.setCityFocus(CityFocus.GoldFocus)
             city.reassignAllPopulation()
         } else if (city.shouldReassignPopulation || city.civ.isAI()) {
-            if (city.civ.isAI())
+            if (city.civ.isAI() && city.id !in com.unciv.logic.automation.RulerOverrides.focusedCities)
                 city.setCityFocus(chooseCityFocus())
             city.reassignPopulation()  // includes cityStats.update
         } else

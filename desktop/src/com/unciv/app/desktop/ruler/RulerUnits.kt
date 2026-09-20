@@ -149,6 +149,10 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             throw IllegalArgumentException("${target.getCity()!!.name} is held by ${holder.civ.civName}'s ${holder.name}")
         }
         val willSwap = action == "garrison" && target.militaryUnit?.civ == civ
+        val occupant = (if (unit.isCivilian()) target.civilianUnit else target.militaryUnit)?.takeIf { it != unit }
+        if (occupant != null && !willSwap) throw IllegalArgumentException(
+            "${where(civ, target)} is already held by ${if (occupant.civ == civ) "our" else occupant.civ.civName + "'s"} ${occupant.name} #${occupant.id}; two ${if (unit.isCivilian()) "civilians" else "soldiers"} cannot share a tile. " +
+            (if (occupant.civ == civ) "Use garrison to swap places with it, pick a tile beside it, or leave it be - the place is already covered." else "Pick another tile."))
         if (target != unit.getTile() && !willSwap && !unit.movement.canReach(target)) throw IllegalArgumentException("${unit.name} cannot reach ${where(civ, target)} (water, mountains or foreign borders in the way)")
         orders[unitId] = Order(action, x, y)
         val turns = if (target == unit.getTile()) 0 else kotlin.math.ceil(unit.movement.getShortestPath(target).size / unit.getMaxMovement().coerceAtLeast(1).toFloat()).toInt()

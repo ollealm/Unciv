@@ -18,6 +18,12 @@ object RulerOverrides {
     /** ids of cities whose build queue was set by the ruler - the automation must not overwrite its front item */
     val lockedCities: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
+    /** ids of cities whose citizen focus was set by the ruler - the automation must not re-choose it every turn */
+    val focusedCities: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** civID -> gold the officials must leave in the treasury; they spend on their own only what lies above it */
+    val goldReserve = ConcurrentHashMap<String, Int>()
+
     /**
      *  Asked before the automation moves each unit of a ruled civ. Returning true means the ruler's own order
      *  handled this unit this turn and the automation must leave it alone.
