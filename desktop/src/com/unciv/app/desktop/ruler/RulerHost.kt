@@ -708,14 +708,13 @@ object RulerHost {
     }
 
     /** Something a ruler must hear about right away, ending the round early */
+    /** What stops the clocks for everyone: only a war with a major power - the one thing that needs the ruler's change of course.
+     *  A lost city wakes the advisor (there is little a ruler can do in that hour, and the dispatch tells it); a fallen realm is dealt with when the age is done. */
     private fun councilEvent(ruled: String, roundStart: WorldSnapshot, now: WorldSnapshot): String? {
-        if (ruled !in now.alive) return if (ruled in roundStart.alive) "$ruled has been destroyed" else null // a realm falls only once
+        if (ruled !in now.alive) return null
         val newEnemies = (now.wars - roundStart.wars).filter { ruled in it }.flatten().filter { it != ruled }
             .filter { enemy -> game().civilizations.first { it.civName == enemy }.isMajorCiv() }
-        if (newEnemies.isNotEmpty()) return "$ruled is now at war with ${newEnemies.joinToString()}"
-        val lost = roundStart.cityOwners.filter { it.value == ruled && now.cityOwners[it.key] != ruled }.keys
-        if (lost.isNotEmpty()) return "$ruled lost ${lost.joinToString()}"
-        return null
+        return if (newEnemies.isNotEmpty()) "$ruled is now at war with ${newEnemies.joinToString()}" else null
     }
 
     private fun rankings() = game().majorCivs().filter { it.isAlive() }
