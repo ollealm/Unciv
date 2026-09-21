@@ -158,6 +158,7 @@ object RulerHost {
                 Png(MapRenderer.render(civ(), query["style"] ?: "atlas", trail = trail, since = from, sinceYear = yearText(from))) }
             "GET /orders" -> civ().let { orders.getOrPut(it.civName) { StandingOrders() }.toMap(it) }
             "POST /orders" -> setOrders(civ(), json)
+            "POST /grant" -> grant(civ(), json)
             "GET /events" -> publicEvents.filter { (it["turn"] as Int) > since }
             else -> throw ApiError(404, "No route $method $path")
         }
@@ -236,6 +237,23 @@ object RulerHost {
             "lockedCities" to RulerOverrides.lockedCities.toList(),
             "focusedCities" to RulerOverrides.focusedCities.toList()
         )))
+    }
+
+    /** A copy of the world after every stretch of turns, so a test game can be wound back (the last dozen are kept) */
+    private fun backup() {
+        val folder = File(dataDir, "backups/turn-${game().turns.toString().padStart(4, '0')}").apply { mkdirs() }
+        for (name in listOf("save.unciv", "host.json", "orchestrator.json")) File(dataDir, name).takeIf { it.exists() }?.copyTo(File(folder, name), overwrite = true)
+        File(dataDir, "backups").listFiles()?.filter { it.isDirectory }?.sortedBy { it.name }?.dropLast(12)?.forEach { it.deleteRecursively() }
+    }
+
+    /** For test games only: gold from outside the world, said plainly in the log so the advisor knows where it came from */
+    private fun grant(civ: Civilization, json: JsonValue): Any? {
+        val gold = json.getInt("gold", 0)
+        if (gold <= 0) throw ApiError(400, "gold must be positive")
+        civ.addGold(gold)
+        log(civ, "The treasury received $gold gold from outside the world - a grant by the keepers of this test game, not the fruit of any deal. It is ours to spend.")
+        save()
+        return mapOf("gold" to civ.gold)
     }
 
     private fun load() {
@@ -709,6 +727,7 @@ object RulerHost {
             if (stopReason != null || (wakeOnEvents && wake.isNotEmpty())) break
         }
         save()
+        backup()
         return mapOf(
             "fromTurn" to startTurn,
             "fromYear" to yearText(startTurn),
