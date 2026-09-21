@@ -35,8 +35,9 @@ object MapRenderer {
     /**
      *  atlas: the whole map drawn by us. reference: terrain, coasts and rivers only, for an image model to repaint.
      *  overlay: borders, units, cities and names drawn on top of [base] (a repaint of the reference, any size).
+     *  campaign: the atlas with the marches since turn [since] traced on it, from [trail].
      */
-    fun render(civ: Civilization, style: String = "atlas", base: BufferedImage? = null): ByteArray {
+    fun render(civ: Civilization, style: String = "atlas", base: BufferedImage? = null, trail: RulerTrail? = null, since: Int = 0, sinceYear: String = ""): ByteArray {
         val drawTerrain = style != "overlay"
         val drawOverlay = style != "reference"
         val game = civ.gameInfo
@@ -63,7 +64,7 @@ object MapRenderer {
         if (base != null) {
             g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC)
             g.drawImage(base, 0, 0, width, height, null) // the repaint keeps our layout, so our coordinates still hold
-        } else if (style == "atlas") {
+        } else if (style != "reference") {
             // a faint mottle so the parchment is not flat
             val mottle = java.util.Random(7)
             g.color = Color(200, 185, 150, 40)
@@ -193,6 +194,59 @@ object MapRenderer {
                     (under.blue + (tint.blue - under.blue) * weight).toInt()).rgb)
             }
         }
+        if (style == "campaign" && trail != null) {
+            // Marches: each unit in sight trails the way it came, a point per turn, ending in an arrowhead at its marker
+            fun colorOf(name: String) = game.civilizations.firstOrNull { it.civName == name }
+                ?.let { if (it.isBarbarian) Color(140, 30, 30) else it.nation.getOuterColor().let { c -> Color(c.r, c.g, c.b) } } ?: ink
+            for (tile in visible) for (unit in tile.getUnits()) {
+                val own = unit.civ == civ
+                if (!unit.isMilitary() && "Settler" !in unit.name) continue // workers and caravans wander; nobody wants their scribbles
+                val path = trail.path(unit.id, since).mapNotNull { game.tileMap.getIfTileExistsOrNull(it.x, it.y) }
+                    .filter { it in points && (own || it.isExplored(civ)) }
+                if (path.size < 2 || path.first().aerialDistanceTo(path.last()) < 2) continue
+                val xs = path.map { px(it) }; val ys = path.map { py(it) }
+                if (xs.zipWithNext().any { (a, b) -> kotlin.math.abs(a - b) > width / 2 }) continue // went round the back of the world
+                // Stop short of the unit's own marker, so the arrowhead points at it instead of hiding under it
+                val last = xs.size - 1
+                val dx = xs[last] - xs[last - 1]; val dy = ys[last] - ys[last - 1]
+                val length = sqrt(dx * dx + dy * dy).coerceAtLeast(1f)
+                val endX = xs[last] - dx / length * 9f; val endY = ys[last] - dy / length * 9f
+                val curve = java.awt.geom.Path2D.Float()
+                curve.moveTo(xs[0], ys[0])
+                for (i in 1 until last) curve.quadTo(xs[i], ys[i], (xs[i] + xs[i + 1]) / 2, (ys[i] + ys[i + 1]) / 2) // corners rounded through the midpoints
+                curve.lineTo(endX, endY)
+                val head = Polygon()
+                val ux = dx / length; val uy = dy / length
+                head.addPoint(endX.toInt(), endY.toInt())
+                head.addPoint((endX - ux * 9 - uy * 4.5f).toInt(), (endY - uy * 9 + ux * 4.5f).toInt())
+                head.addPoint((endX - ux * 9 + uy * 4.5f).toInt(), (endY - uy * 9 - ux * 4.5f).toInt())
+                val color = colorOf(unit.civ.civName)
+                val thickness = if (own) 2.6f else 1.8f
+                g.color = Color(ink.red, ink.green, ink.blue, 170)
+                g.stroke = BasicStroke(thickness + 1.6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND); g.draw(curve)
+                g.color = if (own) color else Color(color.red, color.green, color.blue, 190) // others' marches a little fainter than ours
+                g.stroke = BasicStroke(thickness, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND); g.draw(curve)
+                g.fillOval((xs[0] - 3).toInt(), (ys[0] - 3).toInt(), 6, 6)
+                g.fillPolygon(head); g.color = ink; g.stroke = BasicStroke(1f); g.drawPolygon(head)
+            }
+            for (mark in trail.marks) {
+                if (mark.turn <= since) continue
+                val tile = game.tileMap.getIfTileExistsOrNull(mark.x, mark.y) ?: continue
+                if (tile !in points || !tile.isExplored(civ)) continue
+                val x = px(tile).toInt(); val y = py(tile).toInt()
+                if (mark.kind == "taken") {
+                    g.color = Color(170, 30, 30); g.stroke = BasicStroke(2.4f)
+                    g.drawOval(x - 14, y - 14, 28, 28); g.stroke = BasicStroke(1.2f); g.drawOval(x - 18, y - 18, 36, 36)
+                } else if (mark.civ == civ.civName || tile in visible) {
+                    // a company lost: a cross in its colours, set a little aside so it does not sit on whoever holds the field now
+                    val cx = x + 8; val cy = y - 8
+                    g.color = ink; g.stroke = BasicStroke(4f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+                    g.drawLine(cx - 4, cy - 4, cx + 4, cy + 4); g.drawLine(cx - 4, cy + 4, cx + 4, cy - 4)
+                    g.color = colorOf(mark.civ); g.stroke = BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+                    g.drawLine(cx - 4, cy - 4, cx + 4, cy + 4); g.drawLine(cx - 4, cy + 4, cx + 4, cy - 4)
+                }
+            }
+        }
         // Units in sight, as small map markers
         for (tile in visible) {
             if (tile !in points) continue
@@ -234,13 +288,14 @@ object MapRenderer {
         val year = game.getYear()
         val yearText = if (year < 0) "${-year} BC" else "AD $year"
         g.font = Font(Font.SERIF, Font.BOLD, 18)
-        val title = "The Known World of ${civ.civName}, $yearText"
+        val title = if (style == "campaign") "The Marches of ${civ.civName}, $sinceYear to $yearText" else "The Known World of ${civ.civName}, $yearText"
         g.color = Color(parchment.red, parchment.green, parchment.blue, 220)
         g.fillRoundRect(10, 10, g.fontMetrics.stringWidth(title) + 20, 30, 8, 8)
         g.color = ink; g.stroke = BasicStroke(1.2f)
         g.drawRoundRect(10, 10, g.fontMetrics.stringWidth(title) + 20, 30, 8, 8)
         g.drawString(title, 20, 31)
         g.font = Font(Font.SERIF, Font.ITALIC, 11)
+        if (style == "campaign") g.drawString("Lines trace the marches of these years. A cross: a company lost. A red ring: a city taken.", 14, height - 10)
 
         g.dispose()
 

@@ -52,6 +52,7 @@ object RulerHost {
     private val chancery = HashMap<String, ArrayList<Map<String, Any?>>>()
     private val units = RulerUnits { civ, text -> log(civ, text) }
     private val diplomacy = RulerDiplomacy { civ, text -> log(civ, text) }
+    private val trail = RulerTrail()
 
     class StandingOrders {
         var personality = LinkedHashMap<String, Float>()
@@ -153,7 +154,8 @@ object RulerHost {
             "GET /options" -> options(civ())
             "GET /log" -> chanceryLog(civ(), since)
             "GET /lookup" -> lookup(civ(), query["name"] ?: throw ApiError(400, "Missing name"))
-            "GET /map.png" -> Png(MapRenderer.render(civ(), query["style"] ?: "atlas"))
+            "GET /map.png" -> (query["since"]?.toIntOrNull() ?: (game().turns - 10)).coerceAtLeast(0).let { from ->
+                Png(MapRenderer.render(civ(), query["style"] ?: "atlas", trail = trail, since = from, sinceYear = yearText(from))) }
             "GET /orders" -> civ().let { orders.getOrPut(it.civName) { StandingOrders() }.toMap(it) }
             "POST /orders" -> setOrders(civ(), json)
             "GET /events" -> publicEvents.filter { (it["turn"] as Int) > since }
@@ -199,6 +201,8 @@ object RulerHost {
         publicEvents.clear()
         chancery.clear()
         units.orders.clear()
+        trail.clear()
+        trail.record(newGame)
         RulerOverrides.lockedCities.clear()
         for (name in ruled) orders[name] = StandingOrders()
         registerRuledCivs()
@@ -228,6 +232,7 @@ object RulerHost {
             "publicEvents" to publicEvents,
             "chancery" to chancery,
             "unitOrders" to units.toMap(),
+            "trail" to trail.toMap(),
             "lockedCities" to RulerOverrides.lockedCities.toList(),
             "focusedCities" to RulerOverrides.focusedCities.toList()
         )))
@@ -248,6 +253,8 @@ object RulerHost {
             chancery[civLog.name] = ArrayList(civLog.map { mapOf("turn" to it.getInt("turn"), "text" to it.getString("text")) })
         }
         units.load(host.get("unitOrders"))
+        trail.load(host.get("trail"))
+        trail.record(loaded) // a save from before the trail was kept starts one here
         RulerOverrides.lockedCities.clear()
         host.get("lockedCities")?.asStringArray()?.let { RulerOverrides.lockedCities += it }
         RulerOverrides.focusedCities.clear()
@@ -667,6 +674,7 @@ object RulerHost {
             val civSnapshots = ruledCivs.associateWith { CivSnapshot(it) }
             for (civ in ruledCivs) applyStandingOrders(civ)
             game.nextTurn()
+            trail.record(game)
             val after = WorldSnapshot(game)
             recordPublicEvents(before, after)
             for (civ in ruledCivs) recordChancery(civ, civSnapshots[civ]!!)
