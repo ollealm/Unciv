@@ -48,7 +48,7 @@ object NextTurnAutomation {
         if (tradeAndChangeState && civInfo.isMajorCiv()) {
             if (!civInfo.gameInfo.ruleset.modOptions.hasUnique(UniqueType.DiplomaticRelationshipsCannotChange)) {
                 DiplomacyAutomation.declareWar(civInfo)
-                DiplomacyAutomation.offerPeaceTreaty(civInfo)
+                if (civInfo.civID !in com.unciv.logic.automation.RulerOverrides.ruledCivs) DiplomacyAutomation.offerPeaceTreaty(civInfo) // a ruler's peace is the ruler's to offer
                 DiplomacyAutomation.askForHelp(civInfo)
                 DiplomacyAutomation.offerDeclarationOfFriendship(civInfo)
             }

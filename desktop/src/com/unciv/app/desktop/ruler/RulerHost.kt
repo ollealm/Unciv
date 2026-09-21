@@ -565,6 +565,7 @@ object RulerHost {
             if (before.researching != null) log(civ, "No research goal remains; the officials choose the next technology themselves until goals are given.")
         } else if (before.researching != researching && researching !in (orders[civ.civName]?.research ?: emptyList()))
             log(civ, "Research is now on $researching.")
+        diplomacy.peaceOffers(civ, announce = true)
         // Deals: say exactly what came into force and what ended
         val dealsNow = diplomacy.dealsInForce(civ)
         for (deal in diplomacy.endingSoon(civ, 5) - diplomacy.endingSoon(civ, 4).toSet()) log(civ, "A deal ends in five turns: $deal. Renew it only if it is still worth its price.")
@@ -667,7 +668,7 @@ object RulerHost {
     // Not answers to our own proposals: acting on one sends another, and the advisor would be woken by his own echo every turn.
     // Not "demands": that is a city asking for a luxury, not a neighbour asking for tribute.
     private val wakeWorthy = listOf("dropped .* because", "declared war", "denounced", "lost in action",
-        "awaits orders", "captured", "has been destroyed", "has been stuck").map { Regex(it, RegexOption.IGNORE_CASE) }
+        "awaits orders", "captured", "has been destroyed", "has been stuck", "offers peace").map { Regex(it, RegexOption.IGNORE_CASE) }
 
     private val warningsWoken = HashMap<String, HashSet<String>>()
 
@@ -762,6 +763,13 @@ object RulerHost {
             "policies" to civ.policies.getAdoptedPolicies().toList(),
             "culture" to mapOf("stored" to civ.policies.storedCulture, "neededForNextPolicy" to civ.policies.getCultureNeededForNextPolicy()),
             "militaryStrength" to civ.getStatForRanking(RankingType.Force),
+            "militaryNote" to run {
+                val soldiers = civ.units.getCivUnits().filter { it.isMilitary() }.toList()
+                val total = soldiers.sumOf { it.getForceEvaluation() }.coerceAtLeast(1)
+                val siege = soldiers.filter { it.baseUnit.isProbablySiegeUnit() || it.baseUnit.isRanged() }.sumOf { it.getForceEvaluation() }
+                val bestOurs = soldiers.filter { it.baseUnit.isMelee() }.maxOfOrNull { it.baseUnit.strength } ?: 0
+                "militaryStrength is a headcount of raw force, ours and theirs alike - the figure the whole world sees. It does not say who wins. It leaves out: cities that shoot back (see each power's cityDefence; a city's strength against our best foot soldier, strength $bestOurs), the gap between ages (a later era's soldiers beat an earlier one's well beyond their numbers - compare eras), ground and walls, and what a rich realm buys in a season. ${siege * 100 / total}% of our own figure is archers and siege engines, which cannot stand in a line alone. Before advising an attack, weigh these, and say how sure you are."
+            },
             "units" to civ.units.getCivUnits().map { units.describeUnit(civ, it) }.toList(),
             "citySites" to units.citySites(civ),
             "cities" to civ.cities.map { city ->
@@ -778,6 +786,7 @@ object RulerHost {
             "threats" to threats(civ),
             "knownCivs" to diplomacy.relations(civ),
             "log" to chanceryLog(civ, logSince ?: (turn - 12)).map { "T${it["turn"]}: ${it["text"]}" },
+            "peaceOffers" to diplomacy.peaceOffers(civ),
             "dealsLedger" to diplomacy.ledger(civ),
             "standingOrders" to orders[civ.civName]?.toMap(civ)
         )

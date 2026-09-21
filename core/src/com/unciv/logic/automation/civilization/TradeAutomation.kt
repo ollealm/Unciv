@@ -17,7 +17,12 @@ object TradeAutomation {
 
 
     fun respondToTradeRequests(civInfo: Civilization, tradeAndChangeState: Boolean) {
+        // War and peace are a ruler's own: for a ruled civ an offer of peace is neither taken nor refused by the automation, it waits for the ruler's answer
+        val heldForRuler = if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs)
+            civInfo.tradeRequests.filter { request -> (request.trade.ourOffers + request.trade.theirOffers).any { it.name == com.unciv.Constants.peaceTreaty } }
+            else emptyList()
         for (tradeRequest in civInfo.tradeRequests.toList()) {
+            if (tradeRequest in heldForRuler) continue
             val otherCiv = civInfo.gameInfo.getCivilization(tradeRequest.requestingCiv)
             // Treat 'no trade' state as if all trades are invalid - thus AIs will not update its "turns to offer"
             if (!tradeAndChangeState || !TradeEvaluation().isTradeValid(tradeRequest.trade, civInfo, otherCiv))
@@ -47,6 +52,7 @@ object TradeAutomation {
             }
         }
         civInfo.tradeRequests.clear()
+        civInfo.tradeRequests.addAll(heldForRuler)
     }
 
     /** @return a TradeRequest with the same ourOffers as [tradeRequest] but with enough theirOffers
