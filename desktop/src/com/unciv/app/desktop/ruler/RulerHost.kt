@@ -745,6 +745,9 @@ object RulerHost {
             "civ" to civ.civName,
             "turn" to turn,
             "year" to yearText(turn),
+            // Advisors speak in years, but everything here counts turns - and early on a turn is decades long
+            "calendar" to (civ.gameInfo.getYear(1) - civ.gameInfo.getYear(0)).let { years ->
+                "One turn is now about $years year${if (years == 1) "" else "s"}. Every figure of turns in this briefing (turnsLeft, deal durations, 'about N turns away') counts turns, not years: ${if (years > 1) "3 turns is about ${3 * years} years. " else ""}Reckon it over before you speak of time, and prefer a loose span ('within a generation', 'a century's work') to an exact count." },
             "era" to civ.getEra().name,
             "waysToWin" to civ.gameInfo.gameParameters.victoryTypes.toList().ifEmpty { listOf("none - this world was made without victory conditions; nobody can build a spaceship or win a vote") },
             "score" to civ.calculateTotalScore().toInt(),
