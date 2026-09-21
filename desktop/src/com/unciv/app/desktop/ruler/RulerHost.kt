@@ -632,7 +632,20 @@ object RulerHost {
     }
 
     private fun recordPublicEvents(before: WorldSnapshot, after: WorldSnapshot) {
-        for (war in after.wars - before.wars) addPublicEvent("War has broken out between ${war.joinToString(" and ")}.")
+        for (war in after.wars - before.wars) {
+            // History needs to know who drew the sword: without it the Chronicler guesses, and blames the victim
+            val (first, second) = war.toList().let { it[0] to it[1] }
+            // the grievance fades slowly, so between two old enemies the fresher (deeper) one names this war's aggressor
+            fun grievance(victim: String, aggressor: String) = game().civilizations.firstOrNull { it.civName == victim }
+                ?.getDiplomacyManager(game().civilizations.first { it.civName == aggressor })
+                ?.diplomaticModifiers?.get(com.unciv.logic.civilization.diplomacy.DiplomaticModifiers.DeclaredWarOnUs.name) ?: 0f
+            val (secondWronged, firstWronged) = grievance(second, first) to grievance(first, second)
+            addPublicEvent(when {
+                secondWronged < 0f && secondWronged <= firstWronged -> "$first declared war on $second."
+                firstWronged < 0f -> "$second declared war on $first."
+                else -> "War has broken out between $first and $second (drawn in at an ally's side)."
+            })
+        }
         for (war in before.wars - after.wars)
             if (war.all { it in after.alive }) addPublicEvent("${war.joinToString(" and ")} have made peace.")
         for ((city, owner) in after.cityOwners) {
