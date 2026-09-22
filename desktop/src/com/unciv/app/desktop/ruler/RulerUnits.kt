@@ -40,7 +40,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
     /** A hold that only ever meant "a Great Person awaits orders" must not bind a soldier whose name merely begins with Great (Great War Infantry) */
     fun dropMistakenHolds(game: com.unciv.logic.GameInfo) = orders.entries.removeIf { (id, order) ->
-        order.action == "hold" && game.civilizations.asSequence().flatMap { it.units.getCivUnits() }.firstOrNull { it.id == id }?.let { !it.isGreatPerson() } == true }
+        order.action == "hold" && game.civilizations.asSequence().flatMap { it.units.getCivUnits() }.firstOrNull { it.id == id }?.let { !it.isGreatPerson() && it.name.startsWith("Great ") } == true } // only the units the old name check caught (Great War Infantry and the like); a hold an advisor gave a soldier stands
 
     fun load(json: JsonValue?) {
         orders.clear()
