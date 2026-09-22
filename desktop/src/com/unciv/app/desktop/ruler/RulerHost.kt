@@ -363,7 +363,7 @@ object RulerHost {
     private fun Civilization.construction(name: String): INonPerpetualConstruction =
         (gameInfo.ruleset.buildings[name] ?: gameInfo.ruleset.units[name]) ?: throw ApiError(400, "Unknown building or unit $name" + didYouMean(name, gameInfo.ruleset.buildings.keys + gameInfo.ruleset.units.keys))
     private fun whyNot(city: City, construction: INonPerpetualConstruction) =
-        construction.getRejectionReasons(city.cityConstructions).filter { it.type.shouldShow }.map { it.errorMessage }.toList()
+        construction.getRejectionReasons(city.cityConstructions).filter { it.shouldShow }.map { it.errorMessage }.toList()
 
     private fun setOrders(civ: Civilization, json: JsonValue): Any? {
         val ruleset = civ.gameInfo.ruleset
