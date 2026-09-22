@@ -20,6 +20,7 @@ object TradeAutomation {
         // War and peace are a ruler's own: for a ruled civ an offer of peace is neither taken nor refused by the automation, it waits for the ruler's answer
         val heldForRuler = if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs)
             civInfo.tradeRequests.filter { request -> (request.trade.ourOffers + request.trade.theirOffers).any { it.name == com.unciv.Constants.peaceTreaty } }
+                .groupBy { it.requestingCiv }.values.map { it.first() } // a power that asks every turn is asking once
             else emptyList()
         for (tradeRequest in civInfo.tradeRequests.toList()) {
             if (tradeRequest in heldForRuler) continue

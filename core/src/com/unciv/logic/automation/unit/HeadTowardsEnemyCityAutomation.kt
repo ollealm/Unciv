@@ -20,7 +20,7 @@ object HeadTowardsEnemyCityAutomation {
         // only focus on *attacking* 1 enemy at a time otherwise you'll lose on both fronts
         val closestReachableEnemyCity = getEnemyCitiesByPriority(unit)
             .firstOrNull { unit.movement.canReach(it.getCenterTile()) }
-            ?: return false // No enemy city reachable
+            ?: return headTowardsRingOfAimedCity(unit) // No enemy city reachable
 
         return headTowardsEnemyCity(
             unit,
@@ -28,6 +28,23 @@ object HeadTowardsEnemyCityAutomation {
             // This should be cached after the `canReach` call above.
             unit.movement.getShortestPath(closestReachableEnemyCity.getCenterTile())
         )
+    }
+
+    /** A ruler's war aim whose gate is plugged (its approaches held, the rest mountain or sea) has no path to its centre - but the host can still
+     *  gather within striking range: engines to bombard, foot soldiers to fight for the approaches. The siege routine takes it from there. */
+    private fun headTowardsRingOfAimedCity(unit: MapUnit): Boolean {
+        val aim = com.unciv.logic.automation.RulerOverrides.postures[unit.civ.civID]?.warAim ?: return false
+        val city = unit.civ.getKnownCivs().filter { unit.civ.isAtWarWith(it) }.flatMap { it.cities }.firstOrNull { it.name == aim } ?: return false
+        val centre = city.getCenterTile()
+        val reach = if (unit.baseUnit.isRanged()) unit.getRange() else 2
+        if (centre.aerialDistanceTo(unit.currentTile) <= reach) return false // already in the ring: let attacking and the siege routine act
+        val ringTile = centre.getTilesInDistance(reach)
+            .filter { it.isLand && it != centre && unit.getDamageFromTerrain(it) <= 0 }
+            .sortedBy { it.aerialDistanceTo(unit.currentTile) }
+            .firstOrNull { unit.movement.canMoveTo(it) && unit.movement.canReach(it) }
+            ?: return false
+        unit.movement.headTowards(ringTile)
+        return true
     }
 
     @Readonly

@@ -397,6 +397,12 @@ object RulerHost {
         applyPersonality(civ, standing)
         RulerOverrides.postures[civ.civID] = RulerOverrides.Posture(standing.warAim, standing.stance, standing.reserve)
         if (json.has("posture")) log(civ, "By your order: the host's posture is now ${standing.stance}" + (standing.warAim?.let { ", its aim $it" } ?: "") + (if (standing.reserve > 0) ", ${standing.reserve} soldiers kept home" else "") + ".")
+        standing.warAim?.let { aim -> civ.gameInfo.getCities().firstOrNull { it.name == aim }?.let { target ->
+            val centre = target.getCenterTile()
+            val gate = centre.neighbors.filter { it.isLand && !it.isImpassible() }.toList()
+            val held = gate.filter { it.militaryUnit != null && it.militaryUnit!!.civ != civ }
+            if (gate.isNotEmpty() && held.size == gate.size) rejected += "Note: every land approach to $aim is held by enemy soldiers (${held.joinToString { it.militaryUnit!!.name }}), the rest is mountain or sea. The host will gather within range and fight for the approaches; engines can bombard from two tiles off. Expect it to be slow."
+        } }
 
         val done = ArrayList<String>()
         val failed = ArrayList<String>(rejected)
@@ -892,6 +898,15 @@ object RulerHost {
                 val perVolley = bestEngine?.let { volley(it, city) } ?: 0
                 val volleysToBreak = if (perVolley > 0) (city.health + perVolley - 1) / perVolley else null
                 val hitOnFoot = bestFoot?.let { cityHits(it, city) }
+                // The approaches: how many land tiles touch the city, and how many of those an enemy soldier stands on
+                val approaches = city.getCenterTile().neighbors.filter { it.isLand && !it.isImpassible() }.toList()
+                val heldApproaches = approaches.count { it.militaryUnit != null && it.militaryUnit!!.civ != civ }
+                val gate = when {
+                    approaches.isEmpty() -> "no land approach at all - only from the sea"
+                    heldApproaches == approaches.size -> "every land approach (${approaches.size}) is held by an enemy soldier; the rest is mountain or sea - engines can still bombard from two tiles off, but nothing walks in until the approaches are won"
+                    approaches.size <= 2 -> "only ${approaches.size} land approaches - a narrow gate, easily plugged"
+                    else -> "${approaches.size} land approaches, $heldApproaches held"
+                }
                 val verdict = when {
                     bestEngine == null -> "no siege engines - the walls cannot be broken"
                     volleysToBreak!! <= siege.size * 2 -> "would fall within a few turns of concerted bombardment"
@@ -900,7 +915,7 @@ object RulerHost {
                 }
                 mapOf("city" to city.name, "of" to city.civ.civName, "defence" to defence, "health" to city.health, "walls" to city.cityConstructions.builtBuildings.any { "Walls" in it || "Castle" in it },
                     "garrison" to city.getCenterTile().militaryUnit?.name, "tilesFromOurNearestCity" to civ.cities.minOfOrNull { it.getCenterTile().aerialDistanceTo(city.getCenterTile()) },
-                    "oneVolleyOfOurBestEngineTakes" to perVolley, "volleysToBreak" to volleysToBreak, "cityShotAtOurBestFootSoldierTakes" to hitOnFoot, "verdict" to verdict)
+                    "oneVolleyOfOurBestEngineTakes" to perVolley, "volleysToBreak" to volleysToBreak, "cityShotAtOurBestFootSoldierTakes" to hitOnFoot, "approaches" to gate, "verdict" to verdict)
             }.sortedBy { it["volleysToBreak"] as Int? ?: 999 }
         val unseen = civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.associate { other -> other.civName to other.cities.count { !it.getCenterTile().isExplored(civ) } }.filterValues { it > 0 }
         return mapOf(
