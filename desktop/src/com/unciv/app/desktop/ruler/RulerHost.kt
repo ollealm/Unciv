@@ -857,6 +857,7 @@ object RulerHost {
             "cities" to civ.cities.map { city ->
                 val stats = city.cityStats.currentCityStats
                 mapOf("name" to city.name, "pop" to city.population.population, "capital" to city.isCapital(),
+                    "buildings" to city.cityConstructions.getBuiltBuildings().map { it.name }.sorted(),
                     "buildQueue" to city.cityConstructions.constructionQueue,
                     "turnsLeft" to city.cityConstructions.currentConstructionName().let { current ->
                         if (current.isEmpty()) null else city.cityConstructions.turnsToConstruction(current) },
