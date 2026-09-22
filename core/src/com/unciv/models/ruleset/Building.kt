@@ -285,6 +285,9 @@ class Building : RulesetStatsObject(), INonPerpetualConstruction {
         if (cityConstructions.isBuilt(name))
             yield(RejectionReasonType.AlreadyBuilt.toInstance())
 
+        if (isWonder && civ.civID in com.unciv.logic.automation.RulerOverrides.noWonders)
+            yield(RejectionReasonType.DisabledBySetting.toInstance("This people raises no world wonders - a rule of this game", true))
+
         if (civ.gameInfo.isUnavailableBySettingsCached(this@Building)) {
             // Repeat the starting era test isHiddenBySettings already did to change the RejectionReasonType
             if (isHiddenByStartingEra(civ.gameInfo))

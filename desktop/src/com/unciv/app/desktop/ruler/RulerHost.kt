@@ -188,6 +188,7 @@ object RulerHost {
     private fun newGame(json: JsonValue): Any? {
         val ruled = json.get("ruled")?.asStringArray()?.toList() ?: throw ApiError(400, "Missing ruled: [nation names]")
         val others = json.get("others")?.asStringArray()?.toList() ?: listOf()
+        val noWonders = json.get("noWonders")?.asStringArray()?.toList() ?: listOf()
         val newGame = GameStarter.startNewGame(GameSetupInfo(
             GameParameters().apply {
                 speed = json.getString("speed", "Quick")
@@ -203,6 +204,8 @@ object RulerHost {
         ))
         gameInfo = newGame
         UncivGame.Current.gameInfo = newGame
+        wonderless.clear(); wonderless += noWonders
+        applyWonderless()
         orders.clear()
         publicEvents.clear()
         chancery.clear()
@@ -235,6 +238,7 @@ object RulerHost {
         File("SaveFiles/Ruler game").writeText(saveData)
         File(dataDir, "host.json").writeText(Json.write(mapOf(
             "orders" to orders.mapValues { it.value.toMap() },
+            "noWonders" to wonderless.toList(),
             "publicEvents" to publicEvents,
             "chancery" to chancery,
             "unitOrders" to units.toMap(),
@@ -261,6 +265,13 @@ object RulerHost {
         return mapOf("gold" to civ.gold)
     }
 
+    /** Nations that may raise no world wonder in this game (a setup choice) */
+    private val wonderless = HashSet<String>()
+    private fun applyWonderless() {
+        RulerOverrides.noWonders.clear()
+        for (civ in game().civilizations) if (civ.civName in wonderless) RulerOverrides.noWonders += civ.civID
+    }
+
     private fun load() {
         val saveFile = File(dataDir, "save.unciv")
         val hostFile = File(dataDir, "host.json")
@@ -270,6 +281,8 @@ object RulerHost {
         UncivGame.Current.gameInfo = loaded
         val host = JsonReader().parse(hostFile.readText())
         for (entry in host.get("orders")) orders[entry.name] = StandingOrders().apply { readFrom(entry) }
+        wonderless.clear(); host.get("noWonders")?.asStringArray()?.let { wonderless += it }
+        applyWonderless()
         for (event in host.get("publicEvents"))
             publicEvents += mapOf("turn" to event.getInt("turn"), "year" to event.getString("year", ""), "text" to event.getString("text"))
         host.get("chancery")?.forEach { civLog ->
@@ -811,6 +824,7 @@ object RulerHost {
             "calendar" to (civ.gameInfo.getYear(1) - civ.gameInfo.getYear(0)).let { years ->
                 "One turn is now about $years year${if (years == 1) "" else "s"}. Every figure of turns in this briefing (turnsLeft, deal durations, 'about N turns away') counts turns, not years: ${if (years > 1) "3 turns is about ${3 * years} years. " else ""}Reckon it over before you speak of time, and prefer a loose span ('within a generation', 'a century's work') to an exact count." },
             "era" to civ.getEra().name,
+            "wondersBarredFor" to wonderless.toList().ifEmpty { null },
             "waysToWin" to civ.gameInfo.gameParameters.victoryTypes.toList().ifEmpty { listOf("none - this world was made without victory conditions; nobody can build a spaceship or win a vote") },
             "score" to civ.calculateTotalScore().toInt(),
             "gold" to civ.gold,

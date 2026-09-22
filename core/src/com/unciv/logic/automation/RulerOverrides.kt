@@ -28,6 +28,9 @@ object RulerOverrides {
     class Posture(val warAim: String? = null, val stance: String = "attack", val reserve: Int = 0)
     val postures = ConcurrentHashMap<String, Posture>()
 
+    /** civIDs that may raise no world wonder at all (a game setting: e.g. only the rulers' realms compete for them) */
+    val noWonders: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     /** True when a ruled civ's never-build list covers this construction: the automation must not choose it at all */
     @Volatile var forbidden: ((com.unciv.logic.civilization.Civilization, com.unciv.models.ruleset.INonPerpetualConstruction) -> Boolean)? = null
 
