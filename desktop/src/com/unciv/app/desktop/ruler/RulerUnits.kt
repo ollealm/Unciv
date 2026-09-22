@@ -38,9 +38,15 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         orders.keys.retainAll(alive); released.retainAll(alive)
     }
 
-    /** A hold that only ever meant "a Great Person awaits orders" must not bind a soldier whose name merely begins with Great (Great War Infantry) */
-    fun dropMistakenHolds(game: com.unciv.logic.GameInfo) = orders.entries.removeIf { (id, order) ->
-        order.action == "hold" && game.civilizations.asSequence().flatMap { it.units.getCivUnits() }.firstOrNull { it.id == id }?.let { !it.isGreatPerson() && it.name.startsWith("Great ") } == true } // only the units the old name check caught (Great War Infantry and the like); a hold an advisor gave a soldier stands
+    /** A hold that only ever meant "a Great Person awaits orders" must not bind a soldier: the old name check froze Great War Infantry and Bombers,
+     *  and some of those have since been re-armed under the same id with a plainer name - so the test is the log line the bug wrote, never the name alone. */
+    fun dropMistakenHolds(game: com.unciv.logic.GameInfo, chancery: Collection<List<Map<String, Any?>>>) {
+        val frozenByTheBug = chancery.asSequence().flatten().map { it["text"] as String }
+            .filter { "awaits orders" in it && (it.startsWith("A Great War ") || it.startsWith("A Great Bomber")) }
+            .mapNotNull { Regex("#(\\d+)").find(it)?.groupValues?.get(1)?.toInt() }.toHashSet()
+        orders.entries.removeIf { (id, order) -> order.action == "hold" && id in frozenByTheBug
+            && game.civilizations.asSequence().flatMap { it.units.getCivUnits() }.firstOrNull { it.id == id }?.isGreatPerson() == false }
+    }
 
     fun load(json: JsonValue?) {
         orders.clear()

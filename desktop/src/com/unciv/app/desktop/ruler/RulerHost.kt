@@ -302,7 +302,7 @@ object RulerHost {
             chancery[civLog.name] = ArrayList(civLog.map { mapOf("turn" to it.getInt("turn"), "text" to it.getString("text")) })
         }
         units.load(host.get("unitOrders"))
-        units.dropMistakenHolds(loaded)
+        units.dropMistakenHolds(loaded, chancery.values)
         worldAtLastAdvance = WorldSnapshot(loaded)
         trail.load(host.get("trail"))
         trail.record(loaded) // a save from before the trail was kept starts one here
