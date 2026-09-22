@@ -104,6 +104,10 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         val diplomacy = civ.getDiplomacyManager(other)!!
         if (diplomacy.hasFlag(DiplomacyFlags.DeclaredWar)) throw IllegalArgumentException("Too soon: ${diplomacy.getFlag(DiplomacyFlags.DeclaredWar)} more turns of war before peace can be discussed")
         if (diplomacy.hasFlag(DiplomacyFlags.DeclinedPeace)) throw IllegalArgumentException("$name declined peace recently; wait ${diplomacy.getFlag(DiplomacyFlags.DeclinedPeace)} turns")
+        // One offer of peace at a time: a repeat replaces the one still waiting, so a ruled power never holds two of ours
+        val ours = other.tradeRequests.filter { request -> request.requestingCiv == civ.civID && (request.trade.ourOffers + request.trade.theirOffers).any { it.name == Constants.peaceTreaty } }
+        if (ours.isNotEmpty() && other.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) return "Our offer of peace is already before ${other.civName}'s court; they have not answered yet. Wait, or sweeten it."
+        other.tradeRequests.removeAll(ours.toSet())
         val trade = Trade()
         val treaty = TradeOffer(Constants.peaceTreaty, TradeOfferType.Treaty, speed = civ.gameInfo.speed)
         trade.ourOffers.add(treaty)
