@@ -656,6 +656,8 @@ object RulerHost {
         val wars = HashSet<Set<String>>()
         val cityOwners = HashMap<String, String>()
         val wonders = HashMap<String, String>()
+        /** wonder -> the city it stands in, and the lie of the land there */
+        val wonderSites = HashMap<String, String>()
         val eras = HashMap<String, String>()
         val alive = HashSet<String>()
         init {
@@ -666,7 +668,18 @@ object RulerHost {
                 for (city in civ.cities) {
                     cityOwners[city.name] = civ.civName
                     for (building in city.cityConstructions.getBuiltBuildings())
-                        if (building.isWonder) wonders[building.name] = civ.civName
+                        if (building.isWonder) {
+                            wonders[building.name] = civ.civName
+                            val centre = city.getCenterTile()
+                            val land = listOfNotNull(
+                                if (city.isCoastal()) "on the coast" else null,
+                                if (centre.isAdjacentToRiver()) "by a river" else null,
+                                if (centre.isHill()) "on a hill" else null,
+                                centre.getTilesInDistance(2).count { it.terrainFeatures.contains("Forest") }.takeIf { it >= 3 }?.let { "among forests" },
+                                centre.getTilesInDistance(2).any { it.baseTerrain == "Mountain" }.takeIf { it }?.let { "under mountains" },
+                                centre.baseTerrain.lowercase().takeIf { it in listOf("desert", "tundra", "snow", "plains", "grassland") }?.let { "$it country" })
+                            wonderSites[building.name] = "${city.name} (${if (city.isCapital()) "the capital, " else ""}${land.joinToString(", ").ifEmpty { "inland" }})"
+                        }
                 }
                 for (diplomacy in civ.diplomacy.values)
                     if (diplomacy.diplomaticStatus == DiplomaticStatus.War && !diplomacy.otherCiv.isBarbarian)
@@ -705,7 +718,7 @@ object RulerHost {
         }
         for (city in before.cityOwners.keys - after.cityOwners.keys) addPublicEvent("The city of $city has been destroyed.")
         for ((wonder, owner) in after.wonders)
-            if (wonder !in before.wonders) addPublicEvent("$owner completed the wonder $wonder.")
+            if (wonder !in before.wonders) addPublicEvent("$owner completed the wonder $wonder in ${after.wonderSites[wonder] ?: "one of its cities"}.")
         for ((civ, era) in after.eras)
             if (before.eras[civ] != era) addPublicEvent("$civ entered the $era.")
         for (civ in before.alive - after.alive) addPublicEvent("$civ has been destroyed.")
