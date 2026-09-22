@@ -209,10 +209,8 @@ object RulerHost {
         orders.clear()
         publicEvents.clear()
         chancery.clear()
-        units.orders.clear()
-        trail.clear()
+        resetHostState()
         trail.record(newGame)
-        RulerOverrides.lockedCities.clear()
         for (name in ruled) orders[name] = StandingOrders()
         registerRuledCivs()
         save()
@@ -232,11 +230,11 @@ object RulerHost {
     private fun save() {
         val game = gameInfo ?: return
         val saveData = UncivFiles.gameInfoToString(game, forceZip = true)
-        File(dataDir, "save.unciv").writeText(saveData)
+        writeAtomically(File(dataDir, "save.unciv"), saveData)
         // Also into the dev GUI's save list (working dir is android/assets), so `gradlew desktop:run` can watch the world as spectator
         File("SaveFiles").mkdirs()
         File("SaveFiles/Ruler game").writeText(saveData)
-        File(dataDir, "host.json").writeText(Json.write(mapOf(
+        writeAtomically(File(dataDir, "host.json"), Json.write(mapOf(
             "orders" to orders.mapValues { it.value.toMap() },
             "noWonders" to wonderless.toList(),
             "publicEvents" to publicEvents,
@@ -272,6 +270,21 @@ object RulerHost {
         for (civ in game().civilizations) if (civ.civName in wonderless) RulerOverrides.noWonders += civ.civID
     }
 
+    /** Everything the host remembers about a game, forgotten in one place - so a new world starts clean whatever the last one left behind */
+    private fun resetHostState() {
+        orders.clear(); publicEvents.clear(); chancery.clear(); spending.clear(); warningsWoken.clear()
+        units.reset(); diplomacy.reset(); trail.clear()
+        worldAtLastAdvance = null
+        RulerOverrides.lockedCities.clear(); RulerOverrides.focusedCities.clear(); RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.noWonders.clear()
+    }
+
+    /** Written to a sibling file and moved into place, so a crash mid-write never leaves a half file behind */
+    private fun writeAtomically(file: File, text: String) {
+        val tmp = File(file.parentFile, file.name + ".tmp")
+        tmp.writeText(text)
+        java.nio.file.Files.move(tmp.toPath(), file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+    }
+
     private fun load() {
         val saveFile = File(dataDir, "save.unciv")
         val hostFile = File(dataDir, "host.json")
@@ -289,6 +302,8 @@ object RulerHost {
             chancery[civLog.name] = ArrayList(civLog.map { mapOf("turn" to it.getInt("turn"), "text" to it.getString("text")) })
         }
         units.load(host.get("unitOrders"))
+        units.dropMistakenHolds(loaded)
+        worldAtLastAdvance = WorldSnapshot(loaded)
         trail.load(host.get("trail"))
         trail.record(loaded) // a save from before the trail was kept starts one here
         for ((name, standing) in orders) game().civilizations.firstOrNull { it.civName == name }?.let { RulerOverrides.postures[it.civID] = RulerOverrides.Posture(standing.warAim, standing.stance, standing.reserve) }
@@ -390,7 +405,8 @@ object RulerHost {
             posture.get("stance")?.takeUnless { it.isNull }?.asString()?.let { if (it !in listOf("attack", "defend", "raid")) rejected += "stance must be attack, defend or raid, not '$it'; the posture was not changed".also { posture.remove() } }
             posture.get("warAim")?.takeUnless { it.isNull }?.asString()?.let { name ->
                 val target = civ.gameInfo.getCities().firstOrNull { it.name == name }
-                if (target == null || !civ.isAtWarWith(target.civ)) { rejected += "warAim must be a city of a power we are at war with; '$name' is not. The posture was not changed"; posture.remove() }
+                val declaringOn = json.get("declareWar")?.asStringArray()?.toList() ?: emptyList()
+                if (target == null || !(civ.isAtWarWith(target.civ) || target.civ.civName in declaringOn)) { rejected += "warAim must be a city of a power we are at war with; '$name' is not. The posture was not changed"; posture.remove() }
             }
         }
         standing.readFrom(json)
@@ -555,7 +571,7 @@ object RulerHost {
     private val spending = java.util.concurrent.ConcurrentHashMap<String, MutableList<Pair<Int, String>>>()
 
     private fun log(civ: Civilization, text: String) {
-        chancery.getOrPut(civ.civName) { ArrayList() } += mapOf("turn" to civ.gameInfo.turns, "text" to text)
+        chancery.getOrPut(civ.civName) { ArrayList() } += mapOf("turn" to stamp(), "text" to text)
     }
 
     private fun chanceryLog(civ: Civilization, since: Int) =
@@ -709,8 +725,11 @@ object RulerHost {
         }
     }
 
+    /** GameInfo.turns only moves once every player has played, so whatever is logged during a turn - or by an order between turns - belongs to the turn about to be counted */
+    private fun stamp() = if (settling) game().turns else game().turns + 1
+
     private fun addPublicEvent(text: String) {
-        publicEvents += mapOf("turn" to game().turns, "year" to yearText(game().turns), "text" to text)
+        publicEvents += mapOf("turn" to stamp(), "year" to yearText(stamp()), "text" to text)
     }
 
     private fun recordPublicEvents(before: WorldSnapshot, after: WorldSnapshot) {
@@ -752,12 +771,17 @@ object RulerHost {
         "awaits orders", "captured", "has been destroyed", "has been stuck", "offers peace").map { Regex(it, RegexOption.IGNORE_CASE) }
 
     private val warningsWoken = HashMap<String, HashSet<String>>()
+    /** The world as the last advance left it (null before the first) */
+    private var worldAtLastAdvance: WorldSnapshot? = null
+    /** True while the turn's bookkeeping runs after nextTurn: lines written then belong to the turn just played, all other lines to the turn about to be */
+    @Volatile private var settling = false
 
     private fun advance(turns: Int, wakeOnEvents: Boolean = false): Any? {
         val game = game()
         if (game.majorCivs().any { it.victoryManager.hasWon() }) throw ApiError(409, "The game is over")
         val startTurn = game.turns
-        val roundStart = WorldSnapshot(game)
+        // "Before" is the world as the last advance left it: a war declared by order between rounds is news to everyone else
+        val roundStart = worldAtLastAdvance ?: WorldSnapshot(game)
         var stopReason: String? = null
         val ruledCivs = orders.keys.map { name -> game.civilizations.first { it.civName == name } }.filter { it.isAlive() }
         // What each advisor has already been shown; anything new below is worth waking them for
@@ -771,8 +795,12 @@ object RulerHost {
             game.nextTurn()
             trail.record(game)
             val after = WorldSnapshot(game)
-            recordPublicEvents(before, after)
-            for (civ in ruledCivs) recordChancery(civ, civSnapshots[civ]!!)
+            settling = true
+            try {
+                recordPublicEvents(before, after)
+                for (civ in ruledCivs) recordChancery(civ, civSnapshots[civ]!!)
+            } finally { settling = false }
+            units.forgetTheDead(game)
 
             for (civ in ruledCivs) {
                 val news = chanceryLog(civ, game.turns - 1).map { it["text"] as String }.filter { line -> wakeWorthy.any { it.containsMatchIn(line) } }
@@ -789,6 +817,7 @@ object RulerHost {
             }
             if (stopReason != null || (wakeOnEvents && wake.isNotEmpty())) break
         }
+        worldAtLastAdvance = WorldSnapshot(game)
         save()
         backup()
         return mapOf(
@@ -957,7 +986,7 @@ object RulerHost {
             else if (poorDefender(civ, defender))
                 warnings += "${city.name} is only held by a ${defender.name} - weak for this age."
         }
-        for (unit in civ.units.getCivUnits()) if (unit.name.startsWith("Great ") && units.orders[unit.id]?.action == "hold")
+        for (unit in civ.units.getCivUnits()) if (unit.isGreatPerson() && units.orders[unit.id]?.action == "hold")
             warnings += "${unit.name} #${unit.id} ${describeWhere(civ, unit.getTile())} awaits orders."
         if (!units.hasLandForACity(civ)) for (unit in civ.units.getCivUnits()) if (unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.FoundCity))
             warnings += "${unit.name} #${unit.id} has nowhere to go: no land is left for a new city on our shores. It costs upkeep - disband it, or keep it only if you mean to take it overseas."

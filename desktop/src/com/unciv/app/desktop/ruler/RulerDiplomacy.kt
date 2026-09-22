@@ -192,6 +192,9 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
     /** turn on which each waiting offer of peace was first seen, keyed "us<them" */
     private val peaceOfferedOn = HashMap<String, Int>()
 
+    /** Forget everything of one game */
+    fun reset() { pending.clear(); peaceOfferedOn.clear() }
+
     /** Offers of peace wait for the ruler - the officials neither take nor refuse them. Logged when they arrive, withdrawn after some turns unanswered. */
     fun peaceOffers(civ: Civilization, announce: Boolean = false): List<String> {
         val turn = civ.gameInfo.turns

@@ -29,6 +29,19 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     /** unit id -> order */
     val orders = HashMap<Int, Order>()
 
+    /** Forget everything of one game */
+    fun reset() { orders.clear(); released.clear(); landLeft.clear() }
+
+    /** Orders for units that no longer exist (a soldier killed on the march, a unit that was re-armed and handed its order on): forgotten, so a dead man never counts as "on the way" */
+    fun forgetTheDead(game: com.unciv.logic.GameInfo) {
+        val alive = game.civilizations.asSequence().flatMap { it.units.getCivUnits() }.map { it.id }.toHashSet()
+        orders.keys.retainAll(alive); released.retainAll(alive)
+    }
+
+    /** A hold that only ever meant "a Great Person awaits orders" must not bind a soldier whose name merely begins with Great (Great War Infantry) */
+    fun dropMistakenHolds(game: com.unciv.logic.GameInfo) = orders.entries.removeIf { (id, order) ->
+        order.action == "hold" && game.civilizations.asSequence().flatMap { it.units.getCivUnits() }.firstOrNull { it.id == id }?.let { !it.isGreatPerson() } == true }
+
     fun load(json: JsonValue?) {
         orders.clear()
         json?.forEach { orders[it.name.toInt()] = Order(it.getString("action"), it.get("x")?.takeUnless { v -> v.isNull }?.asInt(), it.get("y")?.takeUnless { v -> v.isNull }?.asInt(), it.get("ability")?.takeUnless { v -> v.isNull }?.asString()) }
@@ -43,7 +56,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     fun handle(unit: MapUnit): Boolean {
         // A Great Person is the ruler's to spend: the officials never touch one unless it was released to them.
         // Caught here, in the automation's own loop, because one born at the start of a turn would otherwise be spent within it.
-        if (unit.id !in orders && unit.id !in released && unit.name.startsWith("Great ")) {
+        if (unit.id !in orders && unit.id !in released && unit.isGreatPerson()) {
             orders[unit.id] = Order("hold", null, null)
             log(unit.civ, "A ${unit.name} #${unit.id} is at ${where(unit.civ, unit.getTile())} and awaits orders (use, move, or release to the officials).")
         }
