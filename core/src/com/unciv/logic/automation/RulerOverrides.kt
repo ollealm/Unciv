@@ -24,6 +24,10 @@ object RulerOverrides {
     /** civID -> gold the officials must leave in the treasury; they spend on their own only what lies above it */
     val goldReserve = ConcurrentHashMap<String, Int>()
 
+    /** A ruled civ's posture of arms: the city its army is to take (warAim), how it fights (attack | defend | raid), and how many soldiers stay home */
+    class Posture(val warAim: String? = null, val stance: String = "attack", val reserve: Int = 0)
+    val postures = ConcurrentHashMap<String, Posture>()
+
     /** True when a ruled civ's never-build list covers this construction: the automation must not choose it at all */
     @Volatile var forbidden: ((com.unciv.logic.civilization.Civilization, com.unciv.models.ruleset.INonPerpetualConstruction) -> Boolean)? = null
 

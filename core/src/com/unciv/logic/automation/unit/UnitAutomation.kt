@@ -88,6 +88,31 @@ object UnitAutomation {
 
         if (tryHeadTowardsOurSiegedCity(unit)) return
 
+        // A ruled civ's posture: on "defend" no soldier leaves home ground; on "raid" the host pillages but never assaults a city
+        val posture = com.unciv.logic.automation.RulerOverrides.postures[unit.civ.civID]
+        if (posture != null && unit.isMilitary() && unit.civ.isAtWar()) {
+            // the home reserve: the soldiers nearest our cities, as many as the ruler asked to keep back, never march out
+            val inReserve = posture.reserve > 0 && unit.baseUnit.isLandUnit && unit.civ.units.getCivUnits()
+                .filter { it.isMilitary() && it.baseUnit.isLandUnit }
+                .sortedBy { soldier -> unit.civ.cities.minOfOrNull { it.getCenterTile().aerialDistanceTo(soldier.getTile()) } ?: 99 }
+                .take(posture.reserve).any { it.id == unit.id }
+            if (posture.stance == "defend" || inReserve) {
+                if (tryAttacking(unit)) return   // an enemy within reach of home is still fought
+                if (tryGarrisoningLandUnit(unit)) return
+                if (unit.health < 100 && tryHealUnit(unit)) return
+                if (unit.getTile().getOwner() != unit.civ) { tryRetreat(unit); return }
+                tryPrepare(unit); return
+            }
+            if (posture.stance == "raid") {
+                if (tryAttacking(unit)) return
+                if (tryPillageImprovement(unit)) return
+                if (unit.health < 80 && tryHealUnit(unit)) return
+                if (tryAdvanceTowardsCloseEnemy(unit)) return
+                if (tryGarrisoningLandUnit(unit)) return
+                tryPrepare(unit); return
+            }
+        }
+
         // if a embarked melee unit can land and attack next turn, do not attack from water.
         if (BattleHelper.tryDisembarkUnitToAttackPosition(unit)) return
 

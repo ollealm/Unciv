@@ -64,9 +64,14 @@ object RulerHost {
         var goldReserve: Int? = null
         /** Keep a soldier inside every city: when one stands empty, the nearest free soldier is sent in under a garrison order */
         var garrisonEveryCity = false
+        /** The posture of arms: warAim (an enemy city the host converges on), stance attack|defend|raid, reserve (soldiers kept home) */
+        var warAim: String? = null
+        var stance: String = "attack"
+        var reserve: Int = 0
         fun toMap(civ: Civilization? = null) = mapOf(
             "goldReserve" to goldReserve,
             "garrisonEveryCity" to garrisonEveryCity,
+            "posture" to mapOf("warAim" to warAim, "stance" to stance, "reserve" to reserve),
             "personality" to personality,
             "neverBuild" to neverBuild,
             "research" to research.filter { civ == null || !civ.tech.isResearched(it) || civ.gameInfo.ruleset.technologies[it]?.isContinuallyResearchable() == true },
@@ -273,6 +278,7 @@ object RulerHost {
         units.load(host.get("unitOrders"))
         trail.load(host.get("trail"))
         trail.record(loaded) // a save from before the trail was kept starts one here
+        for ((name, standing) in orders) game().civilizations.firstOrNull { it.civName == name }?.let { RulerOverrides.postures[it.civID] = RulerOverrides.Posture(standing.warAim, standing.stance, standing.reserve) }
         RulerOverrides.lockedCities.clear()
         host.get("lockedCities")?.asStringArray()?.let { RulerOverrides.lockedCities += it }
         RulerOverrides.focusedCities.clear()
@@ -312,6 +318,11 @@ object RulerHost {
         json.get("neverBuild")?.let { neverBuild = ArrayList(it.asStringArray().toList()) }
         json.get("goldReserve")?.let { goldReserve = if (it.isNull) null else it.asInt().coerceAtLeast(0) }
         json.get("garrisonEveryCity")?.takeUnless { it.isNull }?.let { garrisonEveryCity = it.asBoolean() }
+        json.get("posture")?.takeUnless { it.isNull }?.let { posture ->
+            if (posture.has("warAim")) warAim = posture.get("warAim").takeUnless { it.isNull }?.asString()
+            posture.get("stance")?.takeUnless { it.isNull }?.asString()?.let { stance = it }
+            posture.get("reserve")?.takeUnless { it.isNull }?.let { reserve = it.asInt().coerceAtLeast(0) }
+        }
     }
 
     private fun applyPersonality(civ: Civilization, standing: StandingOrders) {
@@ -362,8 +373,17 @@ object RulerHost {
             }
             wishes.remove(); json.addChild("policyBranches", JsonValue(JsonValue.ValueType.array).also { array -> kept.forEach { array.addChild(JsonValue(it)) } })
         }
+        json.get("posture")?.takeUnless { it.isNull }?.let { posture ->
+            posture.get("stance")?.takeUnless { it.isNull }?.asString()?.let { if (it !in listOf("attack", "defend", "raid")) rejected += "stance must be attack, defend or raid, not '$it'; the posture was not changed".also { posture.remove() } }
+            posture.get("warAim")?.takeUnless { it.isNull }?.asString()?.let { name ->
+                val target = civ.gameInfo.getCities().firstOrNull { it.name == name }
+                if (target == null || !civ.isAtWarWith(target.civ)) { rejected += "warAim must be a city of a power we are at war with; '$name' is not. The posture was not changed"; posture.remove() }
+            }
+        }
         standing.readFrom(json)
         applyPersonality(civ, standing)
+        RulerOverrides.postures[civ.civID] = RulerOverrides.Posture(standing.warAim, standing.stance, standing.reserve)
+        if (json.has("posture")) log(civ, "By your order: the host's posture is now ${standing.stance}" + (standing.warAim?.let { ", its aim $it" } ?: "") + (if (standing.reserve > 0) ", ${standing.reserve} soldiers kept home" else "") + ".")
 
         val done = ArrayList<String>()
         val failed = ArrayList<String>(rejected)
@@ -584,6 +604,15 @@ object RulerHost {
         } else if (before.researching != researching && researching !in (orders[civ.civName]?.research ?: emptyList()))
             log(civ, "Research is now on $researching.")
         diplomacy.peaceOffers(civ, announce = true)
+        orders[civ.civName]?.let { standing ->
+            val aim = standing.warAim ?: return@let
+            val target = civ.gameInfo.getCities().firstOrNull { it.name == aim }
+            if (target == null || !civ.isAtWarWith(target.civ)) {
+                standing.warAim = null
+                RulerOverrides.postures[civ.civID] = RulerOverrides.Posture(null, standing.stance, standing.reserve)
+                log(civ, if (target?.civ == civ) "$aim is ours. The host has no aim now; name the next city, or make peace." else "$aim is no longer a city of an enemy; the host has no aim now.")
+            }
+        }
         // Deals: say exactly what came into force and what ended
         val dealsNow = diplomacy.dealsInForce(civ)
         for (deal in diplomacy.endingSoon(civ, 5) - diplomacy.endingSoon(civ, 4).toSet()) log(civ, "A deal ends in five turns: $deal. Renew it only if it is still worth its price.")
@@ -782,6 +811,7 @@ object RulerHost {
             "policies" to civ.policies.getAdoptedPolicies().toList(),
             "culture" to mapOf("stored" to civ.policies.storedCulture, "neededForNextPolicy" to civ.policies.getCultureNeededForNextPolicy()),
             "militaryStrength" to civ.getStatForRanking(RankingType.Force),
+            "warEstimate" to warEstimate(civ),
             "militaryNote" to run {
                 val soldiers = civ.units.getCivUnits().filter { it.isMilitary() }.toList()
                 val total = soldiers.sumOf { it.getForceEvaluation() }.coerceAtLeast(1)
@@ -815,6 +845,43 @@ object RulerHost {
     private fun poorDefender(civ: Civilization, unit: com.unciv.logic.map.mapunit.MapUnit): Boolean {
         val best = civ.units.getCivUnits().filter { !it.baseUnit.isProbablySiegeUnit() }.maxOfOrNull { it.baseUnit.strength.coerceAtLeast(it.baseUnit.rangedStrength) } ?: 0
         return unit.baseUnit.strength.coerceAtLeast(unit.baseUnit.rangedStrength) * 2 < best || unit.name == "Scout" || unit.baseUnit.isProbablySiegeUnit()
+    }
+
+    /** The chancery's own reckoning of every rival city we have seen, against what we could bring to it: the sober part of any talk of war */
+    private fun warEstimate(civ: Civilization): Map<String, Any?> {
+        val soldiers = civ.units.getCivUnits().filter { it.isMilitary() && it.baseUnit.isLandUnit }.toList()
+        val siege = soldiers.filter { it.baseUnit.isProbablySiegeUnit() }
+        val melee = soldiers.filter { it.baseUnit.isMelee() }
+        val bestEngine = siege.maxByOrNull { it.baseUnit.rangedStrength }
+        val bestFoot = melee.maxByOrNull { it.baseUnit.strength }
+        // The engine's own combat sum, at full health and even luck: what one volley of our best engine takes off a city, and what the city does to our best foot soldier
+        fun volley(unit: com.unciv.logic.map.mapunit.MapUnit, city: City) = com.unciv.logic.battle.BattleDamage.calculateDamageToDefender(
+            com.unciv.logic.battle.MapUnitCombatant(unit), com.unciv.logic.battle.CityCombatant(city), city.getCenterTile(), 0.5f)
+        fun cityHits(unit: com.unciv.logic.map.mapunit.MapUnit, city: City) = com.unciv.logic.battle.BattleDamage.calculateDamageToDefender(
+            com.unciv.logic.battle.CityCombatant(city), com.unciv.logic.battle.MapUnitCombatant(unit), unit.getTile(), 0.5f)
+        val cities = civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.flatMap { other -> other.cities.filter { it.getCenterTile().isExplored(civ) } }
+            .map { city ->
+                val defence = com.unciv.logic.battle.CityCombatant(city).getCityStrength()
+                val perVolley = bestEngine?.let { volley(it, city) } ?: 0
+                val volleysToBreak = if (perVolley > 0) (city.health + perVolley - 1) / perVolley else null
+                val hitOnFoot = bestFoot?.let { cityHits(it, city) }
+                val verdict = when {
+                    bestEngine == null -> "no siege engines - the walls cannot be broken"
+                    volleysToBreak!! <= siege.size * 2 -> "would fall within a few turns of concerted bombardment"
+                    volleysToBreak <= siege.size * 5 -> "a siege of some turns, under fire the whole time"
+                    else -> "beyond what our engines can break before they are shot to pieces"
+                }
+                mapOf("city" to city.name, "of" to city.civ.civName, "defence" to defence, "health" to city.health, "walls" to city.cityConstructions.builtBuildings.any { "Walls" in it || "Castle" in it },
+                    "garrison" to city.getCenterTile().militaryUnit?.name, "tilesFromOurNearestCity" to civ.cities.minOfOrNull { it.getCenterTile().aerialDistanceTo(city.getCenterTile()) },
+                    "oneVolleyOfOurBestEngineTakes" to perVolley, "volleysToBreak" to volleysToBreak, "cityShotAtOurBestFootSoldierTakes" to hitOnFoot, "verdict" to verdict)
+            }.sortedBy { it["volleysToBreak"] as Int? ?: 999 }
+        val unseen = civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.associate { other -> other.civName to other.cities.count { !it.getCenterTile().isExplored(civ) } }.filterValues { it > 0 }
+        return mapOf(
+            "ourBestEngine" to bestEngine?.name, "ourBestFootSoldier" to bestFoot?.name, "siegeEngines" to siege.size, "footSoldiers" to melee.size,
+            "ranged" to soldiers.count { it.baseUnit.isRanged() && !it.baseUnit.isProbablySiegeUnit() },
+            "citiesWeHaveSeen" to cities,
+            "citiesNeverSeen" to unseen,
+            "howToRead" to "Sums from the chancery's own reckoning of battle, at full health and even luck. A city is taken by breaking its health with engines and then walking a foot soldier in; it heals each turn, shoots one volley a turn at anything within two tiles, and its garrison and walls do the rest. Bowmen and crossbows barely scratch walls. What we have never seen we cannot judge - say so.")
     }
 
     private fun warnings(civ: Civilization): List<String> {

@@ -35,7 +35,10 @@ object HeadTowardsEnemyCityAutomation {
         val enemies = unit.civ.getKnownCivs()
             .filter { unit.civ.isAtWarWith(it) && it.cities.isNotEmpty() }
 
-        val closestEnemyCity = enemies
+        // A ruler's war aim beats distance: the whole host converges on the city they named
+        val aimed = com.unciv.logic.automation.RulerOverrides.postures[unit.civ.civID]?.warAim
+            ?.let { name -> enemies.flatMap { it.cities }.firstOrNull { it.name == name } }
+        val closestEnemyCity = aimed ?: enemies
             .mapNotNull { NextTurnAutomation.getForeignCityNearCapital(unit.civ.getCapital(), it) }
             .minByOrNull { it.aerialDistance }?.city
             ?: return emptySequence() // no attackable cities found

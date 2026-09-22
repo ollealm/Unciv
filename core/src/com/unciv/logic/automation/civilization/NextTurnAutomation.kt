@@ -403,12 +403,13 @@ object NextTurnAutomation {
         val isAtWar = civInfo.isAtWar()
         val sortedUnits = civInfo.units.getCivUnits().sortedBy { unit -> getUnitPriority(unit, isAtWar) }
 
+        val aim = RulerOverrides.postures[civInfo.civID]?.warAim
         val citiesRequiringManualPlacement = civInfo.getKnownCivs().filter { it.isAtWarWith(civInfo) }
             .flatMap { it.cities }
             .filter {
                 var count = 0
                 it.getCenterTile().forEachTileInDistance(4) { tile -> if (tile.militaryUnit?.civ == civInfo) count++ }
-                count > 4
+                count > 4 || (it.name == aim && count > 0) // the ruler's war aim is besieged as soon as anyone is there
             }
             .toList()
 
