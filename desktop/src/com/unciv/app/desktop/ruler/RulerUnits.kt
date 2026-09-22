@@ -154,6 +154,10 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
         val target = if (x != null) civ.gameInfo.tileMap[x!!, y!!] else unit.getTile()
         if (action == "settle") settleProblem(civ, target)?.let { throw IllegalArgumentException("Cannot found a city at ${where(civ, target)}: $it" + nearestSiteHint(civ, unit, target)) }
+        if (action == "use") when (json.get("ability")?.takeUnless { it.isNull }?.asString()?.lowercase()?.trim()) {
+            "trade mission" -> if (!(target.isCityCenter() && target.getOwner()?.isCityState == true)) throw IllegalArgumentException("A trade mission needs a city-state's city as its target; ${where(civ, target)} is not one")
+            "hurry production" -> target.getCity()?.let { city -> if (city.cityConstructions.getCurrentConstruction() !is com.unciv.models.ruleset.INonPerpetualConstruction) throw IllegalArgumentException("${city.name} is building nothing that can be hurried right now (its queue is empty or set to Science/Gold); queue something first") }
+        }
         if (action == "garrison" && !target.isCityCenter()) throw IllegalArgumentException("garrison needs a city")
         if (action == "garrison" && unit.isCivilian()) throw IllegalArgumentException("Only soldiers can garrison")
         if (action == "garrison") target.militaryUnit?.takeIf { it != unit && it.civ != civ }?.let { holder ->
@@ -210,6 +214,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     }
 
     /** The way there for a unit given a full turn's movement - orders are given between turns, when units have spent theirs, and Unciv finds no path for a spent unit */
+    /** Could this unit, given a full turn's movement, walk to that tile at all? */
+    fun canMarch(unit: MapUnit, target: Tile) = target == unit.getTile() || pathTo(unit, target).isNotEmpty()
+
     private fun pathTo(unit: MapUnit, target: Tile): List<Tile> {
         val spent = unit.currentMovement
         unit.currentMovement = unit.getMaxMovement().toFloat()

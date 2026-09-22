@@ -60,7 +60,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
             list?.forEach { entry ->
                 val item = entry.getString("item")
                 val offer = available.firstOrNull { it.name.equals(item, ignoreCase = true) && it.amount > 0 }
-                    ?: throw IllegalArgumentException("$side cannot offer '$item' right now; tradeable: ${available.filter { it.amount > 0 && it.type !in hiddenOffers }.joinToString { it.name + " x" + it.amount }}")
+                    ?: throw IllegalArgumentException(inForce(civ, other, item) ?: "$side cannot offer '$item' right now; tradeable: ${available.filter { it.amount > 0 && it.type !in hiddenOffers }.joinToString { it.name + " x" + it.amount }}")
                 val copy = offer.copy()
                 val wanted = if (entry.has("amount")) entry.getInt("amount") else if (offer.type.numberType == TradeOfferType.TradeTypeNumberType.Gold) throw IllegalArgumentException("'$item' needs an amount") else 1
                 if (wanted < 1 || wanted > offer.amount) throw IllegalArgumentException("$side can offer at most ${offer.amount} of '$item', not $wanted")
@@ -224,6 +224,12 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         civ.diplomacy.values.flatMap { manager -> manager.trades
             .filter { trade -> (trade.ourOffers + trade.theirOffers).any { it.duration in 1..within } }
             .map { "${manager.otherCivName}: ${it.brief()}" } }
+
+    /** A pact that cannot be offered because it already runs: say so, with the turns left, instead of "not tradeable" */
+    private fun inForce(civ: Civilization, other: Civilization, item: String): String? {
+        val running = civ.getDiplomacyManager(other)?.trades?.flatMap { it.ourOffers + it.theirOffers }?.firstOrNull { it.name.equals(item, ignoreCase = true) } ?: return null
+        return "'$item' is already in force with ${other.civName}" + (if (running.duration > 0) ", ${running.duration} more turns; it can be offered again once it ends (the officials often renew such pacts on their own)" else "")
+    }
 
     private fun luxuries(civ: Civilization) = civ.getCivResourcesByName()
         .filter { it.value > 0 && civ.gameInfo.ruleset.tileResources[it.key]?.resourceType?.name == "Luxury" }

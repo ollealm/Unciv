@@ -526,7 +526,7 @@ object RulerHost {
             if (holder != null && !poorDefender(civ, holder)) continue
             if (units.orders.values.any { it.action == "garrison" && it.x == position.x.toInt() && it.y == position.y.toInt() }) continue // someone is on the way
             val soldier = civ.units.getCivUnits()
-                .filter { it.isMilitary() && it.baseUnit.isLandUnit && it.id !in units.orders && !it.getTile().isCityCenter() && !poorDefender(civ, it) && it.getTile().getContinent() == centre.getContinent() } // same landmass: a spent unit cannot be asked for a path
+                .filter { it.isMilitary() && it.baseUnit.isLandUnit && it.id !in units.orders && !it.getTile().isCityCenter() && !poorDefender(civ, it) && units.canMarch(it, centre) } // same landmass: a spent unit cannot be asked for a path
                 .minByOrNull { it.getTile().aerialDistanceTo(centre) } ?: continue
             units.orders[soldier.id] = RulerUnits.Order("garrison", position.x.toInt(), position.y.toInt())
             log(civ, "By your standing order: ${city.name} ${if (holder == null) "stood empty" else "was held only by a ${holder.name}"}, so our ${soldier.name} #${soldier.id} marches in to garrison it.")
@@ -594,10 +594,13 @@ object RulerHost {
             if (queue.isEmpty() || queue.first() !in ordered) RulerOverrides.lockedCities -= city.id
         }
         // Then what the officials changed on their own
+        val paid = spending.remove(civ.civName) ?: emptyList<Pair<Int, String>>()
         for (city in civ.cities) {
             val was = before.queues[city.name] ?: continue
             val now = city.cityConstructions.constructionQueue
-            val built = notifications.filter { "has been built in [${city.name}]" in it.text }.map { it.text.substringAfter("[").substringBefore("]") }
+            // a bought item leaves the queue with no notification: it was not dropped, it was paid for (the spending line says so)
+            val built = notifications.filter { "has been built in [${city.name}]" in it.text }.map { it.text.substringAfter("[").substringBefore("]") } +
+                paid.map { it.second }.mapNotNull { Regex("buying (.+) in ${Regex.escape(city.name)}$").find(it)?.groupValues?.get(1) }
             val isPerpetual = { name: String -> com.unciv.models.ruleset.PerpetualConstruction.isNamePerpetual(name) }
             for (item in was) if (item !in now && item !in built && !(isPerpetual(item) && city.id !in RulerOverrides.lockedCities)) {
                 val construction = civ.gameInfo.ruleset.buildings[item] ?: civ.gameInfo.ruleset.units[item]
@@ -646,7 +649,6 @@ object RulerHost {
                 else "The officials wanted ${current.name} in ${city.name}; it is on the never-build list, so it was struck.")
             if (city.cityConstructions.constructionQueue.isEmpty()) city.cityConstructions.chooseNextConstruction()
         }
-        val paid = spending.remove(civ.civName) ?: emptyList<Pair<Int, String>>()
         for ((what, items) in paid.groupBy { it.second }) log(civ, "The officials spent ${items.sumOf { it.first }} gold on ${what}.")
         if (paid.isNotEmpty()) log(civ, "The treasury now holds ${civ.gold} gold.")
         val unexplained = before.gold - civ.gold - paid.sumOf { it.first }
@@ -844,7 +846,8 @@ object RulerHost {
             "policies" to civ.policies.getAdoptedPolicies().toList(),
             "culture" to mapOf("stored" to civ.policies.storedCulture, "neededForNextPolicy" to civ.policies.getCultureNeededForNextPolicy()),
             "militaryStrength" to civ.getStatForRanking(RankingType.Force),
-            "warEstimate" to warEstimate(civ),
+            "warEstimate" to (if (civ.isAtWar() || orders[civ.civName]?.warAim != null) warEstimate(civ)
+                else mapOf("note" to "At peace: the chancery's reckoning of every rival city against our engines is in get_options.warEstimate - read it before any talk of war.")),
             "militaryNote" to run {
                 val soldiers = civ.units.getCivUnits().filter { it.isMilitary() }.toList()
                 val total = soldiers.sumOf { it.getForceEvaluation() }.coerceAtLeast(1)
@@ -853,7 +856,7 @@ object RulerHost {
                 "militaryStrength is a headcount of raw force, ours and theirs alike - the figure the whole world sees. It does not say who wins. It leaves out: cities that shoot back (see each power's cityDefence; a city's strength against our best foot soldier, strength $bestOurs), the gap between ages (a later era's soldiers beat an earlier one's well beyond their numbers - compare eras), ground and walls, and what a rich realm buys in a season. ${siege * 100 / total}% of our own figure is archers and siege engines, which cannot stand in a line alone. Before advising an attack, weigh these, and say how sure you are."
             },
             "units" to civ.units.getCivUnits().map { units.describeUnit(civ, it) }.toList(),
-            "citySites" to units.citySites(civ),
+            "citySites" to units.citySites(civ).ifEmpty { listOf("(none: no usable site within a settler's reach, or no land left on our shores - the officials train no settlers while it stays so)") },
             "cities" to civ.cities.map { city ->
                 val stats = city.cityStats.currentCityStats
                 mapOf("name" to city.name, "pop" to city.population.population, "capital" to city.isCapital(),
@@ -868,7 +871,7 @@ object RulerHost {
             },
             "threats" to threats(civ),
             "knownCivs" to diplomacy.relations(civ),
-            "log" to chanceryLog(civ, logSince ?: (turn - 12)).map { "T${it["turn"]}: ${it["text"]}" },
+            "log" to condensed(chanceryLog(civ, logSince ?: (turn - 12)).map { "T${it["turn"]}: ${it["text"]}" }),
             "peaceOffers" to diplomacy.peaceOffers(civ),
             "dealsLedger" to diplomacy.ledger(civ),
             "standingOrders" to orders[civ.civName]?.toMap(civ)
@@ -925,6 +928,19 @@ object RulerHost {
             "citiesWeHaveSeen" to cities,
             "citiesNeverSeen" to unseen,
             "howToRead" to "Sums from the chancery's own reckoning of battle, at full health and even luck. A city is taken by breaking its health with engines and then walking a foot soldier in; it heals each turn, shoots one volley a turn at anything within two tiles, and its garrison and walls do the rest. Bowmen and crossbows barely scratch walls. What we have never seen we cannot judge - say so.")
+    }
+
+    /** The log as a look-in should read it: no bookkeeping echoes, repeats folded, and never more than the last sixty lines */
+    private fun condensed(lines: List<String>): List<String> {
+        val kept = lines.filterNot { "The treasury now holds" in it }
+        val folded = ArrayList<String>()
+        var last: String? = null; var count = 0
+        for (line in kept) {
+            val body = line.substringAfter(": ")
+            if (body == last) { count++; folded[folded.size - 1] = "${folded.last().substringBefore(" (x")} (x$count)" }
+            else { folded += line; last = body; count = 1 }
+        }
+        return if (folded.size <= 60) folded else listOf("(${folded.size - 60} earlier lines omitted - get_log shows them)") + folded.takeLast(60)
     }
 
     private fun warnings(civ: Civilization): List<String> {
@@ -1013,6 +1029,7 @@ object RulerHost {
     private fun options(civ: Civilization): Map<String, Any?> {
         val ruleset = civ.gameInfo.ruleset
         return mapOf(
+            "warEstimate" to warEstimate(civ),
             "researchableNow" to ruleset.technologies.values.filter { civ.tech.canBeResearched(it.name) }
                 .map { mapOf("tech" to it.name, "turns" to civ.tech.turnsToTech(it.name)) },
             "researchGoals" to "Any technology name works as a research goal; the path to it is researched automatically.",
