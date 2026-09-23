@@ -59,6 +59,7 @@ object UseGoldAutomation {
             if (!city.cityConstructions.isConstructionPurchaseAllowed(construction, Stat.Gold, statBuyCost)) continue
             if (civ.gold < statBuyCost || construction.hurryCostModifier > acceptableHurryCostModifier) continue
             if (city.cityConstructions.getWorkDone(construction.name) > 0) continue // Don't buy things we already invested production into (may waste the invested production)
+            if (com.unciv.logic.automation.RulerOverrides.forbidden?.invoke(civ, construction) == true) continue // a ruler's never-build list binds the purse as well as the queue
             itemised(civ, { "buying ${construction.name} in ${city.name}" }) { city.cityConstructions.purchaseConstruction(construction, 0, true) }
         }
 

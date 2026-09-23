@@ -75,13 +75,15 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         // A TradeRequest holds the trade as the receiver sees it, so it goes out reversed
         val acceptable = TradeEvaluation().isTradeAcceptable(trade.reverse(), other, civ)
         // A second offer for the same goods replaces the first - otherwise both can be accepted and paid for
-        val asked = trade.theirOffers.map { it.name }.toSet()
-        val superseded = other.tradeRequests.filter { request -> request.requestingCiv == civ.civID && request.trade.ourOffers.any { it.name in asked } }
+        // Keyed on the goods asked for; gold is a sweetener, not a good, so two offers that both carry gold are not the same offer
+        val isGold = { offer: com.unciv.logic.trade.TradeOffer -> offer.type == com.unciv.logic.trade.TradeOfferType.Gold || offer.type == com.unciv.logic.trade.TradeOfferType.Gold_Per_Turn }
+        val asked = trade.theirOffers.filterNot(isGold).map { it.name }.toSet().ifEmpty { trade.theirOffers.map { it.name }.toSet() }
+        val superseded = other.tradeRequests.filter { request -> request.requestingCiv == civ.civID && request.trade.ourOffers.filterNot(isGold).ifEmpty { request.trade.ourOffers }.any { it.name in asked } }
         other.tradeRequests.removeAll(superseded.toSet())
         if (superseded.isNotEmpty()) pending.removeAll { it.first == civ.civName && it.second == other.civName && it.third != "peace" } // a withdrawn offer cannot be "accepted" later
         other.tradeRequests.add(TradeRequest(civ.civID, trade.reverse()))
         val summary = trade.brief()
-        if (superseded.isNotEmpty()) log(civ, "Our earlier offer to ${other.civName} for ${asked.joinToString()} was withdrawn in favour of the new one.")
+        if (superseded.isNotEmpty()) log(civ, "Our earlier offer to ${other.civName} (${superseded.joinToString("; ") { it.trade.reverse().brief() }}) was withdrawn in favour of the new one, which asks for the same goods.")
         pending += Triple(civ.civName, other.civName, summary)
         log(civ, "We proposed a trade to ${other.civName}: $summary.")
         val balance = TradeEvaluation().getTradeAcceptability(trade.reverse(), other, civ, true)

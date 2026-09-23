@@ -536,8 +536,12 @@ object RulerHost {
             }
             if (problem != null) throw ApiError(400, "Could not buy $item in ${city.name}: $problem")
             if (!city.cityConstructions.purchaseConstruction(construction, -1, false)) throw ApiError(400, "Could not buy $item in ${city.name}: no room to place it")
-            log(civ, "By your order: bought $item in ${city.name} for $cost gold.")
-            "Bought $item in ${city.name} for $cost gold (${civ.gold} left)"
+            val centre = city.getCenterTile()
+            val bought = civ.units.getCivUnits().filter { it.name == item && it.getTile().aerialDistanceTo(centre) <= 1 }.maxByOrNull { it.id }
+            val holder = centre.militaryUnit?.takeIf { bought != null && bought.isMilitary() && it != bought }
+            val note = if (holder != null && bought != null) " ${item} #${bought.id} stands beside ${city.name}, which our ${holder.name} #${holder.id} still holds: order it to garrison ${city.name} to swap them, or the officials use it as they see fit." else ""
+            log(civ, "By your order: bought $item in ${city.name} for $cost gold.$note")
+            "Bought $item in ${city.name} for $cost gold (${civ.gold} left).$note"
         }
         // Unit orders, diplomacy
         tryEach(json.get("units")) { units.give(civ, it) }
@@ -697,8 +701,10 @@ object RulerHost {
             val fell = (notifications.map { it.text } + civ.notifications.map { it.text })
                 .any { unit.first in it && (("destroyed" in it) || ("captured" in it) || ("was killed" in it)) }
             val spent = civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CreateWaterImprovements) == true
+            val great = civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.GreatPerson) == true
             log(civ, if (fell) "Our ${unit.first} was lost in action ${describeWhere(civ, unit.second)}."
                 else if (spent) "Our ${unit.first} ${describeWhere(civ, unit.second)} did its work and was used up, as such boats are: the fishing grounds it set up stay."
+                else if (great) "Our ${unit.first} ${describeWhere(civ, unit.second)} was spent: its ability used, by your order or by the officials once it was left to them."
                 else "Our ${unit.first} ${describeWhere(civ, unit.second)} is no longer in service.")
         }
         applyStandingOrders(civ) // a finished goal leaves the queue empty until the next goal's path is set - not idleness
@@ -945,7 +951,7 @@ object RulerHost {
                 val have = civ.victoryManager.currentsSpaceshipParts
                 mapOf("parts" to needed.keys.associateWith { "${have[it]} of ${needed[it]}" },
                     "apollo" to civ.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts),
-                    "note" to "Parts are built like buildings (queue them by name once the Apollo Program stands and the techs are known); the ship launches when every part is built.") } },
+                    "note" to "Parts are built like buildings (queue them by name once the Apollo Program stands and the techs are known) and CANNOT be bought with gold - saving gold for them is wasted; the ship launches when every part is built.") } },
             "policies" to civ.policies.getAdoptedPolicies().toList(),
             "culture" to mapOf("stored" to civ.policies.storedCulture, "neededForNextPolicy" to civ.policies.getCultureNeededForNextPolicy()),
             "militaryStrength" to civ.getStatForRanking(RankingType.Force),

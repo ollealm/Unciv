@@ -117,6 +117,11 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 order.lastSpot = spot
                 if (order.turnsStuck >= 3) {
                     val blocker = target.militaryUnit?.takeIf { !unit.isCivilian() } ?: target.civilianUnit?.takeIf { unit.isCivilian() }
+                    // One of our own holds the city: the relief waits beside it and swaps in the turn it can, instead of giving up
+                    if (order.action == "garrison" && blocker != null && blocker.civ == civ) {
+                        if (order.turnsStuck == 3) log(civ, "Our ${unit.name} #${unit.id} waits beside ${where(civ, target)}: our ${blocker.name} #${blocker.id} holds it and cannot change places yet. It swaps in as soon as it can.")
+                        return true
+                    }
                     log(civ, "Our ${unit.name} #${unit.id} has been stuck for ${order.turnsStuck} turns on its way to ${where(civ, target)}" +
                         (blocker?.let { " - the tile is held by ${it.civ.civName}'s ${it.name}" } ?: " - the way is blocked") + ". The order is dropped.")
                     orders.remove(unit.id)
@@ -141,13 +146,22 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             }
             "fortify", "garrison" -> { unit.fortifyIfCan(); true }
             "use" -> {
+                // An ability needs movement left; a Great Person that walked here this turn uses it next turn
+                if (unit.currentMovement <= 0f) return true
                 // A Great Person can usually be spent more than one way; the ruler says which, or gets the first that works
                 val wanted = ABILITIES.filter { order.ability == null || it in abilitiesNamed(order.ability) }
                 val used = wanted.firstOrNull { UnitActions.invokeUnitAction(unit, it) }
                 if (used != null) log(civ, "Our ${unit.name} used its ability (${used.name}) at ${where(civ, unit.getTile())}.")
-                else log(civ, "Our ${unit.name} could not use its ability at ${where(civ, unit.getTile())}: nothing to use it on here (trade missions need a city-state's city, improvements need an unimproved tile of ours).")
+                else {
+                    val known = ABILITY_WORDS.filter { (_, types) -> types.any { UnitActions.getUnitActions(unit, it).any() } }.keys
+                    order.turnsStuck += 1
+                    if (order.turnsStuck == 1) log(civ, "Our ${unit.name} #${unit.id} could not use its ability at ${where(civ, unit.getTile())}: nothing to use it on here (trade missions need a city-state's city, improvements need an unimproved tile of ours, hurrying needs a city). " +
+                        "It can: ${known.joinToString().ifEmpty { "nothing here" }} - name one with the order and stand where it applies. It tries again for two more turns, then the order is dropped.")
+                    if (order.turnsStuck < 3) return true
+                    log(civ, "Our ${unit.name} #${unit.id} still could not use its ability at ${where(civ, unit.getTile())}; the order is dropped and the officials take it back.")
+                }
                 orders.remove(unit.id)
-                used != null
+                true
             }
             "hold" -> true
             "disband" -> { log(civ, "Our ${unit.name} #${unit.id} was disbanded."); orders.remove(unit.id); unit.disband(); true }
