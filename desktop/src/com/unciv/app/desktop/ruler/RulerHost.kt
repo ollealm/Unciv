@@ -488,6 +488,16 @@ object RulerHost {
             "${city.name} queue is now: ${city.cityConstructions.constructionQueue.joinToString()}"
         }
         // Buy outright with gold
+        // What becomes of a city: annex a puppet, raze it, or stop a razing
+        tryEach(json.get("cities")) { order ->
+            val city = civ.city(order.getString("city"))
+            when (val action = order.getString("action")) {
+                "annex" -> { if (!city.isPuppet) throw ApiError(400, "${city.name} is not a puppet"); city.annexCity(); log(civ, "By your order: ${city.name} is annexed and governed as our own."); "${city.name} annexed" }
+                "raze" -> { if (city.isCapital()) throw ApiError(400, "A capital cannot be razed"); city.isBeingRazed = true; log(civ, "By your order: ${city.name} is being razed; it shrinks each turn until nothing is left."); "${city.name} is being razed" }
+                "spare" -> { if (!city.isBeingRazed) throw ApiError(400, "${city.name} is not being razed"); city.isBeingRazed = false; log(civ, "By your order: the razing of ${city.name} is stopped."); "${city.name} spared" }
+                else -> throw ApiError(400, "Unknown city action $action; use annex, raze or spare")
+            }
+        }
         tryEach(json.get("purchase")) { order ->
             val city = civ.city(order.getString("city"))
             val item = order.getString("item")
@@ -648,7 +658,6 @@ object RulerHost {
             for (item in was) if (item !in now && item !in built && !(isPerpetual(item) && city.id !in RulerOverrides.lockedCities)) {
                 val construction = civ.gameInfo.ruleset.buildings[item] ?: civ.gameInfo.ruleset.units[item]
                 val reasons = construction?.let { whyNot(city, it) } ?: emptyList()
-                val theirs = city.id !in RulerOverrides.lockedCities && item !in (orders[civ.civName]?.let { emptyList<String>() } ?: emptyList())
                 log(civ, if (reasons.isNotEmpty()) "The officials dropped $item from ${city.name}'s queue because ${reasons.joinToString()}."
                     else if (city.id !in RulerOverrides.lockedCities) "The officials changed their own plan for ${city.name}: $item out."
                     else "The officials dropped $item from ${city.name}'s queue, replacing it with their own choice.")
@@ -656,7 +665,8 @@ object RulerHost {
             for (item in now) if (item !in was && !isPerpetual(item))
                 log(civ, "The officials queued $item in ${city.name}.")
         }
-        for (city in civ.cities) if (city.name !in before.queues) log(civ, "Founded ${city.name}.")
+        for (city in civ.cities) if (city.name !in before.queues) log(civ, if (city.foundingCivObject == civ) "Founded ${city.name}."
+            else "We took ${city.name}${city.foundingCivObject?.let { " from ${it.civName}" } ?: ""}: it is ours, held as a puppet (it builds and pays for itself, gives no orders) until you annex it - or raze it, or spare it; a cities order does each.")
         val alive = civ.units.getCivUnits().map { it.id }.toSet()
         for ((id, unit) in before.units) if (id !in alive && unit.first != "Settler") // settlers vanish by founding
         {
@@ -927,6 +937,7 @@ object RulerHost {
             "cities" to civ.cities.map { city ->
                 val stats = city.cityStats.currentCityStats
                 mapOf("name" to city.name, "pop" to city.population.population, "capital" to city.isCapital(),
+                    "puppet" to city.isPuppet.takeIf { it }, "beingRazed" to city.isBeingRazed.takeIf { it },
                     "buildings" to city.cityConstructions.getBuiltBuildings().map { it.name }.sorted(),
                     "buildQueue" to city.cityConstructions.constructionQueue,
                     "turnsLeft" to city.cityConstructions.currentConstructionName().let { current ->

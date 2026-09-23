@@ -717,6 +717,9 @@ object Battle {
         } else if (attackerCiv.isHuman() && UncivGame.Current.worldScreen?.autoPlay?.isAutoPlayingAndFullAutoPlayAI() == false) {
             // we're not taking our former capital
             attackerCiv.popupAlerts.add(PopupAlert(AlertType.CityConquered, city.id))
+        } else if (attackerCiv.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) {
+            // A ruler's conquest is the ruler's to dispose of: held as a puppet until they annex, raze or free it by order - never burned on the automation's say-so
+            city.puppetCity(attackerCiv)
         } else automateCityConquer(attackerCiv, city)
 
         if (attackerCiv.isCurrentPlayer())
