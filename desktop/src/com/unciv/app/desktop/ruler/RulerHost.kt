@@ -385,8 +385,27 @@ object RulerHost {
     private fun Civilization.city(name: String): City = cities.firstOrNull { it.name == name } ?: throw ApiError(400, "No city named $name")
     private fun Civilization.construction(name: String): INonPerpetualConstruction =
         (gameInfo.ruleset.buildings[name] ?: gameInfo.ruleset.units[name]) ?: throw ApiError(400, "Unknown building or unit $name" + didYouMean(name, gameInfo.ruleset.buildings.keys + gameInfo.ruleset.units.keys))
-    private fun whyNot(city: City, construction: INonPerpetualConstruction) =
-        construction.getRejectionReasons(city.cityConstructions).filter { it.shouldShow }.map { it.errorMessage }.toList()
+    /** Every reason the engine would refuse it - the ones the game hides from its own build menu included, in plain words, since a queue order that is silently dropped is worse than a refusal */
+    private fun whyNot(city: City, construction: INonPerpetualConstruction): List<String> {
+        val ruleset = city.civ.gameInfo.ruleset
+        return construction.getRejectionReasons(city.cityConstructions).map { reason -> when (reason.type) {
+            com.unciv.models.ruleset.RejectionReasonType.RequiresTech -> "it needs ${construction.requiredTech ?: "a technology"} first"
+            com.unciv.models.ruleset.RejectionReasonType.Obsoleted -> "it is obsolete for us"
+            com.unciv.models.ruleset.RejectionReasonType.WaterUnitsInCoastalCities -> "${city.name} is not on the coast"
+            com.unciv.models.ruleset.RejectionReasonType.RequiresNearbyResource -> "it needs a resource worked near ${city.name} that is not there"
+            com.unciv.models.ruleset.RejectionReasonType.RequiresPolicy, com.unciv.models.ruleset.RejectionReasonType.MorePolicyBranches -> "it needs a policy we have not adopted"
+            com.unciv.models.ruleset.RejectionReasonType.UniqueToOtherNation, com.unciv.models.ruleset.RejectionReasonType.CannotBeBuilt -> "our people do not build it"
+            com.unciv.models.ruleset.RejectionReasonType.ReplacedByOurUnique -> "our people build their own kind instead" + ((ruleset.units.values.filter { it.replaces == construction.name && it.uniqueTo == city.civ.civName }.map { it.name } + ruleset.buildings.values.filter { it.replaces == construction.name && it.uniqueTo == city.civ.civName }.map { it.name }).firstOrNull()?.let { " ($it)" } ?: "")
+            com.unciv.models.ruleset.RejectionReasonType.AlreadyBuilt -> "${city.name} already has it"
+            com.unciv.models.ruleset.RejectionReasonType.WonderAlreadyBuilt, com.unciv.models.ruleset.RejectionReasonType.NationalWonderAlreadyBuilt -> "it is already built"
+            com.unciv.models.ruleset.RejectionReasonType.MaxNumberBuildable -> "we have as many as may be built"
+            com.unciv.models.ruleset.RejectionReasonType.PuppetWonder -> "a puppet city builds no wonders"
+            com.unciv.models.ruleset.RejectionReasonType.HiddenWithoutVictory, com.unciv.models.ruleset.RejectionReasonType.DisabledBySetting, com.unciv.models.ruleset.RejectionReasonType.WonderDisabledEra -> "it is not part of this world"
+            com.unciv.models.ruleset.RejectionReasonType.CanOnlyBeBuiltInSpecificCities, com.unciv.models.ruleset.RejectionReasonType.MustBeOnTile, com.unciv.models.ruleset.RejectionReasonType.MustNotBeOnTile,
+            com.unciv.models.ruleset.RejectionReasonType.MustBeNextToTile, com.unciv.models.ruleset.RejectionReasonType.MustNotBeNextToTile, com.unciv.models.ruleset.RejectionReasonType.MustOwnTile -> "${city.name} does not lie where it can be built" + (reason.errorMessage.takeIf { it != reason.type.errorMessage }?.let { " ($it)" } ?: "")
+            else -> reason.errorMessage.removeSuffix("!")
+        } }.distinct().toList()
+    }
 
     private fun setOrders(civ: Civilization, json: JsonValue): Any? {
         val ruleset = civ.gameInfo.ruleset
@@ -672,7 +691,9 @@ object RulerHost {
         {
             val fell = (notifications.map { it.text } + civ.notifications.map { it.text })
                 .any { unit.first in it && (("destroyed" in it) || ("captured" in it) || ("was killed" in it)) }
+            val spent = civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CreateWaterImprovements) == true
             log(civ, if (fell) "Our ${unit.first} was lost in action ${describeWhere(civ, unit.second)}."
+                else if (spent) "Our ${unit.first} ${describeWhere(civ, unit.second)} did its work and was used up, as such boats are: the fishing grounds it set up stay."
                 else "Our ${unit.first} ${describeWhere(civ, unit.second)} is no longer in service.")
         }
         applyStandingOrders(civ) // a finished goal leaves the queue empty until the next goal's path is set - not idleness
@@ -1051,6 +1072,17 @@ object RulerHost {
         }
         if (civ.gold < 0 || civ.gold + civ.stats.statsForNextTurn.gold * 5 < 0) warnings += "The treasury is running dry (${civ.gold} gold, ${civ.stats.statsForNextTurn.gold.toInt()} per turn)."
         if (civ.units.getCivUnits().none { !it.isCivilian() }) warnings += "We have no military units at all."
+        // Cities joined to the capital only across another power's land: an Open Borders pact that lapses cuts them off
+        val connected = civ.cache.citiesConnectedToCapitalToMediums.keys.filter { it.civ == civ && !it.isCapital() }
+        if (connected.isNotEmpty()) {
+            val onOurOwn = com.unciv.logic.civilization.transients.CapitalConnectionsFinder(civ, withoutPacts = true).find().keys
+            val hanging = connected.filter { it !in onOurOwn }
+            if (hanging.isNotEmpty()) {
+                val pacts = civ.diplomacy.values.filter { it.hasOpenBorders && it.otherCiv.isMajorCiv() }.map { manager ->
+                    manager.otherCivName + (manager.trades.flatMap { it.ourOffers + it.theirOffers }.filter { it.name == "Open Borders" }.maxOfOrNull { it.duration }?.let { " (ends in $it turns)" } ?: "") }
+                warnings += "${hanging.joinToString { it.name }} ${if (hanging.size == 1) "is" else "are"} joined to the capital only by way of foreign land, under Open Borders with ${pacts.joinToString(" and ").ifEmpty { "a neighbour" }}. When that pact lapses ${if (hanging.size == 1) "it is" else "they are"} cut off until it is renewed: keep it renewed, or build a road of our own."
+            }
+        }
         return warnings
     }
 

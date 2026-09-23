@@ -12,7 +12,8 @@ import yairm210.purity.annotations.Readonly
 import java.util.EnumSet
 import kotlin.collections.set
 
-class CapitalConnectionsFinder(private val civInfo: Civilization) {
+/** [withoutPacts]: reckon as if no Open Borders pact with another major power existed - to find the cities that hang on such a pact */
+class CapitalConnectionsFinder(private val civInfo: Civilization, private val withoutPacts: Boolean = false) {
     enum class CapitalConnectionMedium(
         val roadType: RoadStatus = RoadStatus.None,
         val checkRailroad: Boolean = false
@@ -152,6 +153,7 @@ class CapitalConnectionsFinder(private val civInfo: Civilization) {
         val diplomacyManager = civInfo.getDiplomacyManager(otherCiv)
             ?: return false // not encountered yet
         if (otherCiv.isCityState && diplomacyManager.diplomaticStatus != DiplomaticStatus.War) return true
+        if (withoutPacts) return false
         return diplomacyManager.hasOpenBorders
     }
 
