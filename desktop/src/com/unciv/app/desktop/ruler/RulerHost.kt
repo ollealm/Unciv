@@ -157,7 +157,8 @@ object RulerHost {
             "POST /advance" -> advance(json.getInt("turns", 10), json.getBoolean("wake", false))
             "GET /briefing" -> briefing(civ(), query["since"]?.toIntOrNull())
             "GET /options" -> options(civ())
-            "GET /log" -> chanceryLog(civ(), since)
+            "GET /log" -> chanceryLog(civ(), query["sinceYear"]?.toIntOrNull()?.let { turnOfYear(it) } ?: since).let { lines ->
+                if (lines.size <= 150) lines else listOf(mapOf("turn" to lines[lines.size - 150]["turn"], "text" to "(${lines.size - 150} earlier lines omitted; ask from a later turn or year)")) + lines.takeLast(150) }
             "GET /lookup" -> lookup(civ(), query["name"] ?: throw ApiError(400, "Missing name"))
             "GET /map.png" -> (query["since"]?.toIntOrNull() ?: (game().turns - 10)).coerceAtLeast(0).let { from ->
                 Png(MapRenderer.render(civ(), query["style"] ?: "atlas", trail = trail, since = from, sinceYear = yearText(from))) }
@@ -362,6 +363,13 @@ object RulerHost {
     }
 
     /** "Railroad" -> Railroads: the names agents reach for are usually one slip away from the real one */
+    /** The one thing a slightly wrong name can only mean (Railroad -> Railroads, Settlers -> Settler, Great Library -> The Great Library), or null */
+    private fun onlyMatch(name: String, candidates: Collection<String>): String? {
+        val wanted = name.lowercase().trim()
+        val close = candidates.filter { val c = it.lowercase(); c == wanted || c == "the $wanted" || c == "${wanted}s" || c.removeSuffix("s") == wanted || wanted.removeSuffix("s") == c || c.removePrefix("the ") == wanted || c.removePrefix("the ") == wanted.removeSuffix("s") }
+        return close.singleOrNull()
+    }
+
     private fun didYouMean(name: String, candidates: Collection<String>): String {
         fun distance(a: String, b: String): Int {
             val row = IntArray(b.length + 1) { it }
@@ -385,8 +393,9 @@ object RulerHost {
         val standing = orders.getOrPut(civ.civName) { StandingOrders() }
         val alreadyKnown = ArrayList<String>()
         val rejected = ArrayList<String>()
+        val taken = ArrayList<String>()
         json.get("research")?.let { goals ->
-            val kept = goals.asStringArray().filter { goal ->
+            val kept = goals.asStringArray().map { goal -> if (goal in ruleset.technologies) goal else onlyMatch(goal, ruleset.technologies.keys)?.also { taken += "$goal -> $it" } ?: goal }.filter { goal ->
                 if (goal !in ruleset.technologies) rejected += "No technology is called '$goal'" + (if (goal in ruleset.policies) " - that is a policy; put it in policyBranches" else didYouMean(goal, ruleset.technologies.keys).ifEmpty { " in this world; get_options.futureTechs lists every technology still ahead of us" }) + ". The other research goals were kept."
                 if (goal in ruleset.technologies && reached(civ, goal)) alreadyKnown += goal
                 goal in ruleset.technologies
@@ -398,6 +407,16 @@ object RulerHost {
                 val known = wish in ruleset.policyBranches || wish in ruleset.policies
                 if (!known) rejected += "No policy or policy branch is called '$wish'; branches: ${ruleset.policyBranches.keys.joinToString()}. The others were kept."
                 known
+            }.let { list ->
+                // Branches that shut each other out (Piety and Rationalism): the later one in the order can never come, so it is dropped with a word
+                val excluded = ArrayList<String>()
+                list.filter { wish ->
+                    val branch = ruleset.policyBranches[wish] ?: ruleset.policies[wish]?.branch ?: return@filter true
+                    val shutBy = branch.uniques.mapNotNull { Regex("Only available <before adopting \\[(.+?)\\]>").find(it)?.groupValues?.get(1) }
+                    val clash = list.takeWhile { it != wish }.firstOrNull { earlier -> (ruleset.policyBranches[earlier]?.name ?: ruleset.policies[earlier]?.branch?.name) in shutBy }
+                    if (clash != null) { excluded += wish; rejected += "$wish cannot be adopted after $clash - the two shut each other out; $wish is dropped from the policy order (put it first if you want it instead)." }
+                    clash == null
+                }
             }
             wishes.remove(); json.addChild("policyBranches", JsonValue(JsonValue.ValueType.array).also { array -> kept.forEach { array.addChild(JsonValue(it)) } })
         }
@@ -409,6 +428,11 @@ object RulerHost {
                 if (target == null || !(civ.isAtWarWith(target.civ) || target.civ.civName in declaringOn)) { rejected += "warAim must be a city of a power we are at war with; '$name' is not. The posture was not changed"; posture.remove() }
             }
         }
+        json.get("queue")?.forEach { order -> order.get("items")?.let { items ->
+            val fixed = items.asStringArray().map { item -> if (item in ruleset.buildings || item in ruleset.units || com.unciv.models.ruleset.PerpetualConstruction.isNamePerpetual(item)) item else onlyMatch(item, ruleset.buildings.keys + ruleset.units.keys)?.also { taken += "$item -> $it" } ?: item }
+            items.remove(); order.addChild("items", JsonValue(JsonValue.ValueType.array).also { array -> fixed.forEach { array.addChild(JsonValue(it)) } })
+        } }
+        if (taken.isNotEmpty()) rejected += "Taken as meant: ${taken.joinToString()}."
         standing.readFrom(json)
         applyPersonality(civ, standing)
         RulerOverrides.postures[civ.civID] = RulerOverrides.Posture(standing.warAim, standing.stance, standing.reserve)
@@ -574,6 +598,9 @@ object RulerHost {
         chancery.getOrPut(civ.civName) { ArrayList() } += mapOf("turn" to stamp(), "text" to text)
     }
 
+    /** The first turn whose year is at or after the one asked for (years run negative before Christ) */
+    private fun turnOfYear(year: Int): Int = (0..game().turns).firstOrNull { game().getYear(it - game().turns) >= year }?.let { it - 1 } ?: game().turns
+
     private fun chanceryLog(civ: Civilization, since: Int) =
         (chancery[civ.civName] ?: emptyList()).filter { (it["turn"] as Int) > since }
 
@@ -621,7 +648,10 @@ object RulerHost {
             for (item in was) if (item !in now && item !in built && !(isPerpetual(item) && city.id !in RulerOverrides.lockedCities)) {
                 val construction = civ.gameInfo.ruleset.buildings[item] ?: civ.gameInfo.ruleset.units[item]
                 val reasons = construction?.let { whyNot(city, it) } ?: emptyList()
-                log(civ, "The officials dropped $item from ${city.name}'s queue" + (if (reasons.isNotEmpty()) " because ${reasons.joinToString()}." else ", replacing it with their own choice."))
+                val theirs = city.id !in RulerOverrides.lockedCities && item !in (orders[civ.civName]?.let { emptyList<String>() } ?: emptyList())
+                log(civ, if (reasons.isNotEmpty()) "The officials dropped $item from ${city.name}'s queue because ${reasons.joinToString()}."
+                    else if (city.id !in RulerOverrides.lockedCities) "The officials changed their own plan for ${city.name}: $item out."
+                    else "The officials dropped $item from ${city.name}'s queue, replacing it with their own choice.")
             }
             for (item in now) if (item !in was && !isPerpetual(item))
                 log(civ, "The officials queued $item in ${city.name}.")
@@ -654,8 +684,10 @@ object RulerHost {
         // Deals: say exactly what came into force and what ended
         val dealsNow = diplomacy.dealsInForce(civ)
         for (deal in diplomacy.endingSoon(civ, 5) - diplomacy.endingSoon(civ, 4).toSet()) log(civ, "A deal ends in five turns: $deal. Renew it only if it is still worth its price.")
-        for (deal in dealsNow - before.deals) log(civ, "A deal came into force with $deal.")
-        for (deal in before.deals - dealsNow) log(civ, "A deal ended with $deal.")
+        val began = (dealsNow - before.deals).toList(); val ended = (before.deals - dealsNow).toList()
+        if (began.isNotEmpty() || ended.isNotEmpty()) log(civ, "Deals: " + listOfNotNull(
+            began.takeIf { it.isNotEmpty() }?.let { "in force with " + it.joinToString("; ") },
+            ended.takeIf { it.isNotEmpty() }?.let { "ended with " + it.joinToString("; ") }).joinToString(". ") + ".")
         // The never-build list is applied where the officials choose; this catches what slipped past (an item already in the queue when it was banned)
         for (city in civ.cities) {
             val current = city.cityConstructions.getCurrentConstruction() as? INonPerpetualConstruction ?: continue
@@ -872,6 +904,12 @@ object RulerHost {
             "researching" to civ.tech.currentTechnologyName(),
             "researchQueue" to civ.tech.techsToResearch,
             "techsResearched" to civ.tech.techsResearched.size,
+            "techsKnown" to civ.tech.techsResearched.sorted().joinToString(", "),
+            "spaceship" to civ.gameInfo.ruleset.victories["Scientific"]?.let { victory -> victory.requiredSpaceshipPartsAsCounter.takeIf { it.isNotEmpty() && "Scientific" in civ.gameInfo.gameParameters.victoryTypes }?.let { needed ->
+                val have = civ.victoryManager.currentsSpaceshipParts
+                mapOf("parts" to needed.keys.associateWith { "${have[it]} of ${needed[it]}" },
+                    "apollo" to civ.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts),
+                    "note" to "Parts are built like buildings (queue them by name once the Apollo Program stands and the techs are known); the ship launches when every part is built.") } },
             "policies" to civ.policies.getAdoptedPolicies().toList(),
             "culture" to mapOf("stored" to civ.policies.storedCulture, "neededForNextPolicy" to civ.policies.getCultureNeededForNextPolicy()),
             "militaryStrength" to civ.getStatForRanking(RankingType.Force),
@@ -988,6 +1026,9 @@ object RulerHost {
         }
         for (unit in civ.units.getCivUnits()) if (unit.isGreatPerson() && units.orders[unit.id]?.action == "hold")
             warnings += "${unit.name} #${unit.id} ${describeWhere(civ, unit.getTile())} awaits orders."
+        if (civ.getHappiness() in 0..2) warnings += "The people's mood is thin (+${civ.getHappiness()}): one more city or a lost luxury tips them into unrest."
+        val outdated = civ.units.getCivUnits().filter { it.isMilitary() && it.baseUnit.isLandUnit && it.baseUnit.getUpgradeUnits(it.cache.state).any { name -> civ.gameInfo.ruleset.units[name]?.let { to -> it.upgrade.canUpgrade(to, ignoreRequirements = false, ignoreResources = true) } == true } }.toList()
+        if (outdated.size >= 3) warnings += "${outdated.size} soldiers carry arms of an earlier age (${outdated.groupingBy { it.name }.eachCount().entries.joinToString { "${it.value} ${it.key}" }}): they cost upkeep and would not hold a wall. Gold above your reserve lets the officials re-arm them; or disband the worst."
         if (!units.hasLandForACity(civ)) for (unit in civ.units.getCivUnits()) if (unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.FoundCity))
             warnings += "${unit.name} #${unit.id} has nowhere to go: no land is left for a new city on our shores. It costs upkeep - disband it, or keep it only if you mean to take it overseas."
         if (civ.policies.canAdoptPolicy()) warnings += "A policy can be adopted but none of the preferred branches has one available - add a branch to the policy order."

@@ -95,16 +95,22 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         if (target != null && unit.getTile() != target && order.action == "garrison" && target.militaryUnit?.civ == civ
             && !unit.movement.canReach(target)) {
             // The city is held by one of ours: walk up beside it, the swap happens once we are adjacent
-            val beside = target.neighbors.filter { unit.movement.canReach(it) }.minByOrNull { it.aerialDistanceTo(unit.getTile()) }
+            if (unit.currentMovement <= 0f) return true
+            val beside = target.neighbors.filter { canMarch(unit, it) }.minByOrNull { it.aerialDistanceTo(unit.getTile()) }
             if (beside != null) { if (beside != unit.getTile()) unit.movement.headTowards(beside); return true }
         }
         if (target != null && unit.getTile() != target) {
-            if (!unit.movement.canReach(target)) {
+            // The escort and upgrade routines may have moved this soldier already this turn: no movement left is not "cannot reach"
+            if (unit.currentMovement <= 0f) return true
+            if (!canMarch(unit, target)) {
                 log(civ, "Our ${unit.name} cannot reach ${where(civ, target)}; the order is dropped and the officials take it back.")
                 orders.remove(unit.id)
                 return false
             }
-            unit.movement.headTowards(target)
+            // B9: a civilian (a Great Person on its way to use itself) whose target holds one of our own civilians changes places with it
+            if (unit.isCivilian() && target.civilianUnit?.civ == civ && unit.getTile().aerialDistanceTo(target) == 1 && unit.movement.canUnitSwapTo(target)) {
+                unit.movement.swapMoveToTile(target)
+            } else unit.movement.headTowards(target)
             if (unit.getTile() != target) {
                 val spot = unit.getTile().position.toString()
                 order.turnsStuck = if (spot == order.lastSpot) order.turnsStuck + 1 else 0
@@ -263,8 +269,10 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         // Generous on purpose: this only has to catch the case where there is plainly nowhere to go. The officials' settlers range
         // far (15 tiles and more), and once our people can embark any shore will do.
         val home = civ.cities.map { it.getCenterTile().getContinent() }.toSet()
+        // Unexplored ground counts as possible land: early on almost nothing is explored, and a gate that closes then starves the realm of settlers
         val any = civ.cities.isEmpty() || civ.cities.asSequence().flatMap { it.getCenterTile().getTilesInDistance(16) }
-            .any { (civ.tech.unitsCanEmbark || it.getContinent() in home) && settleProblem(civ, it) == null }
+            .any { tile -> !tile.isExplored(civ) && (civ.tech.unitsCanEmbark || tile.isLand)
+                || (civ.tech.unitsCanEmbark || tile.getContinent() in home) && settleProblem(civ, tile) == null }
         // Said once each way, so a run can be checked for what this gate did
         val before = landLeft[civ.civName]?.second ?: true
         if (before && !any) log(civ, "No land is left within our reach for a new city; the officials will train no settlers until that changes.")

@@ -78,6 +78,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         val asked = trade.theirOffers.map { it.name }.toSet()
         val superseded = other.tradeRequests.filter { request -> request.requestingCiv == civ.civID && request.trade.ourOffers.any { it.name in asked } }
         other.tradeRequests.removeAll(superseded.toSet())
+        if (superseded.isNotEmpty()) pending.removeAll { it.first == civ.civName && it.second == other.civName && it.third != "peace" } // a withdrawn offer cannot be "accepted" later
         other.tradeRequests.add(TradeRequest(civ.civID, trade.reverse()))
         val summary = trade.brief()
         if (superseded.isNotEmpty()) log(civ, "Our earlier offer to ${other.civName} for ${asked.joinToString()} was withdrawn in favour of the new one.")
