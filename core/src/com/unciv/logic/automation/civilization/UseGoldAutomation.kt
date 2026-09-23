@@ -39,9 +39,12 @@ object UseGoldAutomation {
             itemised(civ, { "re-arming a $name as ${(if (unit.isCivilian()) tile.civilianUnit else tile.militaryUnit)?.name ?: "something newer"}" }) { UnitAutomation.tryUpgradeUnit(unit) }
         }
 
-        if (civ.isMajorCiv()) {
+        if (civ.isMajorCiv() && civ.civID !in com.unciv.logic.automation.RulerOverrides.noGifts) {
             val influence = civ.getKnownCivs().filter { it.isCityState }.associateWith { it.getDiplomacyManager(civ)?.getInfluence() ?: 0f }
-            itemised(civ, { "gifts to " + (influence.filter { (it.key.getDiplomacyManager(civ)?.getInfluence() ?: 0f) > it.value + 1 }.keys.joinToString(" and ") { it.civName }.ifEmpty { "the city-states" }) }) { useGoldForCityStates(civ) }
+            // The ruler's chancery is told whom the gift went to and what that city-state has to offer, so the ledger line is a reason and not a mystery
+            itemised(civ, { "a gift to win the friendship of " + (influence.filter { (it.key.getDiplomacyManager(civ)?.getInfluence() ?: 0f) > it.value + 1 }.keys.joinToString(" and ") { cityState ->
+                val goods = cityState.getCivResourcesByName().filter { (name, amount) -> amount > 0 && civ.gameInfo.ruleset.tileResources[name]?.resourceType?.name in setOf("Luxury", "Strategic") }.keys.take(3)
+                "${cityState.civName}, a ${cityState.cityStateType.name.lowercase()} city-state" + (if (goods.isEmpty()) "" else " holding ${goods.joinToString()}") + " (an ally shares its goods and its favours)" }.ifEmpty { "the city-states" }) }) { useGoldForCityStates(civ) }
         }
 
         val acceptableHurryCostModifier = civ.gold.coerceAtLeast(0)/100

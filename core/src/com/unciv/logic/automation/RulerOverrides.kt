@@ -28,6 +28,9 @@ object RulerOverrides {
     class Posture(val warAim: String? = null, val stance: String = "attack", val reserve: Int = 0)
     val postures = ConcurrentHashMap<String, Posture>()
 
+    /** civIDs whose officials may not give gold to city-states on their own (a standing order of the ruler) */
+    val noGifts: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     /** civIDs that may raise no world wonder at all (a game setting: e.g. only the rulers' realms compete for them) */
     val noWonders: MutableSet<String> = ConcurrentHashMap.newKeySet()
 

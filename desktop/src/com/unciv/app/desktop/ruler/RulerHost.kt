@@ -62,6 +62,8 @@ object RulerHost {
         var neverBuild = ArrayList<String>()
         /** Gold the officials must leave untouched; null = they spend as they see fit */
         var goldReserve: Int? = null
+        /** The officials may not give gold to city-states on their own */
+        var noGifts = false
         /** Keep a soldier inside every city: when one stands empty, the nearest free soldier is sent in under a garrison order */
         var garrisonEveryCity = false
         /** The posture of arms: warAim (an enemy city the host converges on), stance attack|defend|raid, reserve (soldiers kept home) */
@@ -70,6 +72,7 @@ object RulerHost {
         var reserve: Int = 0
         fun toMap(civ: Civilization? = null) = mapOf(
             "goldReserve" to goldReserve,
+            "noGifts" to noGifts,
             "garrisonEveryCity" to garrisonEveryCity,
             "posture" to mapOf("warAim" to warAim, "stance" to stance, "reserve" to reserve),
             "personality" to personality,
@@ -276,7 +279,7 @@ object RulerHost {
         orders.clear(); publicEvents.clear(); chancery.clear(); spending.clear(); warningsWoken.clear()
         units.reset(); diplomacy.reset(); trail.clear()
         worldAtLastAdvance = null
-        RulerOverrides.lockedCities.clear(); RulerOverrides.focusedCities.clear(); RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.noWonders.clear()
+        RulerOverrides.lockedCities.clear(); RulerOverrides.focusedCities.clear(); RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.noGifts.clear(); RulerOverrides.noWonders.clear()
     }
 
     /** Written to a sibling file and moved into place, so a crash mid-write never leaves a half file behind */
@@ -346,6 +349,7 @@ object RulerHost {
         json.get("policyBranches")?.let { policyBranches = ArrayList(it.asStringArray().toList()) }
         json.get("neverBuild")?.let { neverBuild = ArrayList(it.asStringArray().toList()) }
         json.get("goldReserve")?.let { goldReserve = if (it.isNull) null else it.asInt().coerceAtLeast(0) }
+        json.get("noGifts")?.let { noGifts = it.asBoolean() }
         json.get("garrisonEveryCity")?.takeUnless { it.isNull }?.let { garrisonEveryCity = it.asBoolean() }
         json.get("posture")?.takeUnless { it.isNull }?.let { posture ->
             if (posture.has("warAim")) warAim = posture.get("warAim").takeUnless { it.isNull }?.asString()
@@ -360,6 +364,7 @@ object RulerHost {
         for ((name, value) in standing.personality) personality[PersonalityValue.valueOf(name)] = value
         RulerOverrides.personalities[civ.civID] = personality
         standing.goldReserve?.let { RulerOverrides.goldReserve[civ.civID] = it } ?: RulerOverrides.goldReserve.remove(civ.civID)
+        if (standing.noGifts) RulerOverrides.noGifts += civ.civID else RulerOverrides.noGifts -= civ.civID
     }
 
     /** "Railroad" -> Railroads: the names agents reach for are usually one slip away from the real one */
