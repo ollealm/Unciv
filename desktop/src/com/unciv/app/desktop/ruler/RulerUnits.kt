@@ -59,6 +59,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     /** Great People the ruler has handed back to the officials */
     val released = HashSet<Int>()
 
+    /** The officials' retreat may not swap a placed garrison out of its city */
+    fun underOrders(unit: MapUnit) = orders[unit.id]?.action in listOf("garrison", "fortify", "hold")
+
     fun handle(unit: MapUnit): Boolean {
         // A Great Person is the ruler's to spend: the officials never touch one unless it was released to them.
         // Caught here, in the automation's own loop, because one born at the start of a turn would otherwise be spent within it.

@@ -102,6 +102,7 @@ object RulerHost {
         RulerOverrides.forbidden = { civ, construction -> civ.civID in RulerOverrides.ruledCivs && isForbidden(civ, construction) }
         RulerOverrides.spendingNoted = { civ, gold, what -> if (civ.civID in RulerOverrides.ruledCivs) spending.getOrPut(civ.civName) { ArrayList() } += Pair(gold, what) }
         RulerOverrides.unitHandler = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.handle(unit) }
+        RulerOverrides.underOrders = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.underOrders(unit) }
 
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0)
         server.executor = Executors.newSingleThreadExecutor() // game state is not thread-safe
@@ -662,8 +663,12 @@ object RulerHost {
         val notifications = civ.notificationsLog.lastOrNull()?.takeIf { it.turn == turn - 1 }?.notifications ?: emptyList()
         // Other civs answer on their own turn, after ours - those notices are still in the current list
         diplomacy.settleAnswers(civ, notifications.map { it.text } + civ.notifications.map { it.text })
+        // An alliance won and lost again within the turn (a tie in influence flipping back and forth) is churn, not news
+        val flipped = notifications.filter { "We have allied with [" in it.text }.map { it.text.substringAfter("allied with [").substringBefore("]") }
+            .filter { ally -> notifications.any { "lost our alliance" in it.text && "[$ally]" in it.text } }.toSet()
         for (notification in notifications) {
             if (noise.any { it in notification.text }) continue
+            if (flipped.any { "[$it]" in notification.text && ("allied with" in notification.text || "lost our alliance" in notification.text) }) continue
             log(civ, notification.text.replace("[", "").replace("]", ""))
         }
         // A ruler's queue binds until it has run out
@@ -702,10 +707,13 @@ object RulerHost {
                 .any { unit.first in it && (("destroyed" in it) || ("captured" in it) || ("was killed" in it)) }
             val spent = civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CreateWaterImprovements) == true
             val great = civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.GreatPerson) == true
+            // Re-arming gives a unit a new number: the new soldier standing where the old one stood is the same man with better arms
+            val rearmed = civ.units.getCivUnits().firstOrNull { it.id !in before.units && it.getTile() == unit.second && it.isMilitary() }
             log(civ, if (fell) "Our ${unit.first} was lost in action ${describeWhere(civ, unit.second)}."
                 else if (spent) "Our ${unit.first} ${describeWhere(civ, unit.second)} did its work and was used up, as such boats are: the fishing grounds it set up stay."
-                else if (great) "Our ${unit.first} ${describeWhere(civ, unit.second)} was spent: its ability used, by your order or by the officials once it was left to them."
-                else "Our ${unit.first} ${describeWhere(civ, unit.second)} is no longer in service.")
+                else if (great) "Our ${unit.first} #$id was spent: its ability used, by your order or by the officials once it was left to them."
+                else if (rearmed != null) "Our ${unit.first} #$id was re-armed as a ${rearmed.name} #${rearmed.id} ${describeWhere(civ, unit.second)}."
+                else "Our ${unit.first} #$id ${describeWhere(civ, unit.second)} left service: disbanded by the officials to save its upkeep, or lost outside a battle we saw.")
         }
         applyStandingOrders(civ) // a finished goal leaves the queue empty until the next goal's path is set - not idleness
         val researching = civ.tech.currentTechnologyName()
@@ -725,11 +733,16 @@ object RulerHost {
         }
         // Deals: say exactly what came into force and what ended
         val dealsNow = diplomacy.dealsInForce(civ)
-        for (deal in diplomacy.endingSoon(civ, 5) - diplomacy.endingSoon(civ, 4).toSet()) log(civ, "A deal ends in five turns: $deal. Renew it only if it is still worth its price.")
+        for (deal in diplomacy.endingSoon(civ, 5) - diplomacy.endingSoon(civ, 4).toSet()) log(civ, "A deal ends in five turns: $deal. It can be offered again once it has ended (turn ${turn + 5}), not before; renew it only if it is still worth its price.")
         val began = (dealsNow - before.deals).toList(); val ended = (before.deals - dealsNow).toList()
+        // A deal that ends the turn its renewal begins was replaced, not lost: same partner, same goods, only the numbers differ
+        val goodsOf = { deal: String -> deal.replace(Regex(" x\\d+"), "").replace(Regex("\\d+"), "#") }
+        val (replaced, lapsed) = ended.partition { old -> began.any { goodsOf(it) == goodsOf(old) } }
         if (began.isNotEmpty() || ended.isNotEmpty()) log(civ, "Deals: " + listOfNotNull(
             began.takeIf { it.isNotEmpty() }?.let { "in force with " + it.joinToString("; ") },
-            ended.takeIf { it.isNotEmpty() }?.let { "ended with " + it.joinToString("; ") }).joinToString(". ") + ".")
+            replaced.takeIf { it.isNotEmpty() }?.let { "replaced by the renewal: " + it.joinToString("; ") },
+            lapsed.takeIf { it.isNotEmpty() }?.let { "ended with " + it.joinToString("; ") }).joinToString(". ") + ".")
+        diplomacy.officialsDealings(civ, began)
         // The never-build list is applied where the officials choose; this catches what slipped past (an item already in the queue when it was banned)
         for (city in civ.cities) {
             val current = city.cityConstructions.getCurrentConstruction() as? INonPerpetualConstruction ?: continue
@@ -864,7 +877,7 @@ object RulerHost {
 
         for (i in 1..turns) {
             val before = WorldSnapshot(game)
-            val civSnapshots = ruledCivs.associateWith { CivSnapshot(it) }
+            val civSnapshots = ruledCivs.associateWith { diplomacy.noteRequests(it); CivSnapshot(it) }
             for (civ in ruledCivs) applyStandingOrders(civ)
             game.nextTurn()
             trail.record(game)
@@ -943,6 +956,8 @@ object RulerHost {
             "happiness" to civ.getHappiness(),
             "happinessBreakdown" to civ.stats.getHappinessBreakdown().filter { it.value != 0f }.mapValues { it.value.toInt() },
             "warnings" to warnings(civ),
+            "victory" to civ.gameInfo.civilizations.firstOrNull { it.victoryManager.hasWon() }.let { winner -> mapOf("winner" to winner?.civName, "victoryType" to winner?.victoryManager?.getVictoryTypeAchieved(),
+                "note" to if (winner != null) "The game is over." else "Nobody has won yet. A scientific victory comes the turn the last spaceship part is built and added to the ship in the capital.") },
             "researching" to civ.tech.currentTechnologyName(),
             "researchQueue" to civ.tech.techsToResearch,
             "techsResearched" to civ.tech.techsResearched.size,
@@ -951,7 +966,7 @@ object RulerHost {
                 val have = civ.victoryManager.currentsSpaceshipParts
                 mapOf("parts" to needed.keys.associateWith { "${have[it]} of ${needed[it]}" },
                     "apollo" to civ.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts),
-                    "note" to "Parts are built like buildings (queue them by name once the Apollo Program stands and the techs are known) and CANNOT be bought with gold - saving gold for them is wasted; the ship launches when every part is built.") } },
+                    "note" to "Parts are units: queue them by name in any city once the Apollo Program stands and the techs are known (each needs Aluminum); a finished part walks to the capital and is added to the ship by the officials. They CANNOT be bought with gold - saving gold for them is wasted. The ship launches, and the game is won, when every part is added.") } },
             "policies" to civ.policies.getAdoptedPolicies().toList(),
             "culture" to mapOf("stored" to civ.policies.storedCulture, "neededForNextPolicy" to civ.policies.getCultureNeededForNextPolicy()),
             "militaryStrength" to civ.getStatForRanking(RankingType.Force),
@@ -1037,6 +1052,10 @@ object RulerHost {
             "ranged" to soldiers.count { it.baseUnit.isRanged() && !it.baseUnit.isProbablySiegeUnit() },
             "citiesWeHaveSeen" to cities,
             "citiesNeverSeen" to unseen,
+            "whoElseWouldFight" to civ.getKnownCivs().filter { it.isMajorCiv() && !civ.isAtWarWith(it) }.associate { target -> target.civName to
+                (civ.gameInfo.civilizations.filter { ally -> ally != target && ally != civ && ally.isAlive() && ((ally.isMajorCiv() && ally.getDiplomacyManager(target)?.diplomaticStatus == com.unciv.logic.civilization.diplomacy.DiplomaticStatus.DefensivePact) || (ally.isCityState && ally.allyCiv == target)) }
+                    .map { it.civName + (if (it.isCityState) " (city-state ally)" else " (defensive pact)") }) }.filterValues { it.isNotEmpty() },
+            "whoElseWouldFightNote" to "A war on any of these powers brings in the others listed at once: every defensive-pact partner and every city-state allied to them. Nothing brought in by a war shows in citiesSeen.",
             "howToRead" to "Sums from the chancery's own reckoning of battle, at full health and even luck. A city is taken by breaking its health with engines and then walking a foot soldier in; it heals each turn, shoots one volley a turn at anything within two tiles, and its garrison and walls do the rest. Bowmen and crossbows barely scratch walls. What we have never seen we cannot judge - say so.")
     }
 
@@ -1083,6 +1102,13 @@ object RulerHost {
         }
         if (civ.gold < 0 || civ.gold + civ.stats.statsForNextTurn.gold * 5 < 0) warnings += "The treasury is running dry (${civ.gold} gold, ${civ.stats.statsForNextTurn.gold.toInt()} per turn)."
         if (civ.units.getCivUnits().none { !it.isCivilian() }) warnings += "We have no military units at all."
+        // A spaceship part that could be built but is in no city's queue: the ruler's own binding queues keep the officials from adding it
+        for (part in civ.gameInfo.ruleset.units.values.filter { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.SpaceshipPart) }) {
+            val buildable = civ.cities.filter { part.isBuildable(it.cityConstructions) }
+            if (buildable.isEmpty() || civ.cities.any { part.name in it.cityConstructions.constructionQueue } || civ.units.getCivUnits().any { it.name == part.name }) continue
+            val stored = civ.cities.map { it to it.cityConstructions.getWorkDone(part.name) }.filter { it.second > 0 }
+            warnings += "${part.name} can be built and no city is building it" + (stored.takeIf { it.isNotEmpty() }?.let { " (${it.joinToString { (city, done) -> "${city.name} has ${done} stored" }})" } ?: "") + ". Queue it by name: the officials never add a part to a queue you gave them."
+        }
         // Cities joined to the capital only across another power's land: an Open Borders pact that lapses cuts them off
         val connected = civ.cache.citiesConnectedToCapitalToMediums.keys.filter { it.civ == civ && !it.isCapital() }
         if (connected.isNotEmpty()) {

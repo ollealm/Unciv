@@ -45,4 +45,7 @@ object RulerOverrides {
      *  handled this unit this turn and the automation must leave it alone.
      */
     @Volatile var unitHandler: ((MapUnit) -> Boolean)? = null
+
+    /** True when the ruler gave this unit its own orders: the officials' retreat must not swap it out of its place */
+    @Volatile var underOrders: ((MapUnit) -> Boolean)? = null
 }

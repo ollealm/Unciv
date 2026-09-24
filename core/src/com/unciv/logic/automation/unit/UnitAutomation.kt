@@ -363,6 +363,7 @@ object UnitAutomation {
             } else if (otherUnit.civ == unit.civ) {
                 // The tile is taken, lets see if we want to swap retreat to it
                 if (otherUnit.health <= 80) continue
+                if (com.unciv.logic.automation.RulerOverrides.underOrders?.invoke(otherUnit) == true) continue // a garrison the ruler placed stays put
                 if (otherUnit.baseUnit.isRanged()) {
                     // Don't swap ranged units closer than they have to be
                     val range = otherUnit.baseUnit.range
