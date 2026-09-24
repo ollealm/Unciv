@@ -868,7 +868,12 @@ object RulerHost {
         for ((wonder, owner) in after.wonders)
             if (wonder !in before.wonders) addPublicEvent("$owner completed the wonder $wonder in ${after.wonderSites[wonder] ?: "one of its cities"}.")
         for ((civ, era) in after.eras)
-            if (before.eras[civ] != era) addPublicEvent("$civ entered the $era.")
+            if (before.eras[civ] != era) {
+                // The first learning of the new age is what opened it: named, so the age's picture can show it rather than an emblem
+                val people = game().civilizations.firstOrNull { it.civName == civ }
+                val opened = people?.tech?.techsResearched?.firstOrNull { game().ruleset.technologies[it]?.era() == era }
+                addPublicEvent("$civ entered the $era" + (opened?.let { " with the learning of $it" } ?: "") + ".")
+            }
         for (civ in before.alive - after.alive) addPublicEvent("$civ has been destroyed.")
     }
 
