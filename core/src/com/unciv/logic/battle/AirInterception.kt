@@ -1,5 +1,6 @@
 package com.unciv.logic.battle
 
+import com.unciv.logic.automation.RulerOverrides
 import com.unciv.logic.civilization.Civilization
 import com.unciv.logic.civilization.LocationAction
 import com.unciv.logic.civilization.NotificationCategory
@@ -78,6 +79,8 @@ object AirInterception {
 
             // Damage if Air v Air should work similar to Melee
             val damageDealt: Battle.DamageDealt = Battle.takeDamage(attacker, MapUnitCombatant(interceptor))
+            if (attacker.isDefeated()) RulerOverrides.noteLoss(attacker.getCivInfo(), attacker.unit, attacker.getTile(), MapUnitCombatant(interceptor))
+            if (MapUnitCombatant(interceptor).isDefeated()) RulerOverrides.noteLoss(interceptor.civ, interceptor, interceptor.getTile(), attacker)
 
             // 5 XP to both
             Battle.addXp(MapUnitCombatant(interceptor), 5, attacker)
@@ -184,6 +187,7 @@ object AirInterception {
         damage = (damage.toFloat() * damageFactor).toInt().coerceAtMost(attacker.unit.health)
 
         attacker.takeDamage(damage)
+        if (attacker.isDefeated()) RulerOverrides.noteLoss(attacker.getCivInfo(), attacker.unit, attacker.getTile(), MapUnitCombatant(interceptor))
         if (damage > 0)
             Battle.addXp(MapUnitCombatant(interceptor), 2, attacker)
 

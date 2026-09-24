@@ -1,6 +1,10 @@
 package com.unciv.logic.automation
 
+import com.unciv.logic.battle.ICombatant
+import com.unciv.logic.civilization.Civilization
 import com.unciv.logic.map.mapunit.MapUnit
+import com.unciv.logic.map.tile.Tile
+import com.unciv.logic.trade.TradeRequest
 import com.unciv.models.ruleset.nation.Personality
 import java.util.concurrent.ConcurrentHashMap
 
@@ -48,4 +52,22 @@ object RulerOverrides {
 
     /** True when the ruler gave this unit its own orders: the officials' retreat must not swap it out of its place */
     @Volatile var underOrders: ((MapUnit) -> Boolean)? = null
+
+    /**
+     *  What became of a trade request a ruled civ laid before another: accepted | countered | declined | invalid (the officials could not
+     *  honour it and dropped it) | voided (one side could no longer supply). Told to the host with the request itself, so a proposal is
+     *  settled by its own record and not by guesswork over notifications.
+     */
+    @Volatile var tradeAnswered: ((TradeRequest, Civilization, String) -> Unit)? = null
+    fun noteAnswer(request: TradeRequest, receiver: Civilization, outcome: String) {
+        if (request.requestingCiv in ruledCivs) tradeAnswered?.invoke(request, receiver, outcome)
+    }
+
+    /** A unit of a ruled civ destroyed or captured in battle, attacker or defender alike: the host otherwise cannot tell a death from a disbanding */
+    class UnitLoss(val civ: Civilization, val unit: MapUnit, val where: Tile, val enemy: Civilization?, val enemyUnit: String?, val captured: Boolean)
+    @Volatile var unitLost: ((UnitLoss) -> Unit)? = null
+    /** [civ] is passed apart from the unit because a captured unit already belongs to its captor by the time this is called */
+    fun noteLoss(civ: Civilization, unit: MapUnit, where: Tile, enemy: ICombatant?, captured: Boolean = false) {
+        if (civ.civID in ruledCivs) unitLost?.invoke(UnitLoss(civ, unit, where, enemy?.getCivInfo(), enemy?.getName(), captured))
+    }
 }

@@ -1,5 +1,6 @@
 package com.unciv.logic.battle
 
+import com.unciv.logic.automation.RulerOverrides
 import com.unciv.logic.civilization.AlertType
 import com.unciv.logic.civilization.Civilization
 import com.unciv.logic.civilization.MapUnitAction
@@ -162,6 +163,7 @@ object BattleUnitCapture {
                     wasDestroyedInstead = true
         }
 
+        RulerOverrides.noteLoss(defenderCiv, capturedUnit, capturedUnitTile, attacker, captured = !wasDestroyedInstead)
         if (!wasDestroyedInstead)
             defenderCiv.addNotification(
                 "An enemy [${attacker.getName()}] has captured our [${defender.getName()}]",

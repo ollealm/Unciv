@@ -1,5 +1,6 @@
 package com.unciv.logic.automation.civilization
 
+import com.unciv.logic.automation.RulerOverrides
 import com.unciv.logic.civilization.Civilization
 import com.unciv.logic.civilization.NotificationCategory
 import com.unciv.logic.civilization.NotificationIcon
@@ -19,13 +20,15 @@ object TradeAutomation {
     fun respondToTradeRequests(civInfo: Civilization, tradeAndChangeState: Boolean) {
         // Every offer made to a ruled civ - peace, a deal, a counteroffer - waits for the ruler's answer: the officials neither take nor refuse one,
         // so no one can exploit a ruled realm's officials with a lopsided offer that its ruler never sees
-        val heldForRuler = if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) civInfo.tradeRequests.toList() else emptyList()
+        val heldForRuler = if (civInfo.civID in RulerOverrides.ruledCivs) civInfo.tradeRequests.toList() else emptyList()
         for (tradeRequest in civInfo.tradeRequests.toList()) {
             if (tradeRequest in heldForRuler) continue
             val otherCiv = civInfo.gameInfo.getCivilization(tradeRequest.requestingCiv)
             // Treat 'no trade' state as if all trades are invalid - thus AIs will not update its "turns to offer"
-            if (!tradeAndChangeState || !TradeEvaluation().isTradeValid(tradeRequest.trade, civInfo, otherCiv))
+            if (!tradeAndChangeState || !TradeEvaluation().isTradeValid(tradeRequest.trade, civInfo, otherCiv)) {
+                RulerOverrides.noteAnswer(tradeRequest, civInfo, "invalid") // dropped with the rest below, unanswered
                 continue
+            }
 
             val tradeLogic = TradeLogic(civInfo, otherCiv)
             tradeLogic.currentTrade.set(tradeRequest.trade)
@@ -36,6 +39,7 @@ object TradeAutomation {
              */
             civInfo.tradeRequests.remove(tradeRequest)
             if (TradeEvaluation().isTradeAcceptable(tradeLogic.currentTrade, civInfo, otherCiv)) {
+                RulerOverrides.noteAnswer(tradeRequest, civInfo, "accepted")
                 tradeLogic.acceptTrade()
                 otherCiv.addNotification("[${civInfo.civName}] has accepted your trade request", NotificationCategory.Trade, NotificationIcon.Trade, civInfo.civName)
             } else {
@@ -43,9 +47,11 @@ object TradeAutomation {
                 if (counteroffer != null) {
                     otherCiv.addNotification("[${civInfo.civName}] has made a counteroffer to your trade request", NotificationCategory.Trade, NotificationIcon.Trade, civInfo.civName)
                     otherCiv.tradeRequests.add(counteroffer)
+                    RulerOverrides.noteAnswer(tradeRequest, civInfo, "countered")
                 } else{
                     otherCiv.addNotification("[${civInfo.civName}] has denied your trade request", NotificationCategory.Trade, civInfo.civName, NotificationIcon.Trade)
                     tradeRequest.decline(civInfo)
+                    RulerOverrides.noteAnswer(tradeRequest, civInfo, "declined")
                 }
                     
             }

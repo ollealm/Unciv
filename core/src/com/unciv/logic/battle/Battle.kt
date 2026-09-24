@@ -2,6 +2,7 @@ package com.unciv.logic.battle
 
 import com.unciv.Constants
 import com.unciv.UncivGame
+import com.unciv.logic.automation.RulerOverrides
 import com.unciv.logic.automation.civilization.NextTurnAutomation
 import com.unciv.logic.city.City
 import com.unciv.logic.civilization.*
@@ -117,7 +118,7 @@ object Battle {
         val interceptDamage: DamageDealt
         if (attacker is MapUnitCombatant && attacker.unit.baseUnit.isAirUnit()) {
             interceptDamage = AirInterception.tryInterceptAirAttack(attacker, attackedTile, defender.getCivInfo(), defender)
-            if (attacker.isDefeated()) return interceptDamage
+            if (attacker.isDefeated()) return interceptDamage // the interception itself told the host of the loss
         } else interceptDamage = DamageDealt.None
 
         if (hasWithdrawnFromMelee(attacker, defender, attackedTile)) return DamageDealt.None
@@ -133,6 +134,10 @@ object Battle {
         // check if unit is captured by the attacker (prize ships unique)
         // As ravignir clarified in issue #4374, this only works for aggressor
         val captureMilitaryUnitSuccess = BattleUnitCapture.tryCaptureMilitaryUnit(attacker, defender, attackedTile)
+
+        // A ruled civ's fallen soldier is told to its host here, on either side of the fight; the notification below reaches the defender only
+        if (attacker is MapUnitCombatant && attacker.isDefeated()) RulerOverrides.noteLoss(attacker.getCivInfo(), attacker.unit, attacker.getTile(), defender)
+        if (defender is MapUnitCombatant && defender.isDefeated() && !defender.unit.isCivilian()) RulerOverrides.noteLoss(defender.getCivInfo(), defender.unit, attackedTile, attacker, captured = captureMilitaryUnitSuccess)
 
         if (!captureMilitaryUnitSuccess) // capture creates a new unit, but `defender` still is the original, so this function would still show a kill message
             postBattleNotifications(attacker, defender, attackedTile, attacker.getTile(), damageDealt)
@@ -689,9 +694,9 @@ object Battle {
 
         city.hasJustBeenConquered = true
         city.getCenterTile().apply {
-            if (militaryUnit != null) militaryUnit!!.destroy()
+            if (militaryUnit != null) { RulerOverrides.noteLoss(militaryUnit!!.civ, militaryUnit!!, this, attacker); militaryUnit!!.destroy() }
             if (civilianUnit != null) BattleUnitCapture.captureCivilianUnit(attacker, MapUnitCombatant(civilianUnit!!), checkDefeat = false)
-            for (airUnit in airUnits.toList()) airUnit.destroy()
+            for (airUnit in airUnits.toList()) { RulerOverrides.noteLoss(airUnit.civ, airUnit, this, attacker); airUnit.destroy() }
         }
 
         val gameContext = GameContext(civInfo = attackerCiv, city=city, unit = attacker.unit, ourCombatant = attacker, attackedTile = city.getCenterTile())
@@ -717,7 +722,7 @@ object Battle {
         } else if (attackerCiv.isHuman() && UncivGame.Current.worldScreen?.autoPlay?.isAutoPlayingAndFullAutoPlayAI() == false) {
             // we're not taking our former capital
             attackerCiv.popupAlerts.add(PopupAlert(AlertType.CityConquered, city.id))
-        } else if (attackerCiv.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) {
+        } else if (attackerCiv.civID in RulerOverrides.ruledCivs) {
             // A ruler's conquest is the ruler's to dispose of: held as a puppet until they annex, raze or free it by order - never burned on the automation's say-so
             city.puppetCity(attackerCiv)
         } else automateCityConquer(attackerCiv, city)
