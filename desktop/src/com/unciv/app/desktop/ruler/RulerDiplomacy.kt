@@ -40,14 +40,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
     }
     /** After the turn: what the officials did with the requests on the desk, and what they proposed on their own */
     fun officialsDealings(civ: Civilization, began: List<String>) {
-        val asked = askedOfUs[civ.civName] ?: emptyList()
-        for ((partner, terms) in asked) {
-            val hadOffered = pending.any { it.first == civ.civName && it.second == partner && it.third != "peace" }
-            val stripped = terms.replace(Regex(" for \\d+ turns"), "")
-            val inForce = began.any { it == "$partner: $stripped" }
-            if (inForce) log(civ, "The officials accepted ${partner}'s ${if (hadOffered) "counteroffer" else "proposal"}: $terms. The deal is in force.")
-            else if (civ.tradeRequests.none { civ.gameInfo.getCivilization(it.requestingCiv).civName == partner }) log(civ, "The officials turned down ${partner}'s ${if (hadOffered) "counteroffer" else "proposal"} ($terms)" + (if (hadOffered) ", and our own offer with it" else "") + ".")
-        }
+        // Offers made to us all wait for the ruler now (tradeOffers); what is left to the officials is proposing on their own
         val now = civ.gameInfo.civilizations.flatMap { other -> other.tradeRequests.filter { it.requestingCiv == civ.civID }.map { "${other.civName}: ${it.trade.reverse().brief()}" } }.toSet()
         for (offer in now - (oursOut[civ.civName] ?: emptySet()))
             if (pending.none { it.first == civ.civName && "${it.second}: ${it.third}" == offer }) log(civ, "The officials proposed a deal to ${offer.substringBefore(":")}: ${offer.substringAfter(": ")}. The other side answers on its turn.")
@@ -110,6 +103,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         pending += Triple(civ.civName, other.civName, summary)
         log(civ, "We proposed a trade to ${other.civName}: $summary.")
         val balance = TradeEvaluation().getTradeAcceptability(trade.reverse(), other, civ, true)
+        if (other.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs)
+            return (if (superseded.isNotEmpty()) "Your earlier pending offer for the same goods was withdrawn. " else "") + "Proposed to ${other.civName}: $summary. ${other.civName} is an advised court: their advisor decides at their next look-in, within a few turns, and may accept, refuse or send a counteroffer. (Their officials would reckon it worth $balance to them, but the choice is not theirs.)"
         return (if (superseded.isNotEmpty()) "Your earlier pending offer for the same goods was withdrawn. " else "") + "Proposed to ${other.civName}: $summary. They answer on their turn; by their own reckoning ${if (balance < -100_000) "they will not part with this at any price" else "this deal is worth $balance to them (they accept at 0 or more)"}, so they are ${if (acceptable) "likely to accept" else if (balance < -100_000) "certain to refuse" else "likely to refuse - sweeten it or ask for less"}."
     }
 
@@ -221,6 +216,61 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
 
     /** turn on which each waiting offer of peace was first seen, keyed "us<them" */
     private val peaceOfferedOn = HashMap<String, Int>()
+    /** turn on which each waiting offer of a deal was first seen, keyed "us<them: terms" */
+    private val dealOfferedOn = HashMap<String, Int>()
+
+    private fun isPeace(request: TradeRequest) = (request.trade.ourOffers + request.trade.theirOffers).any { it.name == Constants.peaceTreaty }
+
+    /** Deals other powers have laid before this court: they wait for the ruler's answer (answerOffers), and lapse as refused if none comes */
+    fun tradeOffers(civ: Civilization, announce: Boolean = false): List<String> {
+        val turn = civ.gameInfo.turns
+        val waiting = civ.tradeRequests.filter { !isPeace(it) }
+        val keyOf = { request: TradeRequest -> "${civ.civName}<${civ.gameInfo.getCivilization(request.requestingCiv).civName}: ${request.trade.brief()}" }
+        dealOfferedOn.keys.removeAll { key -> key.startsWith("${civ.civName}<") && waiting.none { keyOf(it) == key } }
+        return waiting.mapNotNull { request ->
+            val other = civ.gameInfo.getCivilization(request.requestingCiv)
+            val key = keyOf(request)
+            val advised = other.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs
+            val ours = pending.any { it.first == civ.civName && it.second == other.civName && it.third != "peace" }
+            val since = dealOfferedOn.getOrPut(key) {
+                if (announce) log(civ, "${other.civName}${if (advised) " (an advised court)" else ""} offers a deal${if (ours) " in answer to ours" else ""}: ${request.trade.brief()}. It waits for your answer - accept or refuse it with answerOffers (a counter is a refusal and a new proposal); unanswered, it lapses as refused in $PEACE_OFFER_WAITS turns.")
+                turn }
+            if (turn - since >= PEACE_OFFER_WAITS) {
+                civ.tradeRequests.remove(request); request.decline(civ); dealOfferedOn.remove(key)
+                other.addNotification("[${civ.civName}] has denied your trade request", com.unciv.logic.civilization.NotificationCategory.Trade, civ.civName, com.unciv.logic.civilization.NotificationIcon.Trade)
+                if (announce) log(civ, "${other.civName}'s offer (${request.trade.brief()}) went unanswered and lapsed as refused.")
+                null
+            } else "${other.civName}: ${request.trade.brief()} (waits ${PEACE_OFFER_WAITS - (turn - since)} more turns; answerOffers accept or refuse)"
+        }
+    }
+
+    /** The ruler's answer to a deal on the desk: accept it as offered, or refuse it (a counter is a refusal followed by a proposal of our own) */
+    fun answerOffer(civ: Civilization, name: String, answer: String): String {
+        val other = civ.known(name)
+        val request = civ.tradeRequests.firstOrNull { it.requestingCiv == other.civID && !isPeace(it) }
+            ?: throw IllegalArgumentException("No deal from $name is waiting (peace is answered with the peace order)")
+        val terms = request.trade.brief()
+        civ.tradeRequests.remove(request)
+        dealOfferedOn.remove("${civ.civName}<${other.civName}: $terms")
+        return when (answer.lowercase().trim()) {
+            "accept" -> {
+                if (!TradeEvaluation().isTradeValid(request.trade, civ, other)) throw IllegalArgumentException("${other.civName}'s offer ($terms) can no longer be honoured - a resource or the treasury has changed")
+                val logic = TradeLogic(civ, other)
+                logic.currentTrade.set(request.trade)
+                logic.acceptTrade()
+                other.addNotification("[${civ.civName}] has accepted your trade request", com.unciv.logic.civilization.NotificationCategory.Trade, com.unciv.logic.civilization.NotificationIcon.Trade, civ.civName)
+                log(civ, "By your order: we accepted ${other.civName}'s offer ($terms). The deal is in force.")
+                "Accepted ${other.civName}'s offer: $terms"
+            }
+            "refuse" -> {
+                request.decline(civ)
+                other.addNotification("[${civ.civName}] has denied your trade request", com.unciv.logic.civilization.NotificationCategory.Trade, civ.civName, com.unciv.logic.civilization.NotificationIcon.Trade)
+                log(civ, "By your order: we refused ${other.civName}'s offer ($terms).")
+                "Refused ${other.civName}'s offer: $terms"
+            }
+            else -> throw IllegalArgumentException("answer must be accept or refuse")
+        }
+    }
 
     /** Forget everything of one game */
     fun reset() { pending.clear(); peaceOfferedOn.clear() }

@@ -548,6 +548,7 @@ object RulerHost {
         tryEach(json.get("units")) { units.give(civ, it) }
         tryEach(json.get("trade")) { diplomacy.proposeTrade(civ, it) }
         tryEach(json.get("peace")) { diplomacy.proposePeace(civ, it.asString()) }
+        tryEach(json.get("answerOffers")) { diplomacy.answerOffer(civ, it.getString("power"), it.getString("answer")) }
         tryEach(json.get("friendship")) { diplomacy.proposeFriendship(civ, it.asString()) }
         tryEach(json.get("gift")) { diplomacy.giftGold(civ, it.getString("cityState"), it.getInt("gold")) }
         // Declare war
@@ -659,6 +660,7 @@ object RulerHost {
 
     private fun recordChancery(civ: Civilization, before: CivSnapshot) {
         val turn = civ.gameInfo.turns
+        units.noteStanding(civ)
         // The game's own notifications first - they cover research, buildings, combat, diplomacy
         val notifications = civ.notificationsLog.lastOrNull()?.takeIf { it.turn == turn - 1 }?.notifications ?: emptyList()
         // Other civs answer on their own turn, after ours - those notices are still in the current list
@@ -719,9 +721,14 @@ object RulerHost {
         val researching = civ.tech.currentTechnologyName()
         if (researching == null) {
             if (before.researching != null) log(civ, "No research goal remains; the officials choose the next technology themselves until goals are given.")
-        } else if (before.researching != researching && researching !in (orders[civ.civName]?.research ?: emptyList()))
-            log(civ, "Research is now on $researching.")
+        } else if (before.researching != researching && researching !in (orders[civ.civName]?.research ?: emptyList())) {
+            val goal = orders[civ.civName]?.research?.firstOrNull { !reached(civ, it) }
+            val queue = civ.tech.techsToResearch
+            val onTheWay = goal != null && researching in queue && goal in queue
+            log(civ, "Research is now on $researching" + (if (onTheWay) ", on the way to $goal (${queue.indexOf(goal) - queue.indexOf(researching)} more step${if (queue.indexOf(goal) - queue.indexOf(researching) == 1) "" else "s"} after it)" else "") + ".")
+        }
         diplomacy.peaceOffers(civ, announce = true)
+        diplomacy.tradeOffers(civ, announce = true)
         orders[civ.civName]?.let { standing ->
             val aim = standing.warAim ?: return@let
             val target = civ.gameInfo.getCities().firstOrNull { it.name == aim }
@@ -855,7 +862,7 @@ object RulerHost {
     // Not answers to our own proposals: acting on one sends another, and the advisor would be woken by his own echo every turn.
     // Not "demands": that is a city asking for a luxury, not a neighbour asking for tribute.
     private val wakeWorthy = listOf("dropped .* because", "declared war", "denounced", "lost in action",
-        "awaits orders", "captured", "has been destroyed", "has been stuck", "offers peace").map { Regex(it, RegexOption.IGNORE_CASE) }
+        "awaits orders", "captured", "has been destroyed", "has been stuck", "offers peace", "\\(an advised court\\) offers a deal").map { Regex(it, RegexOption.IGNORE_CASE) }
 
     private val warningsWoken = HashMap<String, HashSet<String>>()
     /** The world as the last advance left it (null before the first) */
@@ -998,6 +1005,7 @@ object RulerHost {
             "knownCivs" to diplomacy.relations(civ),
             "log" to condensed(chanceryLog(civ, logSince ?: (turn - 12)).map { "T${it["turn"]}: ${it["text"]}" }),
             "peaceOffers" to diplomacy.peaceOffers(civ),
+            "tradeOffers" to diplomacy.tradeOffers(civ),
             "dealsLedger" to diplomacy.ledger(civ),
             "standingOrders" to orders[civ.civName]?.toMap(civ)
         )
@@ -1055,7 +1063,7 @@ object RulerHost {
             "whoElseWouldFight" to civ.getKnownCivs().filter { it.isMajorCiv() && !civ.isAtWarWith(it) }.associate { target -> target.civName to
                 (civ.gameInfo.civilizations.filter { ally -> ally != target && ally != civ && ally.isAlive() && ((ally.isMajorCiv() && ally.getDiplomacyManager(target)?.diplomaticStatus == com.unciv.logic.civilization.diplomacy.DiplomaticStatus.DefensivePact) || (ally.isCityState && ally.allyCiv == target)) }
                     .map { it.civName + (if (it.isCityState) " (city-state ally)" else " (defensive pact)") }) }.filterValues { it.isNotEmpty() },
-            "whoElseWouldFightNote" to "A war on any of these powers brings in the others listed at once: every defensive-pact partner and every city-state allied to them. Nothing brought in by a war shows in citiesSeen.",
+
             "howToRead" to "Sums from the chancery's own reckoning of battle, at full health and even luck. A city is taken by breaking its health with engines and then walking a foot soldier in; it heals each turn, shoots one volley a turn at anything within two tiles, and its garrison and walls do the rest. Bowmen and crossbows barely scratch walls. What we have never seen we cannot judge - say so.")
     }
 
@@ -1102,6 +1110,18 @@ object RulerHost {
         }
         if (civ.gold < 0 || civ.gold + civ.stats.statsForNextTurn.gold * 5 < 0) warnings += "The treasury is running dry (${civ.gold} gold, ${civ.stats.statsForNextTurn.gold.toInt()} per turn)."
         if (civ.units.getCivUnits().none { !it.isCivilian() }) warnings += "We have no military units at all."
+        // A settler that has stood still for ten turns or more: held by order, or left to officials who found no site. Said with the price of one more city, so the wait is a weighed choice
+        for (settler in civ.units.getCivUnits().filter { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.FoundCity) }) {
+            val waited = units.turnsStill(settler)
+            if (waited < 10) continue
+            val order = units.orders[settler.id]
+            val breakdown = civ.stats.getHappinessBreakdown()
+            val perCity = if (civ.cities.isEmpty()) 0f else -(breakdown["Cities"] ?: 0f) / civ.cities.size
+            val population = civ.cities.sumOf { it.population.population }
+            val perCitizen = if (population == 0) 1f else -(breakdown["Population"] ?: 0f) / population
+            warnings += "${settler.name} #${settler.id} has waited $waited turns ${describeWhere(civ, settler.getTile())}, ${if (order != null) "held by your ${order.action} order" else "left to the officials, who found it no site"}. " +
+                "It costs upkeep meanwhile. One more city would cost about ${Math.round(perCity + perCitizen)} contentment at first (the people stand at ${if (civ.getHappiness() >= 0) "+" else ""}${civ.getHappiness()}); found one, disband it, or keep it and know why."
+        }
         // A spaceship part that could be built but is in no city's queue: the ruler's own binding queues keep the officials from adding it
         for (part in civ.gameInfo.ruleset.units.values.filter { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.SpaceshipPart) }) {
             val buildable = civ.cities.filter { part.isBuildable(it.cityConstructions) }

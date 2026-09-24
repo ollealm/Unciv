@@ -59,6 +59,19 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     /** Great People the ruler has handed back to the officials */
     val released = HashSet<Int>()
 
+    /** How many turns a unit has stood on the same tile - reckoned each turn by the host's bookkeeping */
+    private val stillSince = HashMap<Int, Pair<String, Int>>()
+    fun noteStanding(civ: Civilization) {
+        val turn = civ.gameInfo.turns
+        for (unit in civ.units.getCivUnits()) {
+            val spot = unit.getTile().position.toString()
+            val was = stillSince[unit.id]
+            if (was == null || was.first != spot) stillSince[unit.id] = Pair(spot, turn)
+        }
+        stillSince.keys.retainAll(civ.gameInfo.civilizations.flatMap { c -> c.units.getCivUnits().map { it.id } }.toSet())
+    }
+    fun turnsStill(unit: MapUnit) = stillSince[unit.id]?.let { unit.civ.gameInfo.turns - it.second } ?: 0
+
     /** The officials' retreat may not swap a placed garrison out of its city */
     fun underOrders(unit: MapUnit) = orders[unit.id]?.action in listOf("garrison", "fortify", "hold")
 
@@ -137,12 +150,14 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
         return when (order.action) {
             "settle" -> {
+                // Founding needs movement left; a settler that walked the last stretch this turn founds next turn
+                if (unit.currentMovement <= 0f) return true
                 if (UnitActions.invokeUnitAction(unit, UnitActionType.FoundCity)) {
                     log(civ, "Our Settler founded ${civ.cities.last().name} at ${where(civ, unit.getTile())}.")
                     orders.remove(unit.id)
                     true
                 } else {
-                    log(civ, "Our Settler cannot found a city at ${where(civ, unit.getTile())} (too close to another city, or unusable ground); the order is dropped.")
+                    log(civ, "Our Settler cannot found a city at ${where(civ, unit.getTile())}: ${settleProblem(civ, unit.getTile()) ?: "the ground will not take a city"}${nearestSiteHint(civ, unit, unit.getTile())}. The order is dropped; give a new site.")
                     orders.remove(unit.id)
                     false
                 }

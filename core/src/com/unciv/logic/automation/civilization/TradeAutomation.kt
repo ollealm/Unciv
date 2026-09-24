@@ -17,11 +17,9 @@ object TradeAutomation {
 
 
     fun respondToTradeRequests(civInfo: Civilization, tradeAndChangeState: Boolean) {
-        // War and peace are a ruler's own: for a ruled civ an offer of peace is neither taken nor refused by the automation, it waits for the ruler's answer
-        // Every peace request, not one per power: a second request from the same power must never fall through to the automation and be accepted unasked
-        val heldForRuler = if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs)
-            civInfo.tradeRequests.filter { request -> (request.trade.ourOffers + request.trade.theirOffers).any { it.name == com.unciv.Constants.peaceTreaty } }
-            else emptyList()
+        // Every offer made to a ruled civ - peace, a deal, a counteroffer - waits for the ruler's answer: the officials neither take nor refuse one,
+        // so no one can exploit a ruled realm's officials with a lopsided offer that its ruler never sees
+        val heldForRuler = if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) civInfo.tradeRequests.toList() else emptyList()
         for (tradeRequest in civInfo.tradeRequests.toList()) {
             if (tradeRequest in heldForRuler) continue
             val otherCiv = civInfo.gameInfo.getCivilization(tradeRequest.requestingCiv)
@@ -53,7 +51,8 @@ object TradeAutomation {
             }
         }
         civInfo.tradeRequests.clear()
-        civInfo.tradeRequests.addAll(heldForRuler.groupBy { it.requestingCiv }.values.map { it.first() }) // kept once per power - a power that asks every turn is asking once
+        // Kept once per power and terms - a power that asks the same thing every turn is asking once; two different offers from one power both wait
+        civInfo.tradeRequests.addAll(heldForRuler.distinctBy { request -> request.requestingCiv + (request.trade.ourOffers + request.trade.theirOffers).joinToString { "${it.name}${it.amount}${it.duration}" } })
     }
 
     /** @return a TradeRequest with the same ourOffers as [tradeRequest] but with enough theirOffers
