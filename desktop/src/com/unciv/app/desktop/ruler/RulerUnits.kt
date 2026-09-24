@@ -23,16 +23,16 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         /** Where the unit stood last turn and for how many turns, to notice an order that is going nowhere */
         var lastSpot: String? = null
         var turnsStuck = 0
-        fun toMap() = mapOf("action" to action, "x" to x, "y" to y, "ability" to ability)
+        fun toMap() = mapOf("action" to action, "x" to x, "y" to y, "ability" to ability, "lastSpot" to lastSpot, "turnsStuck" to turnsStuck)
     }
 
     /** unit id -> order */
     val orders = HashMap<Int, Order>()
 
     /** Forget everything of one game */
-    fun reset() { orders.clear(); released.clear(); landLeft.clear() }
+    fun reset() { orders.clear(); released.clear(); landLeft.clear(); stillSince.clear() }
 
-    /** Orders for units that no longer exist (a soldier killed on the march, a unit that was re-armed and handed its order on): forgotten, so a dead man never counts as "on the way" */
+    /** Orders for units that no longer exist (a soldier killed on the march; re-arming keeps a unit's number, so its order stays): forgotten, so a dead man never counts as "on the way" */
     fun forgetTheDead(game: com.unciv.logic.GameInfo) {
         val alive = game.civilizations.asSequence().flatMap { it.units.getCivUnits() }.map { it.id }.toHashSet()
         orders.keys.retainAll(alive); released.retainAll(alive)
@@ -50,10 +50,22 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
     fun load(json: JsonValue?) {
         orders.clear()
-        json?.forEach { orders[it.name.toInt()] = Order(it.getString("action"), it.get("x")?.takeUnless { v -> v.isNull }?.asInt(), it.get("y")?.takeUnless { v -> v.isNull }?.asInt(), it.get("ability")?.takeUnless { v -> v.isNull }?.asString()) }
+        json?.forEach { orders[it.name.toInt()] = Order(it.getString("action"), it.get("x")?.takeUnless { v -> v.isNull }?.asInt(), it.get("y")?.takeUnless { v -> v.isNull }?.asInt(), it.get("ability")?.takeUnless { v -> v.isNull }?.asString()).apply {
+            lastSpot = it.getString("lastSpot", null); turnsStuck = it.getInt("turnsStuck", 0) } }
     }
 
     fun toMap() = orders.mapKeys { it.key.toString() }.mapValues { it.value.toMap() }
+
+    /** The rest of what a restart would lose: which Great People were handed to the officials, and how long each unit has stood where it stands */
+    fun stateToMap() = mapOf(
+        "released" to released.toList(),
+        "stillSince" to stillSince.mapKeys { it.key.toString() }.mapValues { mapOf("spot" to it.value.first, "turn" to it.value.second) })
+
+    fun loadState(json: JsonValue?) {
+        released.clear(); stillSince.clear()
+        json?.get("released")?.forEach { released += it.asInt() }
+        json?.get("stillSince")?.forEach { stillSince[it.name.toInt()] = Pair(it.getString("spot"), it.getInt("turn")) }
+    }
 
     /** Called by the automation for every unit of a ruled civ. True = we handled it, leave it alone. */
     /** Great People the ruler has handed back to the officials */
@@ -81,15 +93,6 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         if (unit.id !in orders && unit.id !in released && unit.isGreatPerson()) {
             orders[unit.id] = Order("hold", null, null)
             log(unit.civ, "A ${unit.name} #${unit.id} is at ${where(unit.civ, unit.getTile())} and awaits orders (use, move, or release to the officials).")
-        }
-        // Re-arming replaces a unit with a new one, under a new number: a garrison's orders pass to the soldier now standing in its place
-        if (unit.id !in orders && unit.isMilitary()) {
-            val here = unit.getTile().position
-            val orphan = orders.entries.firstOrNull { (id, order) ->
-                order.action in listOf("garrison", "fortify") && order.x == here.x.toInt() && order.y == here.y.toInt()
-                    && unit.civ.gameInfo.civilizations.none { it.units.getUnitById(id) != null }
-            }
-            if (orphan != null) { orders.remove(orphan.key); orders[unit.id] = orphan.value }
         }
         val order = orders[unit.id] ?: return false
         val civ = unit.civ
@@ -120,7 +123,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             if (unit.currentMovement <= 0f) return true
             if (!canMarch(unit, target)) {
                 log(civ, "Our ${unit.name} cannot reach ${where(civ, target)}; the order is dropped and the officials take it back.")
-                orders.remove(unit.id)
+                drop(unit)
                 return false
             }
             // B9: a civilian (a Great Person on its way to use itself) whose target holds one of our own civilians changes places with it
@@ -139,8 +142,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                         return true
                     }
                     log(civ, "Our ${unit.name} #${unit.id} has been stuck for ${order.turnsStuck} turns on its way to ${where(civ, target)}" +
-                        (blocker?.let { " - the tile is held by ${it.civ.civName}'s ${it.name}" } ?: " - the way is blocked") + ". The order is dropped.")
-                    orders.remove(unit.id)
+                        (blocker?.let { " - the tile is held by ${it.civ.civName}'s ${it.name}" } ?: " - the way is blocked") + ". The order is dropped and the officials take it back.")
+                    drop(unit)
                     return false
                 }
                 return true // still on the way
@@ -177,6 +180,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                         "It can: ${known.joinToString().ifEmpty { "nothing here" }} - name one with the order and stand where it applies. It tries again for two more turns, then the order is dropped.")
                     if (order.turnsStuck < 3) return true
                     log(civ, "Our ${unit.name} #${unit.id} still could not use its ability at ${where(civ, unit.getTile())}; the order is dropped and the officials take it back.")
+                    drop(unit)
+                    return false // taken back this turn, as said
                 }
                 orders.remove(unit.id)
                 true
@@ -186,6 +191,12 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             "explore" -> { unit.action = UnitActionType.Explore.value; orders.remove(unit.id); false }
             else -> { orders.remove(unit.id); true } // "move": arrived, released to the officials from next turn
         }
+    }
+
+    /** An order dropped for good: a Great Person goes to the officials with it, or the hold at the top of [handle] would take it back next turn and the ruler would be asked again */
+    private fun drop(unit: MapUnit) {
+        orders.remove(unit.id)
+        if (unit.isGreatPerson()) released += unit.id
     }
 
     /** Give an order from the API: {unit: id, action, x?, y?, city?} */
@@ -231,6 +242,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         val ability = json.get("ability")?.takeUnless { it.isNull }?.asString()
         if (ability != null && abilitiesNamed(ability).isEmpty()) throw IllegalArgumentException("Unknown ability '$ability'; use one of: ${ABILITY_WORDS.keys.joinToString()}")
         orders[unitId] = Order(action, x, y, ability)
+        released -= unitId // an order given is the ruler's hand back on it
         val turns = if (target == unit.getTile()) 0 else kotlin.math.ceil(path.size / unit.getMaxMovement().coerceAtLeast(1).toFloat()).toInt()
         return "${unit.name} #$unitId will $action at ${where(civ, target)}" + (if (turns > 0) ", about $turns turns away" else "")
     }
@@ -372,7 +384,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             val to = HexMath.hex2WorldCoords(tile.position)
             val angle = Math.toDegrees(atan2((to.y - from.y).toDouble(), (to.x - from.x).toDouble()))
             val compass = listOf("E", "NE", "N", "NW", "W", "SW", "S", "SE")[(((angle + 360 + 22.5) % 360) / 45).toInt()]
-            return "$coords, $distance tiles $compass of ${nearest.name}"
+            return "$coords, $distance tile${if (distance == 1) "" else "s"} $compass of ${nearest.name}"
         }
     }
 }
