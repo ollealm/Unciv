@@ -93,6 +93,7 @@ object MapRenderer {
             g.drawLine(segment.first.first.toInt(), segment.first.second.toInt(), segment.second.first.toInt(), segment.second.second.toInt())
 
         var landMaskForBorders: BufferedImage? = null
+        var knownMaskForBorders: BufferedImage? = null
         if (drawTerrain) {
         // Terrain without cells: land and water are painted as two soft layers, and a blurred land mask decides
         // per pixel which one shows - so coasts come out as natural curves instead of hexagon edges
@@ -110,6 +111,7 @@ object MapRenderer {
         val knownMask = blur(layer(Color.BLACK) { Color.WHITE }, (HEX * 0.5f).toInt())
         val landMask = blur(layer(Color.BLACK) { if (it.isWater) null else Color.WHITE }, (HEX * 0.5f).toInt())
         landMaskForBorders = landMask
+        knownMaskForBorders = knownMask
         val wobble = java.util.Random(11)
         val coarse = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
         for (y in 0 until height step 6) for (x in 0 until width step 6) {
@@ -121,8 +123,8 @@ object MapRenderer {
             val jitter = ((noise.getRGB(x, y) and 0xff) - 128) / 4 // breaks up the last straight runs of shore
             val knownV = (knownMask.getRGB(x, y) and 0xff) + jitter
             if (knownV < 128) continue // unknown stays parchment
-            // The edge of the known world is dotted, so that it reads as the limit of knowledge and not as a shore
-            if (knownV < 142 && (x / 6 + y / 6) % 2 == 0) { image.setRGB(x, y, ink.rgb); continue }
+            // The edge of the known world is a soft grey line, so that it reads as the limit of knowledge and not as a shore
+            if (knownV < 140) { image.setRGB(x, y, Color(158, 148, 126).rgb); continue }
             val land = (landMask.getRGB(x, y) and 0xff) + jitter
             image.setRGB(x, y, when {
                 land in 120..134 -> ink.rgb                     // the shoreline
@@ -191,6 +193,9 @@ object MapRenderer {
                 val under = Color(image.getRGB(x, y))
                 val onLand = landMaskForBorders?.let { (it.getRGB(x, y) and 0xff) > 134 } ?: true
                 // a thin firm line at the edge; within, a light wash on land and barely a breath of it at sea
+                // No firm border line along the edge of knowledge: a realm that runs on into the unknown has no known frontier there
+                val atEdge = knownMaskForBorders?.let { (it.getRGB(x, y) and 0xff) < 160 } ?: false
+                if (inside < 127 && atEdge) continue
                 val weight = if (inside < 127) 0.7f else if (onLand) 0.16f else 0.05f
                 image.setRGB(x, y, Color(
                     (under.red + (tint.red - under.red) * weight).toInt(), (under.green + (tint.green - under.green) * weight).toInt(),
