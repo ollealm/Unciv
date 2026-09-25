@@ -53,6 +53,7 @@ object RulerHost {
     private val units = RulerUnits { civ, text -> log(civ, text) }
     private val diplomacy = RulerDiplomacy { civ, text -> log(civ, text) }
     private val trail = RulerTrail()
+    private val ages = RulerAges(trail) { turn -> yearText(turn) }
 
     class StandingOrders {
         var personality = LinkedHashMap<String, Float>()
@@ -172,6 +173,7 @@ object RulerHost {
             "POST /orders" -> setOrders(civ(), json)
             "POST /grant" -> grant(civ(), json)
             "GET /events" -> publicEvents.filter { (it["turn"] as Int) > since }
+            "GET /age" -> ages.summary(civ(), query["from"]?.toIntOrNull() ?: throw ApiError(400, "Missing ?from=<turn the age began>"))
             else -> throw ApiError(404, "No route $method $path")
         }
     }
