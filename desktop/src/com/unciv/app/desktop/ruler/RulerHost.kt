@@ -173,6 +173,9 @@ object RulerHost {
             "POST /orders" -> setOrders(civ(), json)
             "POST /grant" -> grant(civ(), json)
             "GET /events" -> publicEvents.filter { (it["turn"] as Int) > since }
+            // Any people's cities and their lie of the land, for the Chronicler's pictures (not a ruled civ's secret: the world knows where cities stand)
+            "GET /cities" -> game().civilizations.firstOrNull { it.civName == query["civ"] }?.cities?.sortedByDescending { it.population.population }?.map { city ->
+                mapOf("name" to city.name, "capital" to city.isCapital(), "size" to city.population.population, "land" to lieOfTheLand(city)) } ?: throw ApiError(404, "No people called ${query["civ"]}")
             "GET /age" -> ages.summary(civ(), query["from"]?.toIntOrNull() ?: throw ApiError(400, "Missing ?from=<turn the age began>"))
             else -> throw ApiError(404, "No route $method $path")
         }
@@ -799,6 +802,18 @@ object RulerHost {
         return if (distance == 0) "in ${nearest.name}" else "$distance tile${if (distance == 1) "" else "s"} from ${nearest.name}"
     }
 
+    /** A city's place in the world as a painter needs it: "on the coast, among forests, grassland country" */
+    private fun lieOfTheLand(city: com.unciv.logic.city.City): String {
+        val centre = city.getCenterTile()
+        return listOfNotNull(
+            if (city.isCoastal()) "on the coast" else null,
+            if (centre.isAdjacentToRiver()) "by a river" else null,
+            if (centre.isHill()) "on a hill" else null,
+            centre.getTilesInDistance(2).count { it.terrainFeatures.contains("Forest") }.takeIf { it >= 3 }?.let { "among forests" },
+            centre.getTilesInDistance(2).any { it.baseTerrain == "Mountain" }.takeIf { it }?.let { "under mountains" },
+            centre.baseTerrain.lowercase().takeIf { it in listOf("desert", "tundra", "snow", "plains", "grassland") }?.let { "$it country" }).joinToString(", ").ifEmpty { "inland" }
+    }
+
     private class WorldSnapshot(game: GameInfo) {
         val wars = HashSet<Set<String>>()
         val cityOwners = HashMap<String, String>()
@@ -817,15 +832,7 @@ object RulerHost {
                     for (building in city.cityConstructions.getBuiltBuildings())
                         if (building.isWonder) {
                             wonders[building.name] = civ.civName
-                            val centre = city.getCenterTile()
-                            val land = listOfNotNull(
-                                if (city.isCoastal()) "on the coast" else null,
-                                if (centre.isAdjacentToRiver()) "by a river" else null,
-                                if (centre.isHill()) "on a hill" else null,
-                                centre.getTilesInDistance(2).count { it.terrainFeatures.contains("Forest") }.takeIf { it >= 3 }?.let { "among forests" },
-                                centre.getTilesInDistance(2).any { it.baseTerrain == "Mountain" }.takeIf { it }?.let { "under mountains" },
-                                centre.baseTerrain.lowercase().takeIf { it in listOf("desert", "tundra", "snow", "plains", "grassland") }?.let { "$it country" })
-                            wonderSites[building.name] = "${city.name} (${if (city.isCapital()) "the capital, " else ""}${land.joinToString(", ").ifEmpty { "inland" }})"
+                            wonderSites[building.name] = "${city.name} (${if (city.isCapital()) "the capital, " else ""}${lieOfTheLand(city)})"
                         }
                 }
                 for (diplomacy in civ.diplomacy.values)
