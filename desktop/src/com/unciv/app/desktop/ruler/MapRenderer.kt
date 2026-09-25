@@ -37,7 +37,7 @@ object MapRenderer {
      *  overlay: borders, units, cities and names drawn on top of [base] (a repaint of the reference, any size).
      *  campaign: the atlas with the marches since turn [since] traced on it, from [trail].
      */
-    fun render(civ: Civilization, style: String = "atlas", base: BufferedImage? = null, trail: RulerTrail? = null, since: Int = 0, sinceYear: String = ""): ByteArray {
+    fun render(civ: Civilization, style: String = "atlas", base: BufferedImage? = null, trail: RulerTrail? = null, since: Int = 0, sinceYear: String = "", until: Int = Int.MAX_VALUE, untilYear: String = ""): ByteArray {
         val drawTerrain = style != "overlay"
         val drawOverlay = style != "reference"
         val game = civ.gameInfo
@@ -209,7 +209,7 @@ object MapRenderer {
             for (tile in visible) for (unit in tile.getUnits()) {
                 val own = unit.civ == civ
                 if (!unit.isMilitary() && "Settler" !in unit.name) continue // workers and caravans wander; nobody wants their scribbles
-                val path = trail.path(unit.id, since).mapNotNull { game.tileMap.getIfTileExistsOrNull(it.x, it.y) }
+                val path = trail.path(unit.id, since, until).mapNotNull { game.tileMap.getIfTileExistsOrNull(it.x, it.y) }
                     .filter { it in points && (own || it.isExplored(civ)) }
                 if (path.size < 2 || path.first().aerialDistanceTo(path.last()) < 2) continue
                 val xs = path.map { px(it) }; val ys = path.map { py(it) }
@@ -296,7 +296,7 @@ object MapRenderer {
         val year = game.getYear()
         val yearText = if (year < 0) "${-year} BC" else "AD $year"
         g.font = Font(Font.SERIF, Font.BOLD, 18)
-        val title = if (style == "campaign") "The Marches of ${civ.civName}, $sinceYear to $yearText" else "The Known World of ${civ.civName}, $yearText"
+        val title = if (style == "campaign") "The Marches of ${civ.civName}, $sinceYear to ${untilYear.ifEmpty { yearText }}" else "The Known World of ${civ.civName}, $yearText"
         g.color = Color(parchment.red, parchment.green, parchment.blue, 220)
         g.fillRoundRect(10, 10, g.fontMetrics.stringWidth(title) + 20, 30, 8, 8)
         g.color = ink; g.stroke = BasicStroke(1.2f)

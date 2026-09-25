@@ -72,9 +72,9 @@ class RulerTrail {
     }
 
     /** One unit's path from [since] to now: a point per turn, standing still left out */
-    fun path(id: Int, since: Int): List<Stand> {
+    fun path(id: Int, since: Int, until: Int = Int.MAX_VALUE): List<Stand> {
         val path = ArrayList<Stand>()
-        for (turn in stands.tailMap(since, true).values) {
+        for (turn in stands.subMap(since, true, until, true).values) {
             val stand = turn[id] ?: continue
             if (path.lastOrNull()?.let { it.x == stand.x && it.y == stand.y } != true) path += stand
         }

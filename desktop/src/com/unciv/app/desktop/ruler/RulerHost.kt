@@ -168,7 +168,8 @@ object RulerHost {
                 if (lines.size <= 150) lines else listOf(mapOf("turn" to lines[lines.size - 150]["turn"], "text" to "(${lines.size - 150} earlier lines omitted; ask from a later turn or year)")) + lines.takeLast(150) }
             "GET /lookup" -> lookup(civ(), query["name"] ?: throw ApiError(400, "Missing name"))
             "GET /map.png" -> (query["since"]?.toIntOrNull() ?: (game().turns - 10)).coerceAtLeast(0).let { from ->
-                Png(MapRenderer.render(civ(), query["style"] ?: "atlas", trail = trail, since = from, sinceYear = yearText(from))) }
+                val until = query["until"]?.toIntOrNull()
+                Png(MapRenderer.render(civ(), query["style"] ?: "atlas", trail = trail, since = from, sinceYear = yearText(from), until = until ?: Int.MAX_VALUE, untilYear = until?.let { yearText(it) } ?: "")) }
             "GET /orders" -> civ().let { orders.getOrPut(it.civName) { StandingOrders() }.toMap(it) }
             "POST /orders" -> setOrders(civ(), json)
             "POST /grant" -> grant(civ(), json)
