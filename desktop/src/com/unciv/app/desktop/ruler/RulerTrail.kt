@@ -15,6 +15,8 @@ class RulerTrail {
 
     /** turn -> unit id -> where it stood */
     val stands = TreeMap<Int, HashMap<Int, Stand>>()
+    /** Units the battle hook reported killed or captured since the last record: only these are marked fallen - a disbanded or used-up unit is no loss in the field */
+    val lostInBattle = HashSet<Int>()
     val marks = ArrayList<Mark>()
     /** "x,y" -> owner, as of the last recorded turn */
     private var cityOwners = HashMap<String, String>()
@@ -41,8 +43,7 @@ class RulerTrail {
             for ((id, stand) in before) {
                 if (id in now || !stand.military) continue
                 // An upgrade retires the old unit and raises a new one on the same spot: not a loss
-                val replaced = now.any { (otherId, other) -> otherId !in before && other.civ == stand.civ && other.x == stand.x && other.y == stand.y }
-                if (!replaced) marks += Mark(game.turns, stand.x, stand.y, "fallen", stand.civ)
+                if (id in lostInBattle) marks += Mark(game.turns, stand.x, stand.y, "fallen", stand.civ)
             }
             for ((where, owner) in owners) {
                 val previous = cityOwners[where] ?: continue
@@ -50,6 +51,7 @@ class RulerTrail {
             }
         }
         cityOwners = owners
+        lostInBattle.clear()
         stands[game.turns] = now
         // The known world's growth, for the ruled civs whose ages are told
         val seenNow = HashMap<String, IntArray>(); val metNow = HashMap<String, List<String>>()

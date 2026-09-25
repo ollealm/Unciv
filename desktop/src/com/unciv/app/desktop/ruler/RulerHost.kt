@@ -105,7 +105,7 @@ object RulerHost {
         RulerOverrides.unitHandler = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.handle(unit) }
         RulerOverrides.underOrders = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.underOrders(unit) }
         RulerOverrides.tradeAnswered = { request, receiver, outcome -> diplomacy.settle(request, receiver, outcome) }
-        RulerOverrides.unitLost = { loss -> losses.getOrPut(loss.civ.civName) { ArrayList() } += loss }
+        RulerOverrides.unitLost = { loss -> losses.getOrPut(loss.civ.civName) { ArrayList() } += loss; trail.lostInBattle += loss.unit.id }
 
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0)
         server.executor = Executors.newSingleThreadExecutor() // game state is not thread-safe
