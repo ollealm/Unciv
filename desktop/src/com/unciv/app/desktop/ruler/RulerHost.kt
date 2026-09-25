@@ -339,7 +339,7 @@ object RulerHost {
             "turn" to game.turns,
             "year" to yearText(game.turns),
             "ruled" to orders.keys.toList(),
-            "majorCivs" to game.majorCivs().map { mapOf("civ" to it.civName, "alive" to it.isAlive()) },
+            "majorCivs" to game.majorCivs().map { mapOf("civ" to it.civName, "alive" to it.isAlive(), "era" to it.getEra().name) },
             "winner" to winner?.civName,
             "victoryType" to winner?.victoryManager?.getVictoryTypeAchieved()
         )
