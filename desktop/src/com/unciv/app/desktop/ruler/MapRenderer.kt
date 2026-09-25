@@ -119,7 +119,10 @@ object MapRenderer {
         val noise = blur(coarse, 7)
         for (y in 0 until height) for (x in 0 until width) {
             val jitter = ((noise.getRGB(x, y) and 0xff) - 128) / 4 // breaks up the last straight runs of shore
-            if ((knownMask.getRGB(x, y) and 0xff) + jitter < 128) continue // unknown stays parchment
+            val knownV = (knownMask.getRGB(x, y) and 0xff) + jitter
+            if (knownV < 128) continue // unknown stays parchment
+            // The edge of the known world is dotted, so that it reads as the limit of knowledge and not as a shore
+            if (knownV < 142 && (x / 6 + y / 6) % 2 == 0) { image.setRGB(x, y, ink.rgb); continue }
             val land = (landMask.getRGB(x, y) and 0xff) + jitter
             image.setRGB(x, y, when {
                 land in 120..134 -> ink.rgb                     // the shoreline
