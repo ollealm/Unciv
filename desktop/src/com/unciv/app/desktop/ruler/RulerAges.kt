@@ -72,7 +72,7 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
             here.filter { it.baseUnit.isLandUnit }.map { it to farOf(it.getTile()) }
                 .filter { (unit, distance) -> distance >= 12 && tileOf(first[unit.id])?.let { farOf(it) < 12 } != false }
                 .sortedByDescending { it.second }.take(2)
-                .forEach { (unit, distance) -> lines += "Our ${unit.name} reached ${placeOf(civ, unit.getTile(), enemies)}, $distance tiles from any town of ours." }
+                .forEach { (unit, _) -> lines += "Our ${unit.name} reached ${placeOf(civ, unit.getTile(), enemies)}, far from any town of ours." }
             here.filter { it.isCivilian() && it.getTile().isCityCenter() && it.getTile().getOwner() != civ && tileOf(first[it.id]) != it.getTile() }.take(2)
                 .forEach { unit -> lines += "Our ${unit.name} went into ${unit.getTile().getCity()!!.name}, a city of ${unit.getTile().getOwner()!!.civName}." }
         }
@@ -108,10 +108,10 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
         val inCampaigns = campaigns.flatMap { c -> c.members.map { c.whose to it.id } }.toSet()
         val ours = RulerCampaigns.members(trail, game, civ.civName, from, to)
         val lost = ours.filter { it.fell && (civ.civName to it.id) !in inCampaigns }.groupBy { placeOf(civ, it.end, enemies) }.entries.sortedByDescending { it.value.size }
-            .map { (place, group) -> mapOf("what" to RulerCampaigns.company(group.map { it.name }), "where" to place, "xy" to group[0].end.position.let { listOf(it.x, it.y) }) }
+            .map { (place, group) -> mapOf("what" to RulerCampaigns.company(group.map { it.name }), "where" to place, "at" to RulerCampaigns.atPlace(place), "xy" to group[0].end.position.let { listOf(it.x, it.y) }) }
         val enemyLost = enemies.flatMap { enemy -> RulerCampaigns.members(trail, game, enemy, from, to).filter { it.fell && it.end.isExplored(civ) && (enemy to it.id) !in inCampaigns }.map { enemy to it } }
             .groupBy { (enemy, member) -> enemy to RulerCampaigns.placeOf(civ, member.end, enemies, enemy) }.entries
-            .map { (key, group) -> mapOf("whose" to key.first, "what" to RulerCampaigns.company(group.map { it.second.name }), "where" to key.second) }
+            .map { (key, group) -> mapOf("whose" to key.first, "what" to RulerCampaigns.company(group.map { it.second.name }), "where" to key.second, "at" to RulerCampaigns.atPlace(key.second)) }
         // Cities that changed hands in the age
         val taken = trail.marks.filter { it.turn in from..to && it.kind == "taken" }.mapNotNull { mark ->
             game.tileMap.getIfTileExistsOrNull(mark.x, mark.y)?.getCity()?.let { city -> mapOf("city" to city.name, "by" to mark.civ, "year" to yearText(mark.turn)) } }
@@ -140,14 +140,14 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
             .groupBy { (tile, unit) -> unit.civ.civName to RulerCampaigns.placeOf(civ, tile, enemies, unit.civ.civName) }.entries
             .sortedWith(compareBy({ it.key.first != civ.civName }, { it.key.first }))
             .map { (key, group) -> mapOf("whose" to key.first, "what" to RulerCampaigns.company(group.map { it.second.name }), "where" to key.second,
-                "sea" to group.all { it.second.baseUnit.isWaterUnit }) }
+                "at" to RulerCampaigns.atPlace(key.second), "sea" to group.all { it.second.baseUnit.isWaterUnit }) }
 
         // The same, told
         val lines = ArrayList<String>()
         for (m in marches) lines += m["told"] as String
-        for (l in lost) lines += "We lost ${l["what"]} at ${l["where"]}."
+        for (l in lost) lines += "We lost ${l["what"]} ${l["at"]}."
         for (t in theirs) lines += t["told"] as String
-        for (l in enemyLost) lines += "${l["whose"]} lost ${l["what"]} at ${l["where"]}."
+        for (l in enemyLost) lines += "${l["whose"]} lost ${l["what"]} ${l["at"]}."
         // A city taken and taken back is told as one story, ending with who holds it now
         for (hands in taken.groupBy { it["city"] }.values) {
             val city = hands[0]["city"]
@@ -155,7 +155,14 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
             else "$city changed hands ${RulerCampaigns.count(hands.size)} times: " + hands.mapIndexed { i, t -> "to ${t["by"]}${if (hands.take(i).any { it["by"] == t["by"] }) " again" else ""} in ${t["year"]}" }
                 .let { it.dropLast(1).joinToString(", ") + " and " + it.last() } + "; ${hands.last()["by"]} holds it now."
         }
-        if (exploration != null) lines += "The known world grew by ${exploration["tilesSeen"]} tiles, mostly ${exploration["mostly"]}${exploration["direction"]?.let { ", to the $it" } ?: ""}${exploration["farthest"]?.let { ", as far as $it tiles from the capital" } ?: ""}." +
+        // The known world's growth in words, never a count of tiles: how much, land or water, which way and how far from home
+        if (exploration != null) lines += run {
+            val seen = exploration["tilesSeen"] as Int
+            val found = if (exploration["mostly"] == "sea") (if (seen < 12) "a stretch of new water" else if (seen > 60) "wide new waters" else "new waters")
+                else (if (seen < 12) "a little new country" else if (seen > 60) "wide new country" else "new country")
+            val reach = (exploration["farthest"] as Int?)?.let { if (it <= 6) ", close to home" else if (it <= 12) ", a good way from the capital" else ", far from the capital" } ?: ""
+            "We found $found${exploration["direction"]?.let { " to the $it" } ?: ""}$reach."
+        } +
             (exploration["naturalWonders"] as List<*>).takeIf { it.isNotEmpty() }?.let { " Found: ${it.joinToString()}." }.orEmpty() +
             (exploration["citiesFound"] as List<*>).takeIf { it.isNotEmpty() }?.let { " Cities first seen: ${it.joinToString()}." }.orEmpty()
         for (e in explorers) lines += "Our ${e["what"]} ranged as far as ${e["reached"]}."

@@ -203,8 +203,16 @@ object RulerCampaigns {
         return when {
             distance <= 1 && foes -> "the walls of ${near.name}$whose"
             distance <= 2 -> "the fields of ${near.name}$whose"
-            else -> "$distance tiles ${compassOf(HexMath.hex2WorldCoords(tile.position), HexMath.hex2WorldCoords(near.getCenterTile().position))} of ${near.name}$whose"
+            // Beyond a city's fields, the country or the waters that way, and distant ones well beyond; never a count of tiles
+            else -> "the ${if (distance > 5) "distant " else ""}${if (tile.isWater) "waters" else "country"} ${compassOf(HexMath.hex2WorldCoords(tile.position), HexMath.hex2WorldCoords(near.getCenterTile().position))} of ${near.name}$whose"
         }
+    }
+
+    /** A [placeOf] place with the word before it: at a city, its walls or its fields; in the country or waters beyond */
+    fun atPlace(place: String) = when {
+        place.startsWith("far ") -> place
+        Regex("^the (distant )?(country|waters) ").containsMatchIn(place) -> "in $place"
+        else -> "at $place"
     }
 
     fun compassOf(to: com.badlogic.gdx.math.Vector2, from: com.badlogic.gdx.math.Vector2): String {
