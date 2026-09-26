@@ -258,20 +258,15 @@ object MapRenderer {
                 }
             }
         }
-        // Units in sight, as small map markers
+        // Units in sight, as the game shows them: a round badge in the nation's colours with the unit's own icon. None inside a city - the city
+        // stands for its garrison - and no aircraft, which live in cities and on carriers. A civilian beside a soldier sits a little aside, smaller
         for (tile in visible) {
-            if (tile !in points) continue
-            for (unit in tile.getUnits()) {
-                val x = px(tile).toInt(); val y = py(tile).toInt()
-                val own = unit.civ == civ
-                val nation = unit.civ.nation.getOuterColor()
-                g.color = if (unit.civ.isBarbarian) Color(140, 30, 30) else Color(nation.r, nation.g, nation.b)
-                g.stroke = BasicStroke(1.2f)
-                if (unit.isCivilian()) { g.fillOval(x - 4, y - 4, 8, 8); g.color = ink; g.drawOval(x - 4, y - 4, 8, 8) }
-                else {
-                    val shield = Polygon(intArrayOf(x - 5, x + 5, x + 5, x, x - 5), intArrayOf(y - 5, y - 5, y + 1, y + 6, y + 1), 5)
-                    g.fillPolygon(shield); g.color = if (own) Color.WHITE else ink; g.drawPolygon(shield)
-                }
+            if (tile !in points || tile.isCityCenter()) continue
+            val units = tile.getUnits().filter { !it.baseUnit.isAirUnit() }.sortedBy { it.isCivilian() }
+            for ((i, unit) in units.withIndex()) {
+                val aside = i > 0
+                val size = if (unit.isCivilian()) 17f else 22f
+                badge(g, unit.name, unit.civ.nation, px(tile) + (if (aside) 10f else 0f), py(tile) + (if (aside) 9f else 0f), size, own = unit.civ == civ, military = unit.isMilitary())
             }
         }
         // The age's campaigns as a history atlas draws them: one broad arrow per force, in its realm's colour, broader for a larger force;
@@ -331,13 +326,19 @@ object MapRenderer {
         return bytes.toByteArray()
     }
 
-    /** A smooth curve through the points (Catmull-Rom); two points get the gentle bow an atlas gives a straight march */
+    /** A smooth curve through the points: two get the gentle bow an atlas gives a straight march, three one sweep through the bend
+     *  (a single arc, never a corner that reads as two arrows), more a Catmull-Rom spline */
     private fun smooth(xs: List<Float>, ys: List<Float>): java.awt.geom.Path2D.Float {
         val path = java.awt.geom.Path2D.Float()
         path.moveTo(xs[0], ys[0])
         if (xs.size == 2) {
             val dx = xs[1] - xs[0]; val dy = ys[1] - ys[0]
             path.quadTo((xs[0] + xs[1]) / 2 - dy * 0.1f, (ys[0] + ys[1]) / 2 + dx * 0.1f, xs[1], ys[1])
+            return path
+        }
+        if (xs.size == 3) {
+            // The arc that passes through the bend halfway along
+            path.quadTo(2 * xs[1] - (xs[0] + xs[2]) / 2, 2 * ys[1] - (ys[0] + ys[2]) / 2, xs[2], ys[2])
             return path
         }
         for (i in 0 until xs.size - 1) {
@@ -462,6 +463,52 @@ object MapRenderer {
             moveTo(tip[0], tip[1]); lineTo(base[0] - dy * 6f, base[1] + dx * 6f); lineTo(base[0] + dy * 6f, base[1] - dx * 6f); closePath()
         }
         g.color = color; g.fill(head); g.color = ink; g.stroke = BasicStroke(1.4f); g.draw(head)
+    }
+
+    /** The game's own unit icons - white silhouettes - from its atlas in the assets folder the host runs in; empty when it is not there */
+    private val unitIcons: Map<String, java.awt.image.BufferedImage> by lazy {
+        try {
+            val sheet = ImageIO.read(java.io.File("ConstructionIcons.png"))
+            val icons = HashMap<String, java.awt.image.BufferedImage>()
+            var name: String? = null; var xy: List<Int>? = null
+            for (line in java.io.File("ConstructionIcons.atlas").readLines()) {
+                if (!line.startsWith(" ")) { name = line.removePrefix("UnitIcons/").takeIf { line.startsWith("UnitIcons/") }; xy = null; continue }
+                val n = name ?: continue
+                val numbers = Regex("""\d+""").findAll(line).map { it.value.toInt() }.toList()
+                if (line.trim().startsWith("xy:")) xy = numbers
+                else if (line.trim().startsWith("size:") && xy != null) { icons[n] = sheet.getSubimage(xy[0], xy[1], numbers[0], numbers[1]); name = null }
+            }
+            icons
+        } catch (e: Exception) { emptyMap() }
+    }
+    private val tintedIcons = HashMap<Triple<String, Int, Int>, java.awt.image.BufferedImage?>()
+
+    /** A unit's icon at [size] pixels in [color], or null when the game has none by that name */
+    private fun unitIcon(name: String, color: Color, size: Int) = tintedIcons.getOrPut(Triple(name, color.rgb, size)) {
+        val source = unitIcons[name] ?: return@getOrPut null
+        val icon = BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
+        val ig = icon.createGraphics()
+        ig.drawImage(source.getScaledInstance(size, size, java.awt.Image.SCALE_AREA_AVERAGING), 0, 0, null); ig.dispose()
+        for (y in 0 until size) for (x in 0 until size) icon.setRGB(x, y, (icon.getRGB(x, y) and 0xff000000.toInt()) or (color.rgb and 0xffffff))
+        icon
+    }
+
+    /** A unit as the game marks it: a disc in its nation's outer colour, its icon in the inner colour, inked round - ours a little bolder.
+     *  A unit the game has no icon for gets a plain shield (a soldier) or dot (a traveller) */
+    private fun badge(g: Graphics2D, name: String, nation: com.unciv.models.ruleset.nation.Nation, x: Float, y: Float, size: Float, own: Boolean, military: Boolean) {
+        val outer = nation.getOuterColor().let { Color(it.r, it.g, it.b) }; val inner = nation.getInnerColor().let { Color(it.r, it.g, it.b) }
+        val r = size / 2
+        val disc = java.awt.geom.Ellipse2D.Float(x - r, y - r, size, size)
+        g.color = Color(40, 30, 20, 60); g.fill(java.awt.geom.Ellipse2D.Float(x - r + 1.5f, y - r + 2f, size, size))
+        g.color = outer; g.fill(disc)
+        val icon = unitIcon(name, inner, (size * 0.72f).toInt())
+        if (icon != null) g.drawImage(icon, (x - icon.width / 2f).toInt(), (y - icon.height / 2f).toInt(), null)
+        else {
+            g.color = inner
+            if (military) g.fillPolygon(Polygon(intArrayOf((x - 4).toInt(), (x + 4).toInt(), (x + 4).toInt(), x.toInt(), (x - 4).toInt()), intArrayOf((y - 4).toInt(), (y - 4).toInt(), (y + 1).toInt(), (y + 5).toInt(), (y + 1).toInt()), 5))
+            else g.fillOval((x - 3).toInt(), (y - 3).toInt(), 6, 6)
+        }
+        g.color = ink; g.stroke = BasicStroke(if (own) 2f else 1.3f); g.draw(disc)
     }
 
     /** Three box blurs, separable: close to a gaussian and fast */

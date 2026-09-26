@@ -135,6 +135,13 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
             .sortedByDescending { it.start.aerialDistanceTo(it.end) }.take(3)
             .map { mapOf("what" to it.name, "reached" to placeOf(civ, it.end, enemies)) }
 
+        // The companies in sight now, as the map's badges show them: none inside a city, which stands for its garrison, and no aircraft
+        val inSight = civ.viewableTiles.filter { !it.isCityCenter() }.flatMap { tile -> tile.getUnits().filter { !it.baseUnit.isAirUnit() }.map { tile to it } }
+            .groupBy { (tile, unit) -> unit.civ.civName to RulerCampaigns.placeOf(civ, tile, enemies, unit.civ.civName) }.entries
+            .sortedWith(compareBy({ it.key.first != civ.civName }, { it.key.first }))
+            .map { (key, group) -> mapOf("whose" to key.first, "what" to RulerCampaigns.company(group.map { it.second.name }), "where" to key.second,
+                "sea" to group.all { it.second.baseUnit.isWaterUnit }) }
+
         // The same, told
         val lines = ArrayList<String>()
         for (m in marches) lines += m["told"] as String
@@ -157,7 +164,7 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
 
         return mapOf("from" to from, "to" to to, "fromYear" to yearText(from), "toYear" to yearText(to),
             "marches" to marches, "lost" to lost, "enemyMarches" to theirs, "enemyLost" to enemyLost, "citiesTaken" to taken,
-            "exploration" to exploration, "explorers" to explorers, "met" to met, "lines" to lines,
+            "exploration" to exploration, "explorers" to explorers, "met" to met, "inSight" to inSight, "lines" to lines,
             "curiosities" to curiosities(civ, from, to, first, last, enemies))
     }
 
