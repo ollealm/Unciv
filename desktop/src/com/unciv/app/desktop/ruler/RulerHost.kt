@@ -727,6 +727,7 @@ object RulerHost {
         val fallen = losses.remove(civ.civName) ?: emptyList<RulerOverrides.UnitLoss>()
         // Re-arming keeps a unit's number, so a number that is gone was killed, captured, disbanded, used up, or founded a city
         for ((id, unit) in before.units) if (id !in alive) {
+            if (units.given.remove(id)) continue // given away by order: its own line said so
             val fell = fallen.firstOrNull { it.unit.id == id }
             if (fell == null && unit.first == "Settler") continue // settlers vanish by founding
             val spent = civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CreateWaterImprovements) == true

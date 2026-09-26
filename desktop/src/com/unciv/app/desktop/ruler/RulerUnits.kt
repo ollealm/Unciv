@@ -18,19 +18,22 @@ import kotlin.math.roundToInt
  */
 class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
-    /** action: move (then release), settle, fortify/garrison, hold, explore (then release), use (a great person's ability, then release) */
-    class Order(val action: String, val x: Int?, val y: Int?, val ability: String? = null) {
+    /** action: move (then release), settle, fortify/garrison, hold, explore (then release), use (a great person's ability, then release), gift (march onto [to]'s land and give the unit to them) */
+    class Order(val action: String, var x: Int?, var y: Int?, val ability: String? = null, val to: String? = null) {
         /** Where the unit stood last turn and for how many turns, to notice an order that is going nowhere */
         var lastSpot: String? = null
         var turnsStuck = 0
-        fun toMap() = mapOf("action" to action, "x" to x, "y" to y, "ability" to ability, "lastSpot" to lastSpot, "turnsStuck" to turnsStuck)
+        fun toMap() = mapOf("action" to action, "x" to x, "y" to y, "ability" to ability, "to" to to, "lastSpot" to lastSpot, "turnsStuck" to turnsStuck)
     }
 
     /** unit id -> order */
     val orders = HashMap<Int, Order>()
 
+    /** Units given away by order since the host last reckoned its losses: gone from our rolls, but neither lost nor disbanded */
+    val given = HashSet<Int>()
+
     /** Forget everything of one game */
-    fun reset() { orders.clear(); released.clear(); landLeft.clear(); stillSince.clear() }
+    fun reset() { orders.clear(); released.clear(); given.clear(); landLeft.clear(); stillSince.clear() }
 
     /** Orders for units that no longer exist (a soldier killed on the march; re-arming keeps a unit's number, so its order stays): forgotten, so a dead man never counts as "on the way" */
     fun forgetTheDead(game: com.unciv.logic.GameInfo) {
@@ -50,7 +53,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
     fun load(json: JsonValue?) {
         orders.clear()
-        json?.forEach { orders[it.name.toInt()] = Order(it.getString("action"), it.get("x")?.takeUnless { v -> v.isNull }?.asInt(), it.get("y")?.takeUnless { v -> v.isNull }?.asInt(), it.get("ability")?.takeUnless { v -> v.isNull }?.asString()).apply {
+        json?.forEach { orders[it.name.toInt()] = Order(it.getString("action"), it.get("x")?.takeUnless { v -> v.isNull }?.asInt(), it.get("y")?.takeUnless { v -> v.isNull }?.asInt(), it.get("ability")?.takeUnless { v -> v.isNull }?.asString(), it.getString("to", null)).apply {
             lastSpot = it.getString("lastSpot", null); turnsStuck = it.getInt("turnsStuck", 0) } }
     }
 
@@ -95,8 +98,13 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             log(unit.civ, "A ${unit.name} #${unit.id} is at ${where(unit.civ, unit.getTile())} and awaits orders (use, move, or release to the officials).")
         }
         val order = orders[unit.id] ?: return false
+        if (order.action == "gift") return withCityStatePassage(unit, recipientOf(unit.civ, order)) { checkGift(unit, order) ?: carryOut(unit, order) }
+        return carryOut(unit, order)
+    }
+
+    private fun carryOut(unit: MapUnit, order: Order): Boolean {
         val civ = unit.civ
-        val target = if (order.x != null && order.y != null) civ.gameInfo.tileMap.getIfTileExistsOrNull(order.x, order.y) else null
+        val target = order.x?.let { x -> order.y?.let { y -> civ.gameInfo.tileMap.getIfTileExistsOrNull(x, y) } }
 
         if (target != null && order.action == "settle") settleProblem(civ, target)?.let { problem ->
             // The site went bad on the way (someone settled nearby): say so at once, do not walk on
@@ -186,12 +194,100 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 orders.remove(unit.id)
                 true
             }
+            "gift" -> {
+                // Giving needs movement left, as founding does: a soldier that marched in this turn is given next turn
+                if (unit.currentMovement <= 0f) return true
+                val recipient = recipientOf(civ, order)!!
+                val name = unit.name; val id = unit.id; val here = where(civ, unit.getTile())
+                val influence = { recipient.getDiplomacyManager(civ)?.getInfluence() ?: 0f }
+                val before = influence()
+                orders.remove(id)
+                if (UnitActions.invokeUnitAction(unit, UnitActionType.GiftUnit)) {
+                    released -= id; given += id
+                    val regard = if (recipient.isCityState) ", whose regard for us rose (influence +${(influence() - before).roundToInt()}, now ${influence().toInt()})" else ""
+                    log(civ, "By your order: our $name #$id was given to ${recipient.civName} at $here$regard.")
+                    if (!recipient.isCityState) log(recipient, "${civ.civName} gave us their $name, now our $name #$id at ${where(recipient, unit.getTile())}.")
+                    true
+                } else {
+                    log(civ, "Our $name #$id could not be given to ${recipient.civName} at $here: ${giftProblem(civ, unit, recipient) ?: "they would not take it there"}. The order is dropped and the officials take it back.")
+                    drop(unit)
+                    false
+                }
+            }
             "hold" -> true
             "disband" -> { log(civ, "Our ${unit.name} #${unit.id} was disbanded."); orders.remove(unit.id); unit.disband(); true }
             "explore" -> { unit.action = UnitActionType.Explore.value; orders.remove(unit.id); false }
             else -> { orders.remove(unit.id); true } // "move": arrived, released to the officials from next turn
         }
     }
+
+    /** Unciv lets a human player's units walk through any city-state's land, but not an AI-played realm's - which ours are, to the engine -
+     *  so a soldier sent as a gift to a city-state could never set foot on it. It walks in as a human player's would, for the while
+     *  (the engine's own path-finder flips its cache flags the same way); the path cache is cleared on both sides, so no path found with it leaks out. */
+    private fun <T> withCityStatePassage(unit: MapUnit, recipient: Civilization?, block: () -> T): T {
+        if (recipient?.isCityState != true || unit.cache.canEnterCityStates) return block()
+        unit.cache.canEnterCityStates = true; unit.movement.clearPathfindingCache()
+        try { return block() } finally { unit.cache.canEnterCityStates = false; unit.movement.clearPathfindingCache() }
+    }
+
+    private fun recipientOf(civ: Civilization, order: Order) = civ.gameInfo.civilizations.firstOrNull { it.civName == order.to }
+
+    /** A gift order re-checked each turn, as a settler's site is: war may have broken out or their borders moved on the way.
+     *  Returns null to carry on (the target tile updated if need be), or what [handle] should return. */
+    private fun checkGift(unit: MapUnit, order: Order): Boolean? {
+        val civ = unit.civ
+        val recipient = recipientOf(civ, order)?.takeIf { it.isAlive() }
+        val problem = if (recipient == null) "${order.to} is gone" else giftProblem(civ, unit, recipient)
+        if (problem != null || recipient == null) {
+            log(civ, "Our ${unit.name} #${unit.id} cannot be given to ${order.to}: $problem. The order is dropped and the officials take it back.")
+            drop(unit)
+            return false
+        }
+        val target = order.x?.let { x -> order.y?.let { y -> civ.gameInfo.tileMap.getIfTileExistsOrNull(x, y) } }
+        // Standing on their land already (crossed into it on the way): given here, no need to walk on
+        val tile = unit.getTile().takeIf { canBeGivenOn(unit, it, recipient) }
+            ?: target?.takeIf { canBeGivenOn(unit, it, recipient) && canMarch(unit, it) }
+            ?: giftTile(unit, recipient)
+        if (tile == null) {
+            log(civ, "${recipient.civName}'s land is now beyond the reach of our ${unit.name} #${unit.id}; the gift order is dropped and the officials take it back.")
+            drop(unit)
+            return false
+        }
+        if (tile != target) {
+            if (target != null && tile != unit.getTile()) log(civ, "The ground our ${unit.name} #${unit.id} was marching to " +
+                (if (target.getOwner() != recipient) "is no longer ${recipient.civName}'s" else "cannot take it now") + "; it makes for ${where(civ, tile)} instead, to be given to ${recipient.civName} there.")
+            order.x = tile.position.x.toInt(); order.y = tile.position.y.toInt()
+            order.turnsStuck = 0
+        }
+        return null
+    }
+
+    /** Why this unit cannot be given to that power at all, wherever it stands; null if it can */
+    private fun giftProblem(civ: Civilization, unit: MapUnit, recipient: Civilization): String? = when {
+        recipient == civ -> "a unit cannot be given to our own realm"
+        !civ.knows(recipient) -> "we have not met ${recipient.civName}"
+        civ.isAtWarWith(recipient) -> "we are at war with ${recipient.civName}"
+        unit.isTransported -> "it is carried aboard another unit"
+        // The engine would take it and destroy it: a city-state has no use for Great People
+        recipient.isCityState && unit.isGreatPerson() -> "a Great Person cannot be gifted to a city-state"
+        recipient.isCityState && !unit.isMilitary() && unit.getMatchingUniques(UniqueType.GainInfluenceWithUnitGiftToCityState, checkCivInfoUniques = true)
+            .none { unit.matchesFilter(it.params[1]) } -> "a city-state takes only soldiers"
+        else -> null
+    }
+
+    /** Could the unit be handed over standing on this tile: the recipient's own ground, friendly to us if they are a realm, and free for a unit of its kind */
+    private fun canBeGivenOn(unit: MapUnit, tile: Tile, recipient: Civilization): Boolean {
+        if (tile.getOwner() != recipient) return false
+        if (!recipient.isCityState && !tile.isFriendlyTerritory(unit.civ)) return false
+        val occupant = if (unit.isCivilian()) tile.civilianUnit else tile.militaryUnit
+        return (occupant == null || occupant == unit) && (tile == unit.getTile() || unit.movement.canMoveTo(tile))
+    }
+
+    /** The nearest tile of the recipient's that this unit can march to and be given on */
+    private fun giftTile(unit: MapUnit, recipient: Civilization): Tile? =
+        recipient.cities.asSequence().flatMap { it.getTiles() }.filter { canBeGivenOn(unit, it, recipient) }
+            .sortedBy { it.aerialDistanceTo(unit.getTile()) }.take(20) // path-finding is dear; twenty of the nearest is plenty
+            .firstOrNull { canMarch(unit, it) }
 
     /** An order dropped for good: a Great Person goes to the officials with it, or the hold at the top of [handle] would take it back next turn and the ruler would be asked again */
     private fun drop(unit: MapUnit) {
@@ -204,12 +300,13 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         val unitId = json.getInt("unit")
         val unit = civ.units.getUnitById(unitId) ?: throw IllegalArgumentException("No unit with id $unitId - see the briefing's unit list")
         val action = json.getString("action", "move")
-        if (action !in listOf("move", "settle", "fortify", "garrison", "hold", "explore", "use", "disband", "release"))
-            throw IllegalArgumentException("Unknown unit action $action; use move, settle, fortify, garrison, hold, explore, use, disband or release")
+        if (action !in listOf("move", "settle", "fortify", "garrison", "hold", "explore", "use", "gift", "disband", "release"))
+            throw IllegalArgumentException("Unknown unit action $action; use move, settle, fortify, garrison, hold, explore, use, gift, disband or release")
         if (action == "disband") { orders.remove(unitId); val name = unit.name; unit.disband(); log(civ, "Our $name #$unitId was disbanded."); return "$name #$unitId disbanded." }
         if (action == "release") { orders.remove(unitId); released += unitId; return "${unit.name} #$unitId is back under the officials." }
         if (action == "settle" && !unit.hasUnique(UniqueType.FoundCity)) throw IllegalArgumentException("${unit.name} cannot found cities")
         if (action == "explore" && unit.isCivilian()) throw IllegalArgumentException("Civilians cannot explore; send a military unit")
+        if (action == "gift") return giveGift(civ, unit, json)
 
         var x: Int? = null; var y: Int? = null
         json.get("city")?.takeUnless { it.isNull }?.asString()?.let { cityName ->
@@ -247,10 +344,25 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         return "${unit.name} #$unitId will $action at ${where(civ, target)}" + (if (turns > 0) ", about $turns turns away" else "")
     }
 
+    /** {unit, action: "gift", to}: march onto the nearest of their land we can reach, and be given to them there */
+    private fun giveGift(civ: Civilization, unit: MapUnit, json: JsonValue): String {
+        val name = json.getString("to", null) ?: throw IllegalArgumentException("gift needs `to`: the city-state or realm to receive the unit")
+        val recipient = civ.getKnownCivs().firstOrNull { it.civName == name && it.isAlive() } ?: throw IllegalArgumentException("We have not met $name, or they are gone")
+        giftProblem(civ, unit, recipient)?.let { throw IllegalArgumentException("${unit.name} #${unit.id} cannot be given to $name: $it") }
+        val (tile, steps) = withCityStatePassage(unit, recipient) { giftTile(unit, recipient)?.let { Pair(it, pathTo(unit, it).size) } } ?: throw IllegalArgumentException(
+            if (!recipient.isCityState && recipient.cities.none { city -> city.getTiles().any { it.isFriendlyTerritory(civ) } })
+                "$name's borders are closed to us: a realm can be given a unit only on its own land, which takes open borders"
+            else "$name's land is beyond the reach of ${unit.name} #${unit.id}")
+        orders[unit.id] = Order("gift", tile.position.x.toInt(), tile.position.y.toInt(), to = recipient.civName)
+        released -= unit.id
+        val turns = if (tile == unit.getTile()) 0 else kotlin.math.ceil(steps / unit.getMaxMovement().coerceAtLeast(1).toFloat()).toInt()
+        return "${unit.name} #${unit.id} will be given to $name at ${where(civ, tile)}" + (if (turns > 0) ", about $turns turns away" else "")
+    }
+
     fun describeUnit(civ: Civilization, unit: MapUnit): String {
         val order = orders[unit.id]
         val state = when {
-            order != null -> "under orders: ${order.action}" + (if (order.x != null) " at (${order.x},${order.y})" else "")
+            order != null -> "under orders: ${order.action}" + (order.to?.let { " to $it" } ?: "") + (if (order.x != null) " at (${order.x},${order.y})" else "")
             unit.action?.startsWith("Fortify") == true -> "fortified"
             unit.action == "Sleep" -> "sleeping"
             unit.action?.contains("explore", ignoreCase = true) == true -> "exploring"
