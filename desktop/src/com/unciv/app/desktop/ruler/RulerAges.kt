@@ -80,8 +80,8 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
         val ageLength = to - from
         for (unit in civ.units.getCivUnits()) {
             val still = stillFor(unit)
-            if (unit.isGreatPerson() && still >= 40 && still - ageLength < 40) lines += "Our ${unit.name} has stood at ${placeOf(civ, unit.getTile(), enemies)} for $still turns."
-            else if (unit.hasUnique(UniqueType.FoundCity) && still >= 30 && still - ageLength < 30) lines += "Our ${unit.name} has waited at ${placeOf(civ, unit.getTile(), enemies)} for $still turns."
+            if (unit.isGreatPerson() && still >= 40 && still - ageLength < 40) lines += "Our ${unit.name} has stood ${RulerCampaigns.atPlace(placeOf(civ, unit.getTile(), enemies))} since ${yearText(to - still)}."
+            else if (unit.hasUnique(UniqueType.FoundCity) && still >= 30 && still - ageLength < 30) lines += "Our ${unit.name} has waited ${RulerCampaigns.atPlace(placeOf(civ, unit.getTile(), enemies))} since ${yearText(to - still)}."
         }
         return lines
     }
