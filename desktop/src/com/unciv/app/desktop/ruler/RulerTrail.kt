@@ -81,11 +81,14 @@ class RulerTrail {
         return path
     }
 
+    /** What a unit was last called anywhere in the trail: its name may be missing from stands kept before names were saved */
+    fun nameOf(id: Int): String = stands.descendingMap().values.firstNotNullOfOrNull { it[id]?.name?.takeIf { name -> name.isNotEmpty() } } ?: ""
+
     fun clear() { stands.clear(); marks.clear(); cityOwners.clear(); seen.clear(); met.clear(); explored.clear(); known.clear() }
 
     fun toMap() = mapOf(
         "stands" to stands.mapKeys { it.key.toString() }.mapValues { turn ->
-            turn.value.mapKeys { it.key.toString() }.mapValues { listOf(it.value.x, it.value.y, it.value.civ, it.value.military) } },
+            turn.value.mapKeys { it.key.toString() }.mapValues { listOf(it.value.x, it.value.y, it.value.civ, it.value.military, it.value.name) } },
         "marks" to marks.map { listOf(it.turn, it.x, it.y, it.kind, it.civ) },
         "cityOwners" to cityOwners,
         "seen" to seen.mapKeys { it.key.toString() }.mapValues { turn -> turn.value.mapValues { it.value.toList() } },

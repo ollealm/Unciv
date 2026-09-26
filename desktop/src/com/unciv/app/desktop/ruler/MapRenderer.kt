@@ -35,7 +35,8 @@ object MapRenderer {
     /**
      *  atlas: the whole map drawn by us. reference: terrain, coasts and rivers only, for an image model to repaint.
      *  overlay: borders, units, cities and names drawn on top of [base] (a repaint of the reference, any size).
-     *  campaign: the atlas with the marches since turn [since] traced on it, from [trail].
+     *  campaign: the atlas with the age's campaigns since turn [since] on it as an atlas draws them - a few broad arrows, from [trail].
+     *  trace: the atlas with every unit's march since [since] traced on it exactly, a line each.
      */
     fun render(civ: Civilization, style: String = "atlas", base: BufferedImage? = null, trail: RulerTrail? = null, since: Int = 0, sinceYear: String = "", until: Int = Int.MAX_VALUE, untilYear: String = ""): ByteArray {
         val drawTerrain = style != "overlay"
@@ -202,11 +203,13 @@ object MapRenderer {
                     (under.blue + (tint.blue - under.blue) * weight).toInt()).rgb)
             }
         }
-        if (style == "campaign" && trail != null) {
-            // Marches: each unit in sight trails the way it came, a point per turn, ending in an arrowhead at its marker
-            fun colorOf(name: String) = game.civilizations.firstOrNull { it.civName == name }
-                ?.let { if (it.isBarbarian) Color(140, 30, 30) else it.nation.getOuterColor().let { c -> Color(c.r, c.g, c.b) } } ?: ink
-            for (tile in visible) for (unit in tile.getUnits()) {
+        fun colorOf(name: String) = game.civilizations.firstOrNull { it.civName == name }
+            ?.let { if (it.isBarbarian) Color(140, 30, 30) else it.nation.getOuterColor().let { c -> Color(c.r, c.g, c.b) } } ?: ink
+        var campaigns = emptyList<RulerCampaigns.Campaign>()
+        if ((style == "campaign" || style == "trace") && trail != null) {
+            if (style == "campaign") campaigns = RulerCampaigns.reckon(trail, civ, since, minOf(until, game.turns))
+            else for (tile in visible) for (unit in tile.getUnits()) {
+                // Every unit in sight trails the way it came, a point per turn, ending in an arrowhead at its marker
                 val own = unit.civ == civ
                 if (!unit.isMilitary() && "Settler" !in unit.name) continue // workers and caravans wander; nobody wants their scribbles
                 val path = trail.path(unit.id, since, until).mapNotNull { game.tileMap.getIfTileExistsOrNull(it.x, it.y) }
@@ -238,14 +241,14 @@ object MapRenderer {
                 g.fillPolygon(head); g.color = ink; g.stroke = BasicStroke(1f); g.drawPolygon(head)
             }
             for (mark in trail.marks) {
-                if (mark.turn <= since) continue
+                if (mark.turn <= since || mark.turn > until) continue
                 val tile = game.tileMap.getIfTileExistsOrNull(mark.x, mark.y) ?: continue
                 if (tile !in points || !tile.isExplored(civ)) continue
                 val x = px(tile).toInt(); val y = py(tile).toInt()
                 if (mark.kind == "taken") {
                     g.color = Color(170, 30, 30); g.stroke = BasicStroke(2.4f)
                     g.drawOval(x - 14, y - 14, 28, 28); g.stroke = BasicStroke(1.2f); g.drawOval(x - 18, y - 18, 36, 36)
-                } else if (mark.civ == civ.civName || tile in visible) {
+                } else if (style == "trace" && (mark.civ == civ.civName || tile in visible)) {
                     // a company lost: a cross in its colours, set a little aside so it does not sit on whoever holds the field now
                     val cx = x + 8; val cy = y - 8
                     g.color = ink; g.stroke = BasicStroke(4f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
@@ -270,6 +273,21 @@ object MapRenderer {
                     g.fillPolygon(shield); g.color = if (own) Color.WHITE else ink; g.drawPolygon(shield)
                 }
             }
+        }
+        // The age's campaigns as a history atlas draws them: one broad arrow per force, in its realm's colour, broader for a larger force;
+        // the head says how it ended. Over the companies' markers so nothing breaks an arrow; the enemy's first, so that our own lie on top
+        for (c in campaigns.sortedBy { it.ours }) {
+            val route = c.route.filter { it in points }
+            if (route.size < 2) continue
+            val xs = route.map { px(it) }; val ys = route.map { py(it) }
+            if (xs.zipWithNext().any { (a, b) -> kotlin.math.abs(a - b) > width / 2 }) continue // went round the back of the world
+            val body = (if (c.size >= 4) 15f else if (c.size >= 2) 11f else 8f) * (if (c.ours) 1f else 0.85f)
+            var line = flatten(smooth(xs, ys))
+            if (c.outcome == RulerCampaigns.Outcome.Took) line = shortened(line, 15f) // the head rests against the ring of the city taken
+            drawArrow(g, line, body, colorOf(c.whose), head = c.outcome != RulerCampaigns.Outcome.Broken, sea = c.sea)
+            if (c.outcome == RulerCampaigns.Outcome.Broken) brokenAt(g, line, body)
+            val home = c.homeward.filter { it in points }
+            if (c.outcome == RulerCampaigns.Outcome.Back && home.size >= 2) wayBack(g, flatten(smooth(home.map { px(it) }, home.map { py(it) })), colorOf(c.whose))
         }
         // Cities
         for (tile in known) {
@@ -296,20 +314,154 @@ object MapRenderer {
         val year = game.getYear()
         val yearText = if (year < 0) "${-year} BC" else "AD $year"
         g.font = Font(Font.SERIF, Font.BOLD, 18)
-        val title = if (style == "campaign") "The Marches of ${civ.civName}, $sinceYear to ${untilYear.ifEmpty { yearText }}" else "The Known World of ${civ.civName}, $yearText"
+        val title = if (style == "campaign" || style == "trace") "The Marches of ${civ.civName}, $sinceYear to ${untilYear.ifEmpty { yearText }}" else "The Known World of ${civ.civName}, $yearText"
         g.color = Color(parchment.red, parchment.green, parchment.blue, 220)
         g.fillRoundRect(10, 10, g.fontMetrics.stringWidth(title) + 20, 30, 8, 8)
         g.color = ink; g.stroke = BasicStroke(1.2f)
         g.drawRoundRect(10, 10, g.fontMetrics.stringWidth(title) + 20, 30, 8, 8)
         g.drawString(title, 20, 31)
-        g.font = Font(Font.SERIF, Font.ITALIC, 11)
-        if (style == "campaign") g.drawString("Lines trace the marches of these years. A cross: a company lost. A red ring: a city taken.", 14, height - 10)
+        g.font = Font(Font.SERIF, Font.ITALIC, if (style == "campaign") 13 else 11)
+        if (style == "campaign") g.drawString("Arrows: the campaigns of these years, broader for a larger force. A bar and crossed swords: a force broken there. Dashed: the way home. A red ring: a city taken.", 14, height - 10)
+        if (style == "trace") g.drawString("Lines trace the marches of these years. A cross: a company lost. A red ring: a city taken.", 14, height - 10)
 
         g.dispose()
 
         val bytes = ByteArrayOutputStream()
         ImageIO.write(image, "png", bytes)
         return bytes.toByteArray()
+    }
+
+    /** A smooth curve through the points (Catmull-Rom); two points get the gentle bow an atlas gives a straight march */
+    private fun smooth(xs: List<Float>, ys: List<Float>): java.awt.geom.Path2D.Float {
+        val path = java.awt.geom.Path2D.Float()
+        path.moveTo(xs[0], ys[0])
+        if (xs.size == 2) {
+            val dx = xs[1] - xs[0]; val dy = ys[1] - ys[0]
+            path.quadTo((xs[0] + xs[1]) / 2 - dy * 0.1f, (ys[0] + ys[1]) / 2 + dx * 0.1f, xs[1], ys[1])
+            return path
+        }
+        for (i in 0 until xs.size - 1) {
+            val a = maxOf(i - 1, 0); val d = minOf(i + 2, xs.size - 1)
+            path.curveTo(xs[i] + (xs[i + 1] - xs[a]) / 6f, ys[i] + (ys[i + 1] - ys[a]) / 6f,
+                xs[i + 1] - (xs[d] - xs[i]) / 6f, ys[i + 1] - (ys[d] - ys[i]) / 6f, xs[i + 1], ys[i + 1])
+        }
+        return path
+    }
+
+    private fun flatten(shape: java.awt.Shape): List<FloatArray> {
+        val points = ArrayList<FloatArray>()
+        val iterator = shape.getPathIterator(null, 0.5)
+        val coords = FloatArray(6)
+        while (!iterator.isDone) {
+            if (iterator.currentSegment(coords) != java.awt.geom.PathIterator.SEG_CLOSE) points += floatArrayOf(coords[0], coords[1])
+            iterator.next()
+        }
+        return points
+    }
+
+    private fun distance(a: FloatArray, b: FloatArray) = sqrt((b[0] - a[0]) * (b[0] - a[0]) + (b[1] - a[1]) * (b[1] - a[1]))
+
+    /** The line with [by] pixels taken off its end */
+    private fun shortened(line: List<FloatArray>, by: Float): List<FloatArray> {
+        var left = by
+        for (i in line.size - 1 downTo 1) {
+            val step = distance(line[i - 1], line[i])
+            if (step >= left) {
+                val t = (step - left) / step
+                return line.subList(0, i) + listOf(floatArrayOf(line[i - 1][0] + (line[i][0] - line[i - 1][0]) * t, line[i - 1][1] + (line[i][1] - line[i - 1][1]) * t))
+            }
+            left -= step
+        }
+        return listOf(line[0], line[0])
+    }
+
+    /** Which way the line is going at its end */
+    private fun heading(line: List<FloatArray>): Pair<Float, Float> {
+        val tip = line.last(); val back = shortened(line, 6f).last()
+        val length = distance(back, tip).coerceAtLeast(0.001f)
+        return Pair((tip[0] - back[0]) / length, (tip[1] - back[1]) / length)
+    }
+
+    /** An atlas arrow: a shaft that swells from its start to its head, in the realm's colour, inked round, with a soft shadow; a fleet's carries a white sea lane down its middle */
+    private fun drawArrow(g: Graphics2D, line: List<FloatArray>, body: Float, color: Color, head: Boolean, sea: Boolean) {
+        val total = line.zipWithNext().sumOf { (a, b) -> distance(a, b).toDouble() }.toFloat()
+        val headLength = if (head) (body * 1.7f).coerceAtMost(total * 0.45f) else 0f
+        val shaft = if (head) shortened(line, headLength) else line
+        val shaftLength = shaft.zipWithNext().sumOf { (a, b) -> distance(a, b).toDouble() }.toFloat().coerceAtLeast(0.001f)
+        val left = ArrayList<FloatArray>(); val right = ArrayList<FloatArray>()
+        var run = 0f
+        for (i in shaft.indices) {
+            if (i > 0) run += distance(shaft[i - 1], shaft[i])
+            val a = shaft[maxOf(i - 1, 0)]; val b = shaft[minOf(i + 1, shaft.size - 1)]
+            val length = distance(a, b).coerceAtLeast(0.001f)
+            val dx = (b[0] - a[0]) / length; val dy = (b[1] - a[1]) / length
+            val half = body / 2 * (0.45f + 0.55f * run / shaftLength)
+            left += floatArrayOf(shaft[i][0] - dy * half, shaft[i][1] + dx * half)
+            right += floatArrayOf(shaft[i][0] + dy * half, shaft[i][1] - dx * half)
+        }
+        val shape = java.awt.geom.Path2D.Float()
+        shape.moveTo(left[0][0], left[0][1])
+        for (p in left) shape.lineTo(p[0], p[1])
+        if (head) {
+            val (dx, dy) = heading(line)
+            val base = shaft.last(); val tip = line.last(); val wing = body * 1.15f
+            shape.lineTo(base[0] - dy * wing, base[1] + dx * wing)
+            shape.lineTo(tip[0], tip[1])
+            shape.lineTo(base[0] + dy * wing, base[1] - dx * wing)
+        }
+        for (p in right.asReversed()) shape.lineTo(p[0], p[1])
+        shape.closePath()
+        g.color = Color(40, 30, 20, 60)
+        g.fill(java.awt.geom.AffineTransform.getTranslateInstance(2.0, 2.5).createTransformedShape(shape))
+        // A pale margin round the ink, so that a dark realm's arrow stands off the land and off another arrow it crosses
+        g.color = Color(parchment.red, parchment.green, parchment.blue, 230); g.stroke = BasicStroke(6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND); g.draw(shape)
+        g.color = color; g.fill(shape)
+        if (sea) {
+            g.color = Color(255, 255, 255, 220)
+            g.stroke = BasicStroke(1.8f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 1f, floatArrayOf(2f, 6f), 0f)
+            g.draw(polyline(shortened(shaft, 4f)))
+        }
+        g.color = ink; g.stroke = BasicStroke(1.8f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND); g.draw(shape)
+    }
+
+    private fun polyline(points: List<FloatArray>) = java.awt.geom.Path2D.Float().apply {
+        moveTo(points[0][0], points[0][1]); for (p in points.drop(1)) lineTo(p[0], p[1])
+    }
+
+    /** Where a force was broken: a bar across its arrow's end and crossed swords beyond it */
+    private fun brokenAt(g: Graphics2D, line: List<FloatArray>, body: Float) {
+        val (dx, dy) = heading(line)
+        val end = line.last(); val half = body * 1.3f
+        val bar = java.awt.geom.Line2D.Float(end[0] - dy * half, end[1] + dx * half, end[0] + dy * half, end[1] - dx * half)
+        val cx = end[0] + dx * 17f; val cy = end[1] + dy * 17f; val s = 10f
+        val blades = listOf(floatArrayOf(cx - s, cy + s, cx + s, cy - s), floatArrayOf(cx + s, cy + s, cx - s, cy - s)) // hilt to point
+        for ((width, color) in listOf(7.5f to parchment, 3.6f to ink)) {
+            g.color = color
+            g.stroke = BasicStroke(width + 1.5f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_ROUND); g.draw(bar)
+            g.stroke = BasicStroke(width - 1.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+            for (b in blades) {
+                g.draw(java.awt.geom.Line2D.Float(b[0], b[1], b[2], b[3]))
+                // the crossguard, a third of the way up from the hilt
+                val gx = b[0] + (b[2] - b[0]) * 0.3f; val gy = b[1] + (b[3] - b[1]) * 0.3f
+                val ux = (b[2] - b[0]) / (2 * s); val uy = (b[3] - b[1]) / (2 * s)
+                g.draw(java.awt.geom.Line2D.Float(gx - uy * 5f, gy + ux * 5f, gx + uy * 5f, gy - ux * 5f))
+            }
+        }
+    }
+
+    /** A force's way home: a dashed line in its colour, with a small head */
+    private fun wayBack(g: Graphics2D, line: List<FloatArray>, color: Color) {
+        if (line.size < 2) return
+        val shaft = shortened(line, 8f)
+        val dash = floatArrayOf(9f, 6f)
+        g.color = ink; g.stroke = BasicStroke(5.5f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_ROUND, 1f, dash, 0f); g.draw(polyline(shaft))
+        g.color = color; g.stroke = BasicStroke(3f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_ROUND, 1f, dash, 0f); g.draw(polyline(shaft))
+        val (dx, dy) = heading(line)
+        val tip = line.last(); val base = shaft.last()
+        val head = java.awt.geom.Path2D.Float().apply {
+            moveTo(tip[0], tip[1]); lineTo(base[0] - dy * 6f, base[1] + dx * 6f); lineTo(base[0] + dy * 6f, base[1] - dx * 6f); closePath()
+        }
+        g.color = color; g.fill(head); g.color = ink; g.stroke = BasicStroke(1.4f); g.draw(head)
     }
 
     /** Three box blurs, separable: close to a gaussian and fast */
