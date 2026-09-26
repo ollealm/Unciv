@@ -1048,6 +1048,11 @@ object RulerHost {
                     "turnsLeft" to city.cityConstructions.currentConstructionName().let { current ->
                         if (current.isEmpty()) null else city.cityConstructions.turnsToConstruction(current) },
                     "production" to stats.production.toInt(), "foodSurplus" to stats.food.toInt(),
+                    "growth" to when {
+                        civ.getHappiness() <= -10 -> "none: the people are too unhappy"
+                        civ.getHappiness() < 0 && stats.food.toInt() <= 0 -> "stalled: unhappiness cuts growth by three quarters"
+                        (city.cityConstructions.getCurrentConstruction() as? com.unciv.models.ruleset.unit.BaseUnit)?.isCityFounder() == true -> "held while the Settler is built"
+                        else -> null },
                     "unhappiness" to city.cityStats.happinessList.values.filter { it < 0 }.sum().toInt(),
                     "focus" to city.getCityFocus().name,
                     "health" to city.health, "garrison" to city.getCenterTile().militaryUnit?.name)
@@ -1133,7 +1138,7 @@ object RulerHost {
 
     private fun warnings(civ: Civilization, citySites: List<String>? = null): List<String> {
         val warnings = ArrayList<String>()
-        if (civ.getHappiness() < 0) warnings += "The people are unhappy (${civ.getHappiness()}): growth and production suffer. Luxuries, happiness buildings or fewer new cities help."
+        if (civ.getHappiness() < 0) warnings += "The people are unhappy (${civ.getHappiness()}): ${if (civ.getHappiness() <= -10) "no city grows at all" else "every city's growth is cut by three quarters"} while the mood is below zero, and production suffers - farming for food does little until the mood is mended. Luxuries, happiness buildings or fewer new cities help."
         if (civ.tech.currentTechnologyName() == null) warnings += "Research is idle - give research goals."
         val standing = orders[civ.civName]
         val goalsLeft = standing?.research?.count { !reached(civ, it) } ?: 0
