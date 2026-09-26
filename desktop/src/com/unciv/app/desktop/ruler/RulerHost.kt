@@ -53,7 +53,7 @@ object RulerHost {
     private val units = RulerUnits { civ, text -> log(civ, text) }
     private val diplomacy = RulerDiplomacy { civ, text -> log(civ, text) }
     private val trail = RulerTrail()
-    private val ages = RulerAges(trail) { turn -> yearText(turn) }
+    private val ages = RulerAges(trail, yearText = { turn -> yearText(turn) }, stillFor = { unit -> units.turnsStill(unit) })
 
     class StandingOrders {
         var personality = LinkedHashMap<String, Float>()
@@ -105,7 +105,11 @@ object RulerHost {
         RulerOverrides.unitHandler = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.handle(unit) }
         RulerOverrides.underOrders = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.underOrders(unit) }
         RulerOverrides.tradeAnswered = { request, receiver, outcome -> diplomacy.settle(request, receiver, outcome) }
-        RulerOverrides.unitLost = { loss -> losses.getOrPut(loss.civ.civName) { ArrayList() } += loss; trail.lostInBattle += loss.unit.id }
+        RulerOverrides.unitLost = { loss ->
+            // The chancery's losses and the trail's fallen marks are the ruled realms' own; an oddity of arms can be anyone's
+            if (loss.civ.civID in RulerOverrides.ruledCivs) { losses.getOrPut(loss.civ.civName) { ArrayList() } += loss; trail.lostInBattle += loss.unit.id }
+            ages.noteLoss(loss, game().turns + 1)
+        }
 
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0)
         server.executor = Executors.newSingleThreadExecutor() // game state is not thread-safe
@@ -254,6 +258,7 @@ object RulerHost {
             "diplomacy" to diplomacy.toMap(),
             "ownWars" to ownWars.map { "${it.first}>${it.second}" },
             "trail" to trail.toMap(),
+            "ages" to ages.toMap(),
             "lockedCities" to RulerOverrides.lockedCities.toList(),
             "focusedCities" to RulerOverrides.focusedCities.toList()
         )))
@@ -286,7 +291,7 @@ object RulerHost {
     /** Everything the host remembers about a game, forgotten in one place - so a new world starts clean whatever the last one left behind */
     private fun resetHostState() {
         orders.clear(); publicEvents.clear(); chancery.clear(); spending.clear(); warningsWoken.clear(); losses.clear(); ownWars.clear(); notificationsSeen.clear()
-        units.reset(); diplomacy.reset(); trail.clear()
+        units.reset(); diplomacy.reset(); trail.clear(); ages.clear()
         worldAtLastAdvance = null
         RulerOverrides.lockedCities.clear(); RulerOverrides.focusedCities.clear(); RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.noGifts.clear(); RulerOverrides.noWonders.clear()
     }
@@ -321,6 +326,7 @@ object RulerHost {
         units.dropMistakenHolds(loaded, chancery.values)
         worldAtLastAdvance = WorldSnapshot(loaded)
         trail.load(host.get("trail"))
+        ages.load(host.get("ages"))
         trail.record(loaded) // a save from before the trail was kept starts one here
         for ((name, standing) in orders) game().civilizations.firstOrNull { it.civName == name }?.let { RulerOverrides.postures[it.civID] = RulerOverrides.Posture(standing.warAim, standing.stance, standing.reserve) }
         RulerOverrides.lockedCities.clear()
