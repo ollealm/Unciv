@@ -941,6 +941,11 @@ object RulerHost {
             val winner = game.majorCivs().firstOrNull { it.victoryManager.hasWon() }
             val council = if (winner == null) orders.keys.firstNotNullOfOrNull { ruled -> councilEvent(ruled, roundStart, after) } else null
             stopReason = if (winner != null) "${winner.civName} has won a ${winner.victoryManager.getVictoryTypeAchieved()} victory" else council?.news
+            // The world's history must hear of it too, or the last chapter never knows the story ended. Once: the events are saved with the host, and a restart must not add it again
+            if (winner != null && publicEvents.none { (it["text"] as String).startsWith("${winner.civName} has won a ") }) {
+                settling = true // it belongs to the turn just played
+                try { addPublicEvent("$stopReason.") } finally { settling = false }
+            }
             declaredBy = council?.declaredBy
             if (stopReason != null || (wakeOnEvents && wake.isNotEmpty())) break
         }
