@@ -215,7 +215,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 }
             }
             "hold" -> true
-            "disband" -> { log(civ, "Our ${unit.name} #${unit.id} was disbanded."); orders.remove(unit.id); unit.disband(); true }
+            "disband" -> { log(civ, "By your order: our ${unit.name} #${unit.id} was disbanded."); orders.remove(unit.id); unit.disband(); true }
             "explore" -> { unit.action = UnitActionType.Explore.value; orders.remove(unit.id); false }
             else -> { orders.remove(unit.id); true } // "move": arrived, released to the officials from next turn
         }
@@ -302,7 +302,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         val action = json.getString("action", "move")
         if (action !in listOf("move", "settle", "fortify", "garrison", "hold", "explore", "use", "gift", "disband", "release"))
             throw IllegalArgumentException("Unknown unit action $action; use move, settle, fortify, garrison, hold, explore, use, gift, disband or release")
-        if (action == "disband") { orders.remove(unitId); val name = unit.name; unit.disband(); log(civ, "Our $name #$unitId was disbanded."); return "$name #$unitId disbanded." }
+        if (action == "disband") { orders.remove(unitId); val name = unit.name; unit.disband(); log(civ, "By your order: our $name #$unitId was disbanded."); return "$name #$unitId disbanded." }
         if (action == "release") { orders.remove(unitId); released += unitId; return "${unit.name} #$unitId is back under the officials." }
         if (action == "settle" && !unit.hasUnique(UniqueType.FoundCity)) throw IllegalArgumentException("${unit.name} cannot found cities")
         if (action == "explore" && unit.isCivilian()) throw IllegalArgumentException("Civilians cannot explore; send a military unit")
