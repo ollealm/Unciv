@@ -63,11 +63,11 @@ object RulerOverrides {
         if (request.requestingCiv in ruledCivs) tradeAnswered?.invoke(request, receiver, outcome)
     }
 
-    /** A unit of a ruled civ destroyed or captured in battle, attacker or defender alike: the host otherwise cannot tell a death from a disbanding */
+    /** A unit destroyed or captured in battle, attacker or defender alike: the host otherwise cannot tell a death from a disbanding. Every civ's, not only a ruled one's - the world's oddities are anyone's */
     class UnitLoss(val civ: Civilization, val unit: MapUnit, val where: Tile, val enemy: Civilization?, val enemyUnit: String?, val captured: Boolean)
     @Volatile var unitLost: ((UnitLoss) -> Unit)? = null
     /** [civ] is passed apart from the unit because a captured unit already belongs to its captor by the time this is called */
     fun noteLoss(civ: Civilization, unit: MapUnit, where: Tile, enemy: ICombatant?, captured: Boolean = false) {
-        if (civ.civID in ruledCivs) unitLost?.invoke(UnitLoss(civ, unit, where, enemy?.getCivInfo(), enemy?.getName(), captured))
+        unitLost?.invoke(UnitLoss(civ, unit, where, enemy?.getCivInfo(), enemy?.getName(), captured))
     }
 }
