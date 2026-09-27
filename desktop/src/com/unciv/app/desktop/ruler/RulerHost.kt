@@ -789,7 +789,9 @@ object RulerHost {
         for ((what, items) in paid.groupBy { it.second }) log(civ, "The officials spent ${items.sumOf { it.first }} gold on ${what}.")
         if (paid.isNotEmpty()) log(civ, "The treasury now holds ${civ.gold} gold.")
         val unexplained = before.gold - civ.gold - paid.sumOf { it.first }
-        if (unexplained > 40) log(civ, "A further $unexplained gold left the treasury this turn without the officials' hand in it (upkeep, payments under our deals, or a deal struck).")
+        // Worth a line when it is more than a turn's income (never for trifles under 10): forty gold is a fortune in one age and small change in another
+        val income = civ.stats.statsForNextTurn.gold.toInt()
+        if (unexplained > maxOf(10, income)) log(civ, "A further $unexplained gold left the treasury this turn without the officials' hand in it (upkeep, payments under our deals, or a deal struck).")
         if (before.happiness >= 0 && civ.getHappiness() < 0) log(civ, "The people have become unhappy (${civ.getHappiness()}).")
     }
 
