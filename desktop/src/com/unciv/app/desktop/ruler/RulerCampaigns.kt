@@ -171,7 +171,7 @@ object RulerCampaigns {
     /** The campaign in one sentence of the world's words, as [civ] tells it */
     fun told(c: Campaign, civ: Civilization, enemies: Set<String>): String {
         val what = company(c.members.map { it.name }).replaceFirstChar { it.uppercase() }
-        val who = if (c.ours) what else "$what of ${c.whose}"
+        val who = if (c.ours) what else "$what of ${people(c.whose)}"
         val verb = if (c.sea) "sailed" else if (c.ours) "marched" else "came"
         val from = placeOf(civ, c.route.first(), enemies, c.whose)
         val to = placeOf(civ, c.route.last(), enemies, c.whose)
@@ -193,19 +193,37 @@ object RulerCampaigns {
     /** A place as a chronicle names it: a city, its fields, or a distance and direction from the nearest city we know.
      *  "The walls of" a city are the walls of a foe's: of our enemy's for our own companies, of ours for the enemy's ([mover] is whose company stands there) */
     fun placeOf(civ: Civilization, tile: Tile, enemies: Set<String>, mover: String = civ.civName): String {
-        fun whose(city: City) = if (city.civ == civ || city.civ.civName == city.name) "" else " (${city.civ.civName})" // a city-state is named for its city
         val city = tile.getCity()
-        if (city != null && tile.isCityCenter()) return city.name + whose(city)
+        if (city != null && tile.isCityCenter()) return named(city, civ, mover)
         val near = civ.gameInfo.getCities().filter { it.getCenterTile().isExplored(civ) }.minByOrNull { it.getCenterTile().aerialDistanceTo(tile) } ?: return "far from any city"
         val distance = near.getCenterTile().aerialDistanceTo(tile)
-        val whose = whose(near)
         val foes = if (mover == civ.civName) near.civ.civName in enemies else near.civ == civ
         return when {
-            distance <= 1 && foes -> "the walls of ${near.name}$whose"
-            distance <= 2 -> "the fields of ${near.name}$whose"
+            distance <= 1 && foes -> "the walls of ${named(near, civ, mover)}"
+            distance <= 2 -> "the fields of ${named(near, civ, mover)}"
             // Beyond a city's fields, the country or the waters that way, and distant ones well beyond; never a count of tiles
-            else -> "the ${if (distance > 5) "distant " else ""}${if (tile.isWater) "waters" else "country"} ${compassOf(HexMath.hex2WorldCoords(tile.position), HexMath.hex2WorldCoords(near.getCenterTile().position))} of ${near.name}$whose"
+            else -> "the ${if (distance > 5) "distant " else ""}${if (tile.isWater) "waters" else "country"} ${compassOf(HexMath.hex2WorldCoords(tile.position), HexMath.hex2WorldCoords(near.getCenterTile().position))} of ${named(near, civ, mover)}"
         }
+    }
+
+    /** A city as [civ] names it, whose it is said in words and never in brackets: "Seoul", "Ethiopia's Axum". Our own cities, the [mover]'s own
+     *  (the company's whose it is, already named) and a city-state named for its city go by the city's name alone */
+    fun named(city: City, civ: Civilization, mover: String = civ.civName) =
+        if (city.civ == civ || city.civ.civName == mover || city.civ.civName == city.name) city.name else "${possessive(city.civ.civName)} ${city.name}"
+
+    /** A people's name within a sentence: "the Maya", "Ethiopia" */
+    fun people(civName: String) = civName.replaceFirst(Regex("^The "), "the ")
+
+    /** "Ethiopia's", "the Maya's", "the Netherlands'" - for use within a sentence */
+    fun possessive(civName: String): String {
+        val name = people(civName)
+        return if (name.endsWith("s")) "$name'" else "$name's"
+    }
+
+    /** Cities by whose they are: "Axum and Addis Ababa of Ethiopia; Carthage" - a city-state named for its city stands alone */
+    fun citiesOf(cities: List<City>, civ: Civilization): String = cities.groupBy { it.civ }.entries.joinToString("; ") { (owner, group) ->
+        val names = group.map { it.name }.let { if (it.size == 1) it[0] else it.dropLast(1).joinToString(", ") + " and " + it.last() }
+        if (owner == civ || group.all { it.name == owner.civName }) names else "$names of ${people(owner.civName)}"
     }
 
     /** A [placeOf] place with the word before it: at a city, its walls or its fields; in the country or waters beyond */

@@ -55,7 +55,7 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
         // (a) arms of an older age destroyed by a far newer one - the world's
         outclassed.filter { it.turn in from..to }.groupBy { listOf(it.loser, it.unit, it.victor, it.by, it.place) }.entries.take(3).forEach { (_, group) ->
             val o = group[0]
-            lines += "${count(group.size, o.unit)} of ${o.loser} (${o.era}) fell to ${o.victor}'s ${o.by} (${o.byEra}) ${o.place}."
+            lines += "${count(group.size, o.unit)} of ${RulerCampaigns.people(o.loser)}, arms of the ${o.era}, fell to ${RulerCampaigns.possessive(o.victor)} ${o.by}, arms of the ${o.byEra}, ${o.place}."
         }
         // (c) a city that changed hands twice or more within the age - the world's
         trail.marks.filter { it.turn in from..to && it.kind == "taken" }.groupBy { it.x to it.y }.filter { it.value.size >= 2 }.forEach { (xy, marks) ->
@@ -125,9 +125,9 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
             val direction = capital?.let { compassOf(it, fresh.map { t -> HexMath.hex2WorldCoords(t.position) }.let { pts -> pts.reduce { a, b -> a.add(b) }.scl(1f / pts.size) }, HexMath.hex2WorldCoords(it.position)) }
             val farthest = capital?.let { c -> fresh.maxOf { it.aerialDistanceTo(c) } }
             val wonders = fresh.mapNotNull { it.naturalWonder }.distinct()
-            val cities = fresh.filter { it.isCityCenter() }.mapNotNull { it.getCity() }.map { "${it.name} (${it.civ.civName})" }
+            val found = fresh.filter { it.isCityCenter() }.mapNotNull { it.getCity() }
             mapOf("tilesSeen" to fresh.size, "mostly" to (if (land * 2 >= fresh.size) "land" else "sea"), "direction" to direction, "farthest" to farthest,
-                "naturalWonders" to wonders, "citiesFound" to cities)
+                "naturalWonders" to wonders, "citiesFound" to found.map { "${it.name} (${it.civ.civName})" }, "citiesFoundTold" to RulerCampaigns.citiesOf(found, civ))
         }
         val met = trail.met.subMap(from, false, to, true).values.flatMap { it[civ.civName] ?: emptyList() }.distinct()
         // Our farthest ranging units - the scouts and ships whose journeys the exploration came from
@@ -164,9 +164,9 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
         // A city taken and taken back is told as one story, ending with who holds it now
         for (hands in taken.groupBy { it["city"] }.values) {
             val city = hands[0]["city"]
-            lines += if (hands.size == 1) "$city fell to ${hands[0]["by"]} in ${hands[0]["year"]}."
-            else "$city changed hands ${RulerCampaigns.count(hands.size)} times: " + hands.mapIndexed { i, t -> "to ${t["by"]}${if (hands.take(i).any { it["by"] == t["by"] }) " again" else ""} in ${t["year"]}" }
-                .let { it.dropLast(1).joinToString(", ") + " and " + it.last() } + "; ${hands.last()["by"]} holds it now."
+            lines += if (hands.size == 1) "$city fell to ${RulerCampaigns.people(hands[0]["by"] as String)} in ${hands[0]["year"]}."
+            else "$city changed hands ${RulerCampaigns.count(hands.size)} times: " + hands.mapIndexed { i, t -> "to ${RulerCampaigns.people(t["by"] as String)}${if (hands.take(i).any { it["by"] == t["by"] }) " again" else ""} in ${t["year"]}" }
+                .let { it.dropLast(1).joinToString(", ") + " and " + it.last() } + "; ${RulerCampaigns.people(hands.last()["by"] as String)} holds it now."
         }
         // The known world's growth in words, never a count of tiles: how much, land or water, which way and how far from home
         if (exploration != null) lines += run {
@@ -177,9 +177,9 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
             "We found $found${exploration["direction"]?.let { " to the $it" } ?: ""}$reach."
         } +
             (exploration["naturalWonders"] as List<*>).takeIf { it.isNotEmpty() }?.let { " Found: ${it.joinToString()}." }.orEmpty() +
-            (exploration["citiesFound"] as List<*>).takeIf { it.isNotEmpty() }?.let { " Cities first seen: ${it.joinToString()}." }.orEmpty()
+            (exploration["citiesFoundTold"] as String).takeIf { it.isNotEmpty() }?.let { " Cities first seen: $it." }.orEmpty()
         for (e in explorers) lines += "Our ${e["what"]} ranged as far as ${e["reached"]}."
-        if (met.isNotEmpty()) lines += "We met ${met.joinToString()}."
+        if (met.isNotEmpty()) lines += "We met ${met.joinToString { RulerCampaigns.people(it) }}."
         if (lines.isEmpty()) lines += "No company marched beyond its home fields, nothing new was seen, and no one new was met."
 
         return mapOf("from" to from, "to" to to, "fromYear" to yearText(from), "toYear" to yearText(to),
