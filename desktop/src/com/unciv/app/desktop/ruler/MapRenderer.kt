@@ -111,6 +111,8 @@ object MapRenderer {
         val waterLayer = blur(layer(shallows) { if (it.isWater && style != "reference") terrainColors[it.baseTerrain] ?: shallows else shallows }, (HEX * 0.7f).toInt())
         val knownMask = blur(layer(Color.BLACK) { Color.WHITE }, (HEX * 0.5f).toInt())
         val landMask = blur(layer(Color.BLACK) { if (it.isWater) null else Color.WHITE }, (HEX * 0.5f).toInt())
+        // Known water, so that land is told from water only among known tiles: where known land meets the unknown there is no shore
+        val waterMask = blur(layer(Color.BLACK) { if (it.isWater) Color.WHITE else null }, (HEX * 0.5f).toInt())
         landMaskForBorders = landMask
         knownMaskForBorders = knownMask
         val wobble = java.util.Random(11)
@@ -123,16 +125,19 @@ object MapRenderer {
         for (y in 0 until height) for (x in 0 until width) {
             val jitter = ((noise.getRGB(x, y) and 0xff) - 128) / 4 // breaks up the last straight runs of shore
             val knownV = (knownMask.getRGB(x, y) and 0xff) + jitter
-            if (knownV < 128) continue // unknown stays parchment
-            // The edge of the known world is a soft grey line, so that it reads as the limit of knowledge and not as a shore
-            if (knownV < 140) { image.setRGB(x, y, Color(158, 148, 126).rgb); continue }
-            val land = (landMask.getRGB(x, y) and 0xff) + jitter
-            image.setRGB(x, y, when {
+            // The known world fades out into the bare parchment, as knowledge does on an old map: no line along its edge that could be read as a shore or a border
+            val known = knownness(knownV)
+            if (known <= 0f) continue // unknown stays parchment
+            // Land's share of what is known here: the unknown is neither, so the edge of knowledge draws no shoreline and no shallows
+            val l = landMask.getRGB(x, y) and 0xff; val w = waterMask.getRGB(x, y) and 0xff
+            val land = (if (l + w == 0) 0 else l * 255 / (l + w)) + jitter
+            val rgb = when {
                 land in 120..134 -> ink.rgb                     // the shoreline
                 land > 134 -> landLayer.getRGB(x, y)
                 land > 60 -> lighter(waterLayer.getRGB(x, y))  // pale shallows hugging the coast
                 else -> waterLayer.getRGB(x, y)
-            })
+            }
+            image.setRGB(x, y, if (known >= 1f) rgb else mix(image.getRGB(x, y), rgb, known))
         }
         // Features as small ink glyphs
         for (tile in known) {
@@ -194,10 +199,13 @@ object MapRenderer {
                 val under = Color(image.getRGB(x, y))
                 val onLand = landMaskForBorders?.let { (it.getRGB(x, y) and 0xff) > 134 } ?: true
                 // a thin firm line at the edge; within, a light wash on land and barely a breath of it at sea
-                // No firm border line along the edge of knowledge: a realm that runs on into the unknown has no known frontier there
+                // No firm border line along the edge of knowledge: a realm that runs on into the unknown has no known frontier there,
+                // and its wash fades out with the known world
                 val atEdge = knownMaskForBorders?.let { (it.getRGB(x, y) and 0xff) < 160 } ?: false
                 if (inside < 127 && atEdge) continue
-                val weight = if (inside < 127) 0.7f else if (onLand) 0.16f else 0.05f
+                val known = knownMaskForBorders?.let { knownness(it.getRGB(x, y) and 0xff) } ?: 1f
+                if (known <= 0f) continue
+                val weight = (if (inside < 127) 0.7f else if (onLand) 0.16f else 0.05f) * known
                 image.setRGB(x, y, Color(
                     (under.red + (tint.red - under.red) * weight).toInt(), (under.green + (tint.green - under.green) * weight).toInt(),
                     (under.blue + (tint.blue - under.blue) * weight).toInt()).rgb)
@@ -521,6 +529,18 @@ object MapRenderer {
         var result = source
         repeat(3) { result = vertical.filter(horizontal.filter(result, null), null) }
         return result
+    }
+
+    /** How far a point is inside the known world, from 0 (bare parchment) to 1, by the blurred known-world mask: a fade of most of a tile,
+     *  wide enough that no edge can be read as a shore */
+    private fun knownness(mask: Int): Float {
+        val t = ((mask - 70) / 150f).coerceIn(0f, 1f)
+        return t * t * (3 - 2 * t)
+    }
+
+    private fun mix(under: Int, over: Int, amount: Float): Int {
+        val a = Color(under); val b = Color(over)
+        return Color((a.red + (b.red - a.red) * amount).toInt(), (a.green + (b.green - a.green) * amount).toInt(), (a.blue + (b.blue - a.blue) * amount).toInt()).rgb
     }
 
     private fun lighter(rgb: Int): Int {

@@ -136,11 +136,24 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
             .map { mapOf("what" to it.name, "reached" to placeOf(civ, it.end, enemies)) }
 
         // The companies in sight now, as the map's badges show them: none inside a city, which stands for its garrison, and no aircraft
+        // A soldier at sea is embarked, in boats - not standing on the water
         val inSight = civ.viewableTiles.filter { !it.isCityCenter() }.flatMap { tile -> tile.getUnits().filter { !it.baseUnit.isAirUnit() }.map { tile to it } }
-            .groupBy { (tile, unit) -> unit.civ.civName to RulerCampaigns.placeOf(civ, tile, enemies, unit.civ.civName) }.entries
+            .groupBy { (tile, unit) -> Triple(unit.civ.civName, RulerCampaigns.placeOf(civ, tile, enemies, unit.civ.civName), tile.isWater && unit.baseUnit.isLandUnit) }.entries
             .sortedWith(compareBy({ it.key.first != civ.civName }, { it.key.first }))
-            .map { (key, group) -> mapOf("whose" to key.first, "what" to RulerCampaigns.company(group.map { it.second.name }), "where" to key.second,
-                "at" to RulerCampaigns.atPlace(key.second), "sea" to group.all { it.second.baseUnit.isWaterUnit }) }
+            .map { (key, group) -> mapOf("whose" to key.first, "what" to RulerCampaigns.company(group.map { it.second.name }) + if (key.third) ", embarked in boats" else "",
+                "where" to key.second, "at" to RulerCampaigns.atPlace(key.second), "sea" to group.all { it.second.baseUnit.isWaterUnit }) }
+        // Known country standing apart from the rest of the known world - the lands round a far city heard of - which a painter would otherwise ring with a coast
+        val glimpses = run {
+            val known = game.tileMap.tileList.filter { it.isExplored(civ) }.toHashSet()
+            val reached = HashSet<Tile>(); val names = ArrayList<String>()
+            for (start in known) {
+                if (!reached.add(start)) continue
+                val part = ArrayList<Tile>(); val queue = ArrayDeque(listOf(start))
+                while (queue.isNotEmpty()) { val tile = queue.removeFirst(); part += tile; for (next in tile.neighbors) if (next in known && reached.add(next)) queue += next }
+                if (part.size <= 40 && part.none { it.getOwner() == civ }) names += part.filter { it.isCityCenter() }.mapNotNull { it.getCity()?.name }
+            }
+            names
+        }
 
         // The same, told
         val lines = ArrayList<String>()
@@ -171,7 +184,7 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
 
         return mapOf("from" to from, "to" to to, "fromYear" to yearText(from), "toYear" to yearText(to),
             "marches" to marches, "lost" to lost, "enemyMarches" to theirs, "enemyLost" to enemyLost, "citiesTaken" to taken,
-            "exploration" to exploration, "explorers" to explorers, "met" to met, "inSight" to inSight, "lines" to lines,
+            "exploration" to exploration, "explorers" to explorers, "met" to met, "inSight" to inSight, "glimpses" to glimpses, "lines" to lines,
             "curiosities" to curiosities(civ, from, to, first, last, enemies))
     }
 
