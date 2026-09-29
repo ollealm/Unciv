@@ -667,7 +667,9 @@ object RulerHost {
     private fun chanceryLog(civ: Civilization, since: Int) =
         (chancery[civ.civName] ?: emptyList()).filter { (it["turn"] as Int) > since }
 
-    private val noise = listOf("has no work to do", "will end in", "will end next turn", "can be promoted", "assigned you a new quest", "no longer needs your help")
+    private val noise = listOf("has no work to do", "will end in", "will end next turn", "can be promoted", "assigned you a new quest", "no longer needs your help",
+        // the engine's bare word on a trade request: our own line says which proposal and how it ended, and the deals line says what came into force
+        "has accepted your trade request", "has denied your trade request")
 
     /** What one ruled civ looked like before a turn, to explain afterwards what the officials did */
     private class CivSnapshot(civ: Civilization) {
@@ -698,7 +700,13 @@ object RulerHost {
         for (notification in notifications) {
             if (noise.any { it in notification.text }) continue
             if (flipped.any { "[$it]" in notification.text && ("allied with" in notification.text || "lost our alliance" in notification.text) }) continue
-            log(civ, notification.text.replace("[", "").replace("]", ""))
+            val text = notification.text.replace("[", "").replace("]", "")
+            // "An enemy X has pillaged our Farm" says not whose: the raider still stands on the tile it pillaged
+            val raider = if (notification.text.startsWith("An enemy [") && "has pillaged" in notification.text)
+                notification.actions.filterIsInstance<com.unciv.logic.civilization.LocationAction>().firstOrNull()?.location
+                    ?.let { civ.gameInfo.tileMap.getIfTileExistsOrNull(it.x, it.y) }?.getUnits()?.firstOrNull { it.civ != civ && it.isMilitary() }?.civ
+                else null
+            log(civ, if (raider == null) text else text.replaceFirst(" has pillaged", " of ${if (raider.isBarbarian) "the barbarians" else RulerCampaigns.people(raider.civName)} has pillaged"))
         }
         // A ruler's queue binds until it has run out
         // (a queue that ran out mid-turn is refilled by the officials at once, so "empty" is not enough of a test:

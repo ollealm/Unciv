@@ -36,7 +36,7 @@ interface NotificationAction : IsPartOfGameInfoSerialization {
 }
 
 /** A notification action that shows map places. */
-class LocationAction(private val location: HexCoord = HexCoord.Zero) : NotificationAction {
+class LocationAction(val location: HexCoord = HexCoord.Zero) : NotificationAction { // readable: the ruler host says whose raider stood there
     override fun execute(worldScreen: WorldScreen) {
         worldScreen.mapHolder.setCenterPosition(location, selectUnit = false)
     }
