@@ -31,6 +31,7 @@ import kotlin.random.Random
 object DiplomacyAutomation {
 
     internal fun offerDeclarationOfFriendship(civInfo: Civilization) {
+        if (!com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, "Declaration of Friendship")) return // a ruler's standing order
         val civsThatWeCanDeclareFriendshipWith = civInfo.getKnownCivs()
             .filter {
                 civInfo.diplomacyFunctions.canSignDeclarationOfFriendshipWith(it)
@@ -170,6 +171,7 @@ object DiplomacyAutomation {
     }
 
     internal fun offerOpenBorders(civInfo: Civilization) {
+        if (!com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, Constants.openBorders)) return // a ruler's standing order
         if (!civInfo.hasUnique(UniqueType.EnablesOpenBorders)) return
 
         val civsThatWeCanOpenBordersWith = civInfo.getKnownCivs().filter {
@@ -247,6 +249,7 @@ object DiplomacyAutomation {
     }
 
     internal fun offerResearchAgreement(civInfo: Civilization) {
+        if (!com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, Constants.researchAgreement)) return // a ruler's standing order
         if (!civInfo.diplomacyFunctions.canSignResearchAgreement()) return // don't waste your time
         
         val civsThatWeCanSignResearchAgreementWith = civInfo.getKnownCivs().filter {
@@ -270,6 +273,7 @@ object DiplomacyAutomation {
     }
 
     internal fun offerDefensivePact(civInfo: Civilization) {
+        if (!com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, Constants.defensivePact)) return // a ruler's standing order
         if (!civInfo.diplomacyFunctions.canSignDefensivePact()) return // don't waste your time
 
         val civsThatWeCanSignDefensivePactWith = civInfo.getKnownCivs().filter {

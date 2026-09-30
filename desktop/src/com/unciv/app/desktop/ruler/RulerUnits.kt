@@ -112,6 +112,12 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             orders.remove(unit.id)
             return true
         }
+        // A garrison order does not turn a stronger soldier out of the city for a weaker one: the order is dropped, the stronger stays
+        if (target != null && unit.getTile() != target && order.action == "garrison") target.militaryUnit?.takeIf { it.civ == civ && strengthOf(it) > strengthOf(unit) }?.let { holder ->
+            log(civ, "Our ${unit.name} #${unit.id} was to garrison ${target.getCity()?.name}, but our ${holder.name} #${holder.id} holding it is the stronger, so it stays and the order is dropped.")
+            drop(unit)
+            return false
+        }
         if (target != null && unit.getTile() != target && order.action == "garrison"
             && target.militaryUnit?.civ == civ && unit.movement.canUnitSwapTo(target)) {
             val relieved = target.militaryUnit!!
@@ -230,6 +236,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         try { return block() } finally { unit.cache.canEnterCityStates = false; unit.movement.clearPathfindingCache() }
     }
 
+    private fun strengthOf(unit: MapUnit) = unit.baseUnit.strength.coerceAtLeast(unit.baseUnit.rangedStrength)
+
     private fun recipientOf(civ: Civilization, order: Order) = civ.gameInfo.civilizations.firstOrNull { it.civName == order.to }
 
     /** A gift order re-checked each turn, as a settler's site is: war may have broken out or their borders moved on the way.
@@ -330,7 +338,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         }
         val willSwap = action == "garrison" && target.militaryUnit?.civ == civ
         val occupant = (if (unit.isCivilian()) target.civilianUnit else target.militaryUnit)?.takeIf { it != unit }
-        if (occupant != null && !willSwap) throw IllegalArgumentException(
+        val civilianSwap = unit.isCivilian() && occupant?.civ == civ // a Great Person bound for a city tile our Worker holds: they change places on arrival
+        if (occupant != null && !willSwap && !civilianSwap) throw IllegalArgumentException(
             "${where(civ, target)} is already held by ${if (occupant.civ == civ) "our" else occupant.civ.civName + "'s"} ${occupant.name} #${occupant.id}; two ${if (unit.isCivilian()) "civilians" else "soldiers"} cannot share a tile. " +
             (if (occupant.civ == civ) "Use garrison to swap places with it, pick a tile beside it, or leave it be - the place is already covered." else "Pick another tile."))
         // Orders are given between turns, when a unit has usually spent its movement - and Unciv finds no path at all for a unit with none left

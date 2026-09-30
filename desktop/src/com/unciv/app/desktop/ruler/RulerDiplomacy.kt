@@ -31,9 +31,12 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
     val pending = ArrayList<Triple<String, String, String>>()
     /** Offers that left a desk by another hand than its owner's answer - withdrawn, replaced, lapsed - keyed "desk<from": (turn, what became of it).
      *  An advisor answering from a briefing read before it left (another court's look-in runs beside its own) is told what happened, not "nothing waits" */
-    private val gone = HashMap<String, Pair<Int, String>>()
-    private fun noteGone(desk: Civilization, from: Civilization, what: String) { gone["${desk.civName}<${from.civName}"] = desk.gameInfo.turns to what }
-    private fun goneFrom(desk: Civilization, from: Civilization) = gone["${desk.civName}<${from.civName}"]?.takeIf { desk.gameInfo.turns - it.first <= 2 }?.second
+    private val gone = HashMap<String, Triple<Int, String, String>>()
+    private fun noteGone(desk: Civilization, from: Civilization, terms: String, what: String) { gone["${desk.civName}<${from.civName}"] = Triple(desk.gameInfo.turns, terms, what) }
+    /** What became of the offer that left this desk lately - only if [label], when given, names it */
+    private fun goneFrom(desk: Civilization, from: Civilization, label: String? = null) = gone["${desk.civName}<${from.civName}"]
+        ?.takeIf { desk.gameInfo.turns - it.first <= 2 && (label == null || it.second.lowercase().contains(label.trim().lowercase().replace(Regex(" for \\d+ turns"), ""))) }
+        ?.let { "${from.civName}'s offer (${it.second}) ${it.third}" }
     private fun isLuxury(game: GameInfo, name: String) = game.ruleset.tileResources[name]?.resourceType?.name == "Luxury"
 
     /** A deal in force gives [civ] these luxuries: its other requests still asking for any of them are withdrawn, for a second supply adds nothing and would be paid for twice */
@@ -47,7 +50,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
             for (request in twice) {
                 other.tradeRequests.remove(request)
                 val what = request.trade.ourOffers.filter { it.name in luxuries }.joinToString { it.name }
-                noteGone(other, civ, "${civ.civName} withdrew it: $what now comes to them by another deal")
+                noteGone(other, civ, request.trade.reverse().brief(game), "was withdrawn by ${civ.civName}: $what now comes to them by another deal")
                 settle(request, other, "duplicate")
             }
         }
@@ -58,7 +61,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         TradeOfferType.WarDeclaration -> "a declaration of war on ${game.civilizations.firstOrNull { it.civID == name }?.civName ?: name}"
         TradeOfferType.Introduction -> "an introduction to ${game.civilizations.firstOrNull { it.civID == name }?.civName ?: name}"
         TradeOfferType.City -> "the city of ${game.getCities().firstOrNull { it.id == name }?.name ?: name}"
-        else -> name + (if (type.numberType != TradeOfferType.TradeTypeNumberType.None) " x$amount" else "") + (if (duration > 0) " for $duration turns" else "")
+        else -> name + (if (type.numberType != TradeOfferType.TradeTypeNumberType.None) " x$amount" else if (name == Constants.researchAgreement && amount > 0) " ($amount gold from each side)" else "") + (if (duration > 0) " for $duration turns" else "")
     }
     fun Trade.brief(game: GameInfo) = "we give ${ourOffers.joinToString { it.brief(game) }.ifEmpty { "nothing" }} for ${theirOffers.joinToString { it.brief(game) }.ifEmpty { "nothing" }}"
 
@@ -145,7 +148,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
                 val offer = available.firstOrNull { it.name.equals(item, ignoreCase = true) && it.amount > 0 }
                     ?: throw IllegalArgumentException(inForce(civ, other, item) ?: "$side cannot offer '$item' right now; tradeable: ${available.filter { it.amount > 0 && it.type !in hiddenOffers }.joinToString { it.name + " x" + it.amount }}")
                 val copy = offer.copy()
-                val wanted = if (entry.has("amount")) entry.getInt("amount") else if (offer.type.numberType == TradeOfferType.TradeTypeNumberType.Gold) throw IllegalArgumentException("'$item' needs an amount") else 1
+                // A treaty runs a fixed length: an amount given for one (the duration, usually) is ignored
+                val wanted = if (offer.type.numberType == TradeOfferType.TradeTypeNumberType.None) offer.amount else if (entry.has("amount")) entry.getInt("amount") else if (offer.type.numberType == TradeOfferType.TradeTypeNumberType.Gold) throw IllegalArgumentException("'$item' needs an amount") else 1
                 if (wanted < 1 || wanted > offer.amount) throw IllegalArgumentException("$side can offer at most ${offer.amount} of '$item', not $wanted")
                 copy.amount = wanted
                 into.add(copy)
@@ -177,7 +181,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         val asked = trade.theirOffers.filterNot(::isGold).map { it.name }.toSet().ifEmpty { trade.theirOffers.map { it.name }.toSet() }
         val superseded = other.tradeRequests.filter { request -> request.requestingCiv == civ.civID && !isPeace(request) && request.trade.ourOffers.filterNot(::isGold).ifEmpty { request.trade.ourOffers }.any { it.name in asked } }
         other.tradeRequests.removeAll(superseded.toSet())
-        if (superseded.isNotEmpty()) noteGone(other, civ, "${civ.civName} replaced it with a newer offer for the same goods")
+        for (old in superseded) noteGone(other, civ, old.trade.brief(game), "was replaced by ${civ.civName} with a newer offer for the same goods")
         // a withdrawn offer cannot be "accepted" later - and only the withdrawn ones go, another offer to the same power for other goods still waits
         for (old in superseded) pending.remove(Triple(civ.civName, other.civName, old.trade.reverse().brief(game)))
         other.tradeRequests.add(TradeRequest(civ.civID, trade.reverse()))
@@ -335,7 +339,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
                 }
             if (announce && turn - since >= PEACE_OFFER_WAITS) {
                 civ.tradeRequests.remove(request); request.decline(civ); dealOfferedOn.remove(key)
-                noteGone(civ, other, "it went unanswered and lapsed as refused")
+                noteGone(civ, other, terms, "went unanswered and lapsed as refused")
                 settle(request, civ, "lapsed")
                 other.addNotification("[${civ.civName}] has denied your trade request", com.unciv.logic.civilization.NotificationCategory.Trade, civ.civName, com.unciv.logic.civilization.NotificationIcon.Trade)
                 log(civ, "${other.civName}'s offer ($terms) went unanswered and lapsed as refused.")
@@ -353,14 +357,16 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         val game = civ.gameInfo
         val waiting = civ.tradeRequests.filter { it.requestingCiv == other.civID && !isPeace(it) }
         if (waiting.isEmpty()) {
-            goneFrom(civ, other)?.let { return "Nothing to answer: ${other.civName}'s offer has left our desk - $it." }
+            goneFrom(civ, other, terms)?.let { return "Nothing to answer: $it." }
             throw IllegalArgumentException("No deal from $name is waiting (peace is answered with the peace order)")
         }
         // Matched as listed, or with the durations left off - the one part of the terms an advisor tends to drop when copying them
         val loosely = { text: String -> text.replace(Regex(" for \\d+ turns"), "").replace(Regex("\\s+"), " ").trim().lowercase() }
         val request = when {
+            // Matched as listed, with the durations left off, or by a short label ("Defensive Pact", "Spices") that names exactly one of the offers waiting
             terms != null -> waiting.firstOrNull { it.trade.brief(game).equals(terms.trim(), ignoreCase = true) } ?: waiting.singleOrNull { loosely(it.trade.brief(game)) == loosely(terms) }
-                ?: throw IllegalArgumentException("No offer from $name reads '$terms'; waiting: ${waiting.joinToString("; ") { it.trade.brief(game) }}" + (goneFrom(civ, other)?.let { ". An earlier offer of theirs left the desk: $it" } ?: ""))
+                ?: waiting.singleOrNull { loosely(it.trade.brief(game)).contains(loosely(terms)) }
+                ?: throw IllegalArgumentException("No offer from $name reads '$terms'; waiting: ${waiting.joinToString("; ") { it.trade.brief(game) }}" + (goneFrom(civ, other, terms)?.let { ". Lately gone from the desk: $it" } ?: ""))
             waiting.size == 1 -> waiting.single()
             else -> throw IllegalArgumentException("$name has laid ${waiting.size} offers before us; say which with terms, exactly as listed: ${waiting.joinToString("; ") { it.trade.brief(game) }}")
         }
@@ -372,7 +378,12 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
                 request.trade.ourOffers.firstOrNull { it.type == TradeOfferType.WarDeclaration }?.let {
                     throw IllegalArgumentException("${other.civName}'s offer ($summary) would have us declare war on ${it.brief(game).substringAfter("war on ")}: war is declared only by the declareWar order, never by accepting a deal. Refuse this offer; if you mean to fight, declare the war yourself.") }
                 // Checked before anything is touched: an offer that cannot be honoured stays on the desk, to be refused or to lapse
-                if (!TradeEvaluation().isTradeValid(request.trade, civ, other)) throw IllegalArgumentException("${other.civName}'s offer ($summary) can no longer be honoured - a resource or the treasury has changed. It stays on the desk: refuse it, or let it lapse")
+                if (!TradeEvaluation().isTradeValid(request.trade, civ, other)) {
+                    val logic = TradeLogic(civ, other)
+                    val short = request.trade.ourOffers.filter { offer -> logic.ourAvailableOffers.none { it.name == offer.name && it.amount >= offer.amount } }.map { "our ${it.brief(game)}" } +
+                        request.trade.theirOffers.filter { offer -> logic.theirAvailableOffers.none { it.name == offer.name && it.amount >= offer.amount } }.map { "their ${it.brief(game)}" }
+                    throw IllegalArgumentException("${other.civName}'s offer ($summary) can no longer be honoured: ${short.ifEmpty { listOf("a resource or the treasury") }.joinToString()} ${if (short.size == 1) "is" else "are"} no longer there to give. It stays on the desk: refuse it, or let it lapse")
+                }
                 civ.tradeRequests.remove(request); dealOfferedOn.remove(key)
                 settle(request, civ, "accepted")
                 val logic = TradeLogic(civ, other)
@@ -382,7 +393,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
                 log(civ, "By your order: we accepted ${other.civName}'s offer ($summary). The deal is in force.")
                 // Our own proposal of the same swap, still on their desk, would be accepted too and the deal made twice
                 val mirror = other.tradeRequests.firstOrNull { it.requestingCiv == civ.civID && !isPeace(it) && sameSwap(it.trade.reverse(), request.trade) }
-                if (mirror != null) { other.tradeRequests.remove(mirror); noteGone(other, civ, "${civ.civName} accepted our own proposal of the same swap instead, and the deal is in force"); settle(mirror, other, "withdrawn") }
+                if (mirror != null) { other.tradeRequests.remove(mirror); noteGone(other, civ, mirror.trade.brief(game), "was withdrawn: ${civ.civName} accepted our own proposal of the same swap instead, and the deal is in force"); settle(mirror, other, "withdrawn") }
                 "Accepted ${other.civName}'s offer: $summary" + (if (mirror != null) " (our own proposal of the same swap to them is withdrawn)" else "")
             }
             "refuse" -> {

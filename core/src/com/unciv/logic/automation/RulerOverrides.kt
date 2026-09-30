@@ -35,6 +35,14 @@ object RulerOverrides {
     /** civIDs whose officials may not give gold to city-states on their own (a standing order of the ruler) */
     val noGifts: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
+    /** Kinds of deal a ruled civ's officials may not propose on their own (a standing order of the ruler): "Open Borders", "Research Agreement",
+     *  "Defensive Pact", "Declaration of Friendship", "luxuries", or "all" */
+    val noProposals = ConcurrentHashMap<String, Set<String>>()
+    fun mayPropose(civ: com.unciv.logic.civilization.Civilization, kind: String) = noProposals[civ.civID]?.let { "all" in it || kind in it } != true
+
+    /** Called with (civ, unit, why) when a ruled civ's automation disbands a unit for a reason of its own, before it goes */
+    @Volatile var unitDisbanded: ((com.unciv.logic.civilization.Civilization, MapUnit, String) -> Unit)? = null
+
     /** civIDs that may raise no world wonder at all (a game setting: e.g. only the rulers' realms compete for them) */
     val noWonders: MutableSet<String> = ConcurrentHashMap.newKeySet()
 

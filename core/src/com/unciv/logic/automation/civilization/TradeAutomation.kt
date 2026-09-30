@@ -182,6 +182,7 @@ object TradeAutomation {
 
 
      fun exchangeLuxuries(civInfo: Civilization) {
+        if (!RulerOverrides.mayPropose(civInfo, "luxuries")) return // a ruler's standing order
         val knownCivs = civInfo.getKnownCivs()
 
         // Player trades are... more complicated.
