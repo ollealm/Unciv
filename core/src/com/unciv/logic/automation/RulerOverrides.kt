@@ -32,6 +32,18 @@ object RulerOverrides {
     class Posture(val warAim: String? = null, val stance: String = "attack", val reserve: Int = 0)
     val postures = ConcurrentHashMap<String, Posture>()
 
+    /** civID -> when a ruled civ's officials may re-arm units with gold on their own (a standing order of the ruler): "always", "war" (the default), "never" */
+    val rearming = ConcurrentHashMap<String, String>()
+    /** May the officials re-arm this civ's units now? Under "war", only while at war with a major power - city-states and barbarians do not count. Unruled civs always may */
+    fun mayRearm(civ: Civilization): Boolean = when (rearming[civ.civID] ?: if (civ.civID in ruledCivs) "war" else "always") {
+        "always" -> true
+        "never" -> false
+        else -> civ.getKnownCivs().any { it.isMajorCiv() && civ.isAtWarWith(it) }
+    }
+
+    /** Called for a ruled civ before its officials spend any gold: the ruler's own purchases due this turn come first */
+    @Volatile var rulersFirst: ((Civilization) -> Unit)? = null
+
     /** civIDs whose officials may not give gold to city-states on their own (a standing order of the ruler) */
     val noGifts: MutableSet<String> = ConcurrentHashMap.newKeySet()
 

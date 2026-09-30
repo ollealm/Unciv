@@ -7,8 +7,10 @@ import com.unciv.logic.map.HexMath
 import com.unciv.logic.map.mapunit.MapUnit
 import com.unciv.logic.map.tile.Tile
 import com.unciv.models.UnitActionType
+import com.unciv.models.UpgradeUnitAction
 import com.unciv.models.ruleset.unique.UniqueType
 import com.unciv.ui.screens.worldscreen.unit.actions.UnitActions
+import com.unciv.ui.screens.worldscreen.unit.actions.UnitActionsUpgrade
 import kotlin.math.atan2
 import kotlin.math.roundToInt
 
@@ -32,13 +34,16 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     /** Units given away by order since the host last reckoned its losses: gone from our rolls, but neither lost nor disbanded */
     val given = HashSet<Int>()
 
+    /** Units ordered re-armed that had spent their movement: re-armed at the start of our next turn, when they have it again (unit id -> the reserve then in force) */
+    private val rearmNext = HashMap<Int, Int>()
+
     /** Forget everything of one game */
-    fun reset() { orders.clear(); released.clear(); given.clear(); landLeft.clear(); stillSince.clear() }
+    fun reset() { orders.clear(); released.clear(); given.clear(); rearmNext.clear(); landLeft.clear(); stillSince.clear() }
 
     /** Orders for units that no longer exist (a soldier killed on the march; re-arming keeps a unit's number, so its order stays): forgotten, so a dead man never counts as "on the way" */
     fun forgetTheDead(game: com.unciv.logic.GameInfo) {
         val alive = game.civilizations.asSequence().flatMap { it.units.getCivUnits() }.map { it.id }.toHashSet()
-        orders.keys.retainAll(alive); released.retainAll(alive)
+        orders.keys.retainAll(alive); released.retainAll(alive); rearmNext.keys.retainAll(alive)
     }
 
     /** A hold that only ever meant "a Great Person awaits orders" must not bind a soldier: the old name check froze Great War Infantry and Bombers,
@@ -62,11 +67,13 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     /** The rest of what a restart would lose: which Great People were handed to the officials, and how long each unit has stood where it stands */
     fun stateToMap() = mapOf(
         "released" to released.toList(),
+        "rearmNext" to rearmNext.mapKeys { it.key.toString() },
         "stillSince" to stillSince.mapKeys { it.key.toString() }.mapValues { mapOf("spot" to it.value.first, "turn" to it.value.second) })
 
     fun loadState(json: JsonValue?) {
-        released.clear(); stillSince.clear()
+        released.clear(); stillSince.clear(); rearmNext.clear()
         json?.get("released")?.forEach { released += it.asInt() }
+        json?.get("rearmNext")?.forEach { rearmNext[it.name.toInt()] = it.asInt() }
         json?.get("stillSince")?.forEach { stillSince[it.name.toInt()] = Pair(it.getString("spot"), it.getInt("turn")) }
     }
 
@@ -301,6 +308,59 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     private fun drop(unit: MapUnit) {
         orders.remove(unit.id)
         if (unit.isGreatPerson()) released += unit.id
+    }
+
+    /** At the start of our turn, before the officials spend a coin: the re-armings ordered for units that had marched. Re-arming keeps a unit's number */
+    fun rearmDue(civ: Civilization) {
+        for ((id, reserve) in rearmNext.filterKeys { civ.units.getUnitById(it) != null }) {
+            rearmNext.remove(id)
+            val (ok, told) = rearm(civ, id, reserve, deferIfSpent = false)
+            if (!ok) log(civ, "The re-arming you ordered could not be done: $told.")
+        }
+    }
+
+    /** Our soldiers that newer arms we know could replace (whether or not we can pay or have the resources now) */
+    fun rearmable(civ: Civilization) = civ.units.getCivUnits().filter { unit -> unit.isMilitary() && UnitActionsUpgrade.getUpgradeActions(unit).any() }.toList()
+
+    /** Re-arm one of our units by the ruler's hand, paid from the treasury above [reserve]: (done, what to tell). A unit that has spent its movement
+     *  is re-armed at the start of our next turn instead, as a player's would be */
+    fun rearm(civ: Civilization, id: Int, reserve: Int, deferIfSpent: Boolean = true): Pair<Boolean, String> {
+        fun a(name: String) = (if (name.first().lowercaseChar() in "aeiou") "an " else "a ") + name
+        val unit = civ.units.getUnitById(id) ?: return Pair(false, "No unit of ours is #$id - see the briefing's unit list")
+        val label = "${unit.name} #$id"
+        val ruleset = civ.gameInfo.ruleset
+        val options = UnitActionsUpgrade.getUpgradeActions(unit).filterIsInstance<UpgradeUnitAction>().toList()
+        if (options.isEmpty()) {
+            val next = unit.baseUnit.getUpgradeUnits(unit.cache.state).mapNotNull { ruleset.units[it] }.map { civ.getEquivalentUnit(it) }.toList()
+            return Pair(false, "$label cannot be re-armed: " + when {
+                next.isEmpty() -> "there are no newer arms for ${a(unit.name)}"
+                unit.getTile().getOwner() != civ -> "it stands outside our borders, and can be re-armed only on our own land"
+                else -> next.first().let { to -> "we do not yet know how to make ${a(to.name)}" + (to.requiredTech?.let { " (it needs $it)" } ?: "") }
+            })
+        }
+        // As the officials choose: the cheapest of the newer arms that can be had
+        val usable = options.filter { unit.upgrade.canUpgrade(it.unitToUpgradeTo) }
+        if (usable.isEmpty()) {
+            val to = options.first().unitToUpgradeTo
+            val lacking = to.getResourceRequirementsPerTurn(unit.cache.state).keys.filter { civ.getResourceAmount(it) < 1 }
+            return Pair(false, "$label cannot be re-armed as ${a(to.name)}: it needs ${lacking.ifEmpty { to.getResourceRequirementsPerTurn(unit.cache.state).keys.toList() }.joinToString(" and ")}, which we lack")
+        }
+        val choice = usable.minBy { it.goldCostOfUpgrade }
+        val to = choice.unitToUpgradeTo.name
+        val cost = choice.goldCostOfUpgrade
+        if (civ.gold - reserve < cost) return Pair(false, "$label cannot be re-armed as ${a(to)}: it costs $cost gold, and only ${(civ.gold - reserve).coerceAtLeast(0)} lies above the reserve")
+        if (unit.isEmbarked()) return Pair(false, "$label is at sea, embarked; it can be re-armed once ashore on our land")
+        if (!unit.hasMovement()) {
+            if (!deferIfSpent) return Pair(false, "$label has no movement left to be re-armed")
+            rearmNext[id] = reserve
+            return Pair(true, "$label has marched this turn: it is re-armed as ${a(to)} at the start of our next turn, for about $cost gold if the treasury still allows")
+        }
+        val action = choice.action ?: return Pair(false, "$label cannot be re-armed as ${a(to)} here and now")
+        action.invoke()
+        val now = civ.units.getUnitById(id)
+        if (now == null || now.name == unit.name) return Pair(false, "$label could not be re-armed as ${a(to)}: the new arms found no room to stand")
+        log(civ, "By your order: re-armed our ${unit.name} #$id as $to for $cost gold.")
+        return Pair(true, "$label re-armed as $to for $cost gold")
     }
 
     /** Give an order from the API: {unit: id, action, x?, y?, city?} */

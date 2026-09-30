@@ -18,6 +18,7 @@ object UseGoldAutomation {
 
     /** allow AI to spend money to purchase city-state friendship, buildings & unit */
     fun useGold(civ: Civilization) {
+        if (civ.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) com.unciv.logic.automation.RulerOverrides.rulersFirst?.invoke(civ)
         // A ruler's treasury reserve is a floor, not a gate: the officials only ever see what lies above it
         val reserve = com.unciv.logic.automation.RulerOverrides.goldReserve[civ.civID] ?: 0
         if (reserve > 0 && civ.gold <= reserve) return
@@ -33,7 +34,8 @@ object UseGoldAutomation {
     }
 
     private fun spendGold(civ: Civilization) {
-        for (unit in civ.units.getCivUnits().toList()) {
+        // A ruler's standing order says when the officials re-arm on their own (by default only in war)
+        if (com.unciv.logic.automation.RulerOverrides.mayRearm(civ)) for (unit in civ.units.getCivUnits().toList()) {
             val name = unit.name
             val tile = unit.getTile()
             itemised(civ, { "re-arming a $name as ${(if (unit.isCivilian()) tile.civilianUnit else tile.militaryUnit)?.name ?: "something newer"}" }) { UnitAutomation.tryUpgradeUnit(unit) }

@@ -67,6 +67,8 @@ object RulerHost {
         var goldReserve: Int? = null
         /** The officials may not give gold to city-states on their own */
         var noGifts = false
+        /** When the officials re-arm units with gold on their own: always, war (only while at war with a major power), never */
+        var officialsRearm = "war"
         /** Keep a soldier inside every city: when one stands empty, the nearest free soldier is sent in under a garrison order */
         var garrisonEveryCity = false
         /** The posture of arms: warAim (an enemy city the host converges on), stance attack|defend|raid, reserve (soldiers kept home) */
@@ -76,6 +78,7 @@ object RulerHost {
         fun toMap(civ: Civilization? = null) = mapOf(
             "goldReserve" to goldReserve,
             "noGifts" to noGifts,
+            "officialsRearm" to officialsRearm,
             "garrisonEveryCity" to garrisonEveryCity,
             "posture" to mapOf("warAim" to warAim, "stance" to stance, "reserve" to reserve),
             "personality" to personality,
@@ -106,6 +109,7 @@ object RulerHost {
         RulerOverrides.forbidden = { civ, construction -> civ.civID in RulerOverrides.ruledCivs && isForbidden(civ, construction) }
         RulerOverrides.spendingNoted = { civ, gold, what -> if (civ.civID in RulerOverrides.ruledCivs) spending.getOrPut(civ.civName) { ArrayList() } += Pair(gold, what) }
         RulerOverrides.unitHandler = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.handle(unit) }
+        RulerOverrides.rulersFirst = { civ -> units.rearmDue(civ) }
         RulerOverrides.underOrders = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.underOrders(unit) }
         RulerOverrides.tradeAnswered = { request, receiver, outcome -> diplomacy.settle(request, receiver, outcome) }
         RulerOverrides.unitDisbanded = { civ, unit, why -> if (civ.civID in RulerOverrides.ruledCivs) disbandedFor.getOrPut(civ.civName) { HashMap() }[unit.id] = why }
@@ -297,7 +301,7 @@ object RulerHost {
         orders.clear(); publicEvents.clear(); chancery.clear(); spending.clear(); warningsWoken.clear(); losses.clear(); ownWars.clear(); notificationsSeen.clear()
         units.reset(); diplomacy.reset(); trail.clear(); ages.clear()
         worldAtLastAdvance = null
-        RulerOverrides.lockedCities.clear(); RulerOverrides.focusedCities.clear(); RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.noProposals.clear(); RulerOverrides.noGifts.clear(); RulerOverrides.noWonders.clear()
+        RulerOverrides.lockedCities.clear(); RulerOverrides.focusedCities.clear(); RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.noProposals.clear(); RulerOverrides.noGifts.clear(); RulerOverrides.rearming.clear(); RulerOverrides.noWonders.clear()
     }
 
     /** Written to a sibling file and moved into place, so a crash mid-write never leaves a half file behind */
@@ -377,6 +381,10 @@ object RulerHost {
         }
         json.get("goldReserve")?.let { goldReserve = if (it.isNull) null else it.asInt().coerceAtLeast(0) }
         json.get("noGifts")?.let { noGifts = it.asBoolean() }
+        json.get("officialsRearm")?.takeUnless { it.isNull }?.asString()?.trim()?.lowercase()?.let { mode ->
+            if (mode !in listOf("always", "war", "never")) throw ApiError(400, "officialsRearm takes always, war or never; not '$mode'")
+            officialsRearm = mode
+        }
         json.get("garrisonEveryCity")?.takeUnless { it.isNull }?.let { garrisonEveryCity = it.asBoolean() }
         json.get("posture")?.takeUnless { it.isNull }?.let { posture ->
             if (posture.has("warAim")) warAim = posture.get("warAim").takeUnless { it.isNull }?.asString()
@@ -392,6 +400,7 @@ object RulerHost {
         RulerOverrides.personalities[civ.civID] = personality
         standing.goldReserve?.let { RulerOverrides.goldReserve[civ.civID] = it } ?: RulerOverrides.goldReserve.remove(civ.civID)
         if (standing.noGifts) RulerOverrides.noGifts += civ.civID else RulerOverrides.noGifts -= civ.civID
+        RulerOverrides.rearming[civ.civID] = standing.officialsRearm
         if (standing.neverPropose.isNotEmpty()) RulerOverrides.noProposals[civ.civID] = standing.neverPropose.toSet() else RulerOverrides.noProposals.remove(civ.civID)
     }
 
@@ -582,6 +591,17 @@ object RulerHost {
             val note = if (holder != null && bought != null) " ${item} #${bought.id} stands beside ${city.name}, which our ${holder.name} #${holder.id} still holds: order it to garrison ${city.name} to swap them, or the officials use it as they see fit." else ""
             log(civ, "By your order: bought $item in ${city.name} for $cost gold.$note")
             "Bought $item in ${city.name} for $cost gold (${civ.gold} left).$note"
+        }
+        // Re-arming by hand: named units, or "all" - each told apart, done or not and why
+        json.get("rearm")?.let { list ->
+            val entries = list.asStringArray().map { it.trim() }
+            entries.filter { !it.equals("all", ignoreCase = true) && it.removePrefix("#").toIntOrNull() == null }.forEach { failed += "rearm takes unit numbers or \"all\"; not '$it'" }
+            val wanted = entries.flatMap { entry -> if (entry.equals("all", ignoreCase = true)) units.rearmable(civ).map { it.id } else listOfNotNull(entry.removePrefix("#").toIntOrNull()) }.distinct()
+            for (id in wanted) {
+                val result = units.rearm(civ, id, standing.goldReserve ?: 0)
+                if (result.first) done += result.second else failed += result.second
+            }
+            if (wanted.isEmpty() && entries.any { it.equals("all", ignoreCase = true) }) done += "No soldier of ours can be re-armed with newer arms we know."
         }
         // Unit orders, diplomacy
         tryEach(json.get("units")) { units.give(civ, it) }
@@ -1199,7 +1219,13 @@ object RulerHost {
         fun upgradable(unit: com.unciv.logic.map.mapunit.MapUnit, ignoreResources: Boolean) = unit.baseUnit.getUpgradeUnits(unit.cache.state).any { name -> civ.gameInfo.ruleset.units[name]?.let { to -> unit.upgrade.canUpgrade(to, ignoreRequirements = false, ignoreResources = ignoreResources) } == true }
         val oldArms = civ.units.getCivUnits().filter { it.isMilitary() && it.baseUnit.isLandUnit && upgradable(it, true) }.toList()
         val (outdated, waiting) = oldArms.partition { upgradable(it, false) }
-        if (outdated.size >= 3) warnings += "${outdated.size} soldiers carry arms of an earlier age (${outdated.groupingBy { it.name }.eachCount().entries.joinToString { "${it.value} ${it.key}" }}): they cost upkeep and would not hold a wall. Gold above your reserve lets the officials re-arm them; or disband the worst."
+        val rearmMode = orders[civ.civName]?.officialsRearm ?: "war"
+        if (outdated.size >= 3) warnings += "${outdated.size} soldiers carry arms of an earlier age (${outdated.groupingBy { it.name }.eachCount().entries.joinToString { "${it.value} ${it.key}" }}): they cost upkeep and would not hold a wall. " + when (rearmMode) {
+            "always" -> "Gold above your reserve lets the officials re-arm them; or disband the worst."
+            "never" -> "The officials re-arm nothing on their own: order rearm to do it, or disband the worst."
+            else -> if (civ.getKnownCivs().any { it.isMajorCiv() && civ.isAtWarWith(it) }) "We are at war, so gold above your reserve lets the officials re-arm them; or disband the worst."
+                else "The officials re-arm only in war: order rearm to do it now, or disband the worst."
+        }
         if (waiting.size >= 3) warnings += "${waiting.size} soldiers (${waiting.groupingBy { it.name }.eachCount().entries.joinToString { "${it.value} ${it.key}" }}) carry old arms that gold alone cannot replace: the newer arms need ${waiting.flatMap { it.baseUnit.getUpgradeUnits(it.cache.state).mapNotNull { name -> civ.gameInfo.ruleset.units[name]?.requiredResource } }.distinct().joinToString(" or ")}, which we lack."
         if (!units.hasLandForACity(civ)) for (unit in civ.units.getCivUnits()) if (unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.FoundCity))
             warnings += "${unit.name} #${unit.id} has nowhere to go: no land is left for a new city on our shores. It costs upkeep - disband it, or keep it only if you mean to take it overseas."
