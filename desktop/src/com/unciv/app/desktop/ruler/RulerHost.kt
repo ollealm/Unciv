@@ -404,6 +404,24 @@ object RulerHost {
         if (standing.neverPropose.isNotEmpty()) RulerOverrides.noProposals[civ.civID] = standing.neverPropose.toSet() else RulerOverrides.noProposals.remove(civ.civID)
     }
 
+    /** Which of the ruler's weights most favoured an item the officials queued on their own, as their scoring leans: a building by the stat its
+     *  score rests on most (food counted threefold, production and gold twofold, then each stat scaled by its weight, as the automation does),
+     *  a soldier by Military, a settler by Expansion. Approximate by design; null unless the weight that bore on it was set above 5 */
+    private fun favouredBy(civ: Civilization, city: City, item: String): String? {
+        val weights = orders[civ.civName]?.personality ?: return null
+        fun ifRaised(value: PersonalityValue) = value.name.takeIf { (weights[value.name] ?: 5f) > 5f }
+        val ruleset = civ.gameInfo.ruleset
+        ruleset.units[item]?.let { unit ->
+            return when { unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.FoundCity) -> ifRaised(PersonalityValue.Expansion); unit.isMilitary -> ifRaised(PersonalityValue.Military); else -> null }
+        }
+        val building = ruleset.buildings[item] ?: return null
+        val stats = building.getStats(city)
+        val lean = Stat.entries.map { stat -> stat to stats[stat] * (when (stat) { Stat.Food -> 3f; Stat.Production, Stat.Gold -> 2f; else -> 1f }) * (weights[PersonalityValue[stat].name] ?: 5f) / 5f }
+            .filter { it.second > 0f }.maxByOrNull { it.second }
+        return if (lean != null) ifRaised(PersonalityValue[lean.first])
+            else if (building.hasUnique(com.unciv.models.ruleset.unique.UniqueType.UnitStartingExperience)) ifRaised(PersonalityValue.Military) else null
+    }
+
     /** "Railroad" -> Railroads: the names agents reach for are usually one slip away from the real one */
     /** The one thing a slightly wrong name can only mean (Railroad -> Railroads, Settlers -> Settler, Great Library -> The Great Library), or null */
     private fun onlyMatch(name: String, candidates: Collection<String>): String? {
@@ -544,6 +562,7 @@ object RulerHost {
             city.cityConstructions.currentConstructionIsUserSet = true
             RulerOverrides.lockedCities += city.id
             val now = "${city.name} queue is now: ${city.cityConstructions.constructionQueue.joinToString()}"
+            log(civ, "By your order: ${city.name}'s queue is now ${city.cityConstructions.constructionQueue.joinToString()}.")
             if (leftOut.isNotEmpty()) throw ApiError(400, "${city.name} cannot build ${leftOut.joinToString("; ")} - left out; the rest was queued as ordered. $now")
             now
         }
@@ -558,6 +577,7 @@ object RulerHost {
             city.cityConstructions.addToQueue(construction, addToTop = true)
             city.cityConstructions.currentConstructionIsUserSet = true
             RulerOverrides.lockedCities += city.id
+            log(civ, "By your order: ${city.name} builds $item first; its queue is now ${city.cityConstructions.constructionQueue.joinToString()}.")
             "${city.name} queue is now: ${city.cityConstructions.constructionQueue.joinToString()}"
         }
         // Buy outright with gold
@@ -778,7 +798,7 @@ object RulerHost {
                     else "The officials dropped $item from ${city.name}'s queue, replacing it with their own choice.")
             }
             for (item in now) if (item !in was && !isPerpetual(item))
-                log(civ, "The officials queued $item in ${city.name}.")
+                log(civ, "The officials queued $item in ${city.name}" + (favouredBy(civ, city, item)?.let { ", favoured by your $it weight" } ?: "") + ".")
         }
         for (city in civ.cities) if (city.name !in before.queues) log(civ, if (city.foundingCivObject == civ) "Founded ${city.name}."
             else "We took ${city.name}${city.foundingCivObject?.let { " from ${it.civName}" } ?: ""}: it is ours, held as a puppet (it builds and pays for itself, gives no orders) until you annex it - or raze it, or spare it; a cities order does each.")
