@@ -7,6 +7,7 @@ import com.unciv.logic.automation.RulerOverrides
 import com.unciv.logic.civilization.AlertType
 import com.unciv.logic.civilization.Civilization
 import com.unciv.logic.civilization.PopupAlert
+import com.unciv.logic.civilization.diplomacy.Demand
 import com.unciv.logic.civilization.diplomacy.DiplomacyFlags
 import com.unciv.logic.civilization.diplomacy.DiplomaticStatus
 import com.unciv.logic.trade.Trade
@@ -473,15 +474,82 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
     /** Terms saved as "we give A for B" before both sides were named: "for" otherwise only ever begins a duration, so the first other "for" is the divide */
     private fun reworded(saved: String) = Regex("^(.*?we give .*?) for (?!\\d+ turns?\\b)(.*)$").find(saved)?.takeIf { "; they give " !in saved }?.let { "${it.groupValues[1]}; they give ${it.groupValues[2]}" } ?: saved
 
+    /** turn on which each demand on our desk was first seen, keyed "us<them: kind" */
+    private val demandOfferedOn = HashMap<String, Int>()
+
+    /** What a demand asks of us, in plain words */
+    private fun asked(demand: Demand) = when (demand) {
+        Demand.DontSpyOnUs -> "stop spying on them"
+        Demand.DoNotSpreadReligion -> "stop spreading our religion in their cities"
+        Demand.DoNotSettleNearUs -> "stop settling cities near them"
+        Demand.DoNotAttackUs -> "keep our troops from their borders - that is, promise not to attack them"
+    }
+    private fun refusing(demand: Demand, from: Civilization) = if (demand == Demand.DoNotAttackUs) "refusing this one IS a declaration of war on ${from.civName} (the game's rule)" else "refusing it, they hold it against us"
+
+    /** The demands other powers have laid on this court, each once, with who made it: they live in the engine's popup alerts, which the officials leave alone for a ruled civ */
+    private fun demandsOnDesk(civ: Civilization) = civ.popupAlerts.mapNotNull { alert ->
+        Demand.entries.firstOrNull { it.demandAlert == alert.type }?.let { demand -> civ.gameInfo.civilizations.firstOrNull { it.civID == alert.value }?.let { demand to it } } }.distinct()
+
+    /**
+     *  Demands made of this court: they wait for the ruler's answer (answerDemands) as offers do, and lapse as AGREED if none comes - agreeing binds
+     *  a promise, refusing can mean war, and a lapse must never start one. Only the turn's bookkeeping ([announce]) enters one in the log and starts its clock.
+     */
+    fun demands(civ: Civilization, announce: Boolean = false): List<String> {
+        val turn = civ.gameInfo.turns
+        val waiting = demandsOnDesk(civ)
+        val keyOf = { demand: Demand, from: Civilization -> "${civ.civName}<${from.civName}: ${demand.name}" }
+        if (announce) demandOfferedOn.keys.removeAll { key -> key.startsWith("${civ.civName}<") && waiting.none { (demand, from) -> keyOf(demand, from) == key } }
+        return waiting.mapNotNull { (demand, from) ->
+            val key = keyOf(demand, from)
+            if (!from.isAlive()) { if (announce) { civ.popupAlerts.removeAll { it.type == demand.demandAlert && it.value == from.civID }; demandOfferedOn.remove(key) }; return@mapNotNull null }
+            val terms = "${from.civName} demands that we ${asked(demand)}. Agreeing binds a promise for 100 turns, and breaking it later is remembered as betrayal; ${refusing(demand, from)}"
+            val since = demandOfferedOn[key]
+                ?: if (!announce) return@mapNotNull "$terms (just arrived; answerDemands agree or refuse)"
+                else {
+                    log(civ, "${from.civName} demands that we ${asked(demand)}. It waits for your answer - agree or refuse it with answerDemands" +
+                        (if (demand == Demand.DoNotAttackUs) " (to refuse it is to declare war on ${from.civName})" else "") + "; unanswered, it lapses as agreed in $PEACE_OFFER_WAITS turns.")
+                    demandOfferedOn[key] = turn
+                    turn
+                }
+            if (announce && turn - since >= PEACE_OFFER_WAITS) {
+                civ.popupAlerts.removeAll { it.type == demand.demandAlert && it.value == from.civID }; demandOfferedOn.remove(key)
+                civ.getDiplomacyManager(from)?.agreeToDemand(demand)
+                log(civ, "${from.civName}'s demand that we ${asked(demand)} went unanswered and lapsed as agreed: we are bound by that promise for 100 turns.")
+                null
+            } else "$terms (${(PEACE_OFFER_WAITS - (turn - since)).coerceAtLeast(0).let { if (it == 0) "lapses as agreed at the next turn" else "waits $it more turns, then lapses as agreed" }}; answerDemands agree or refuse)"
+        }
+    }
+
+    /** The ruler's answer to a power's demand(s): agree binds the promise; refuse is resented - and refusing "do not attack us" declares war on them.
+     *  Returns what to tell, and the power we are now at war with when the refusal was a declaration */
+    fun answerDemand(civ: Civilization, name: String, answer: String): Pair<String, Civilization?> {
+        val from = civ.known(name)
+        val waiting = demandsOnDesk(civ).filter { it.second == from }
+        if (waiting.isEmpty()) throw IllegalArgumentException("No demand from $name is waiting")
+        val agree = when (answer.lowercase().trim()) { "agree", "accept" -> true; "refuse" -> false; else -> throw IllegalArgumentException("answer must be agree or refuse") }
+        val manager = civ.getDiplomacyManager(from)!!
+        val wasAtWar = civ.isAtWarWith(from)
+        val told = waiting.map { (demand, _) ->
+            civ.popupAlerts.removeAll { it.type == demand.demandAlert && it.value == from.civID }
+            demandOfferedOn.remove("${civ.civName}<${from.civName}: ${demand.name}")
+            if (agree) manager.agreeToDemand(demand) else manager.refuseDemand(demand)
+            log(civ, "By your order: we ${if (agree) "agreed to" else "refused"} ${from.civName}'s demand that we ${asked(demand)}" +
+                (if (agree) " - a promise now binds us for 100 turns." else if (demand == Demand.DoNotAttackUs) ": that refusal is a declaration of war, and we are at war with ${from.civName}." else ". They will hold it against us."))
+            "${if (agree) "Agreed to" else "Refused"} ${from.civName}'s demand that we ${asked(demand)}"
+        }
+        return Pair(told.joinToString("; "), from.takeIf { !wasAtWar && civ.isAtWarWith(it) })
+    }
+
     /** Forget everything of one game */
-    fun reset() { pending.clear(); officialsPending.clear(); peaceOfferedOn.clear(); dealOfferedOn.clear(); oursOut.clear(); counters.clear(); gone.clear() }
+    fun reset() { pending.clear(); officialsPending.clear(); peaceOfferedOn.clear(); dealOfferedOn.clear(); demandOfferedOn.clear(); oursOut.clear(); counters.clear(); gone.clear() }
 
     /** What a restart would otherwise lose: which proposals are ours to settle, and when each waiting offer was first seen */
     fun toMap() = mapOf(
         "pending" to pending.map { mapOf("from" to it.first, "to" to it.second, "terms" to it.third) },
         "officialsPending" to officialsPending.map { mapOf("from" to it.first, "to" to it.second, "terms" to it.third) },
         "peaceOfferedOn" to peaceOfferedOn,
-        "dealOfferedOn" to dealOfferedOn)
+        "dealOfferedOn" to dealOfferedOn,
+        "demandOfferedOn" to demandOfferedOn)
 
     fun load(json: JsonValue?) {
         reset()
@@ -489,6 +557,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         json?.get("officialsPending")?.forEach { officialsPending += Triple(it.getString("from"), it.getString("to"), it.getString("terms")) }
         json?.get("peaceOfferedOn")?.forEach { peaceOfferedOn[it.name] = it.asInt() }
         json?.get("dealOfferedOn")?.forEach { dealOfferedOn[reworded(it.name)] = it.asInt() }
+        json?.get("demandOfferedOn")?.forEach { demandOfferedOn[it.name] = it.asInt() }
     }
 
     /**

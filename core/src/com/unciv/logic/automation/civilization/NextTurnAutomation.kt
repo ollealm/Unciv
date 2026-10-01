@@ -114,12 +114,15 @@ object NextTurnAutomation {
     }
     
     private fun respondToPopupAlerts(civInfo: Civilization) {
+        // A ruler's court answers the demands made of it: they stay on its desk for the advisor, as offers do
+        val ruled = civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs
         for (popupAlert in civInfo.popupAlerts.toList()) { // toList because this can trigger other things that give alerts, like Golden Age
-            respondToDemandAlert(civInfo, popupAlert)
+            if (!ruled) respondToDemandAlert(civInfo, popupAlert)
             if (popupAlert.type == AlertType.DeclarationOfFriendship)
                 respondToDeclarationOfFriendship(civInfo, popupAlert)
         }
-        civInfo.popupAlerts.clear() // AIs don't care about popups.
+        if (ruled) civInfo.popupAlerts.removeAll { alert -> Demand.entries.none { it.demandAlert == alert.type } }
+        else civInfo.popupAlerts.clear() // AIs don't care about popups.
     }
 
     private fun respondToDemandAlert(civInfo: Civilization, popupAlert: PopupAlert) {
@@ -128,10 +131,9 @@ object NextTurnAutomation {
             val demandingCiv = civInfo.gameInfo.getCivilization(popupAlert.value)
             if (demandingCiv.isDefeated()) return
             val diploManager = civInfo.getDiplomacyManager(demandingCiv)!!
-            val agreed = Automation.threatAssessment(civInfo, demandingCiv) >= ThreatLevel.High || diploManager.isRelationshipLevelGT(RelationshipLevel.Ally)
-            if (agreed) diploManager.agreeToDemand(demand)
+            if (Automation.threatAssessment(civInfo, demandingCiv) >= ThreatLevel.High || diploManager.isRelationshipLevelGT(RelationshipLevel.Ally))
+                diploManager.agreeToDemand(demand)
             else diploManager.refuseDemand(demand)
-            if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) com.unciv.logic.automation.RulerOverrides.demandNoted?.invoke(civInfo, demandingCiv, demand, agreed)
             return
         }
     }
@@ -715,7 +717,7 @@ object NextTurnAutomation {
                 if (threatLevel < ThreatLevel.High // don't piss them off for no reason please.
                     || demand == Demand.DoNotAttackUs) {
                     offendingCiv.popupAlerts.add(PopupAlert(demand.demandAlert, civInfo.civID))
-                    if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) com.unciv.logic.automation.RulerOverrides.demandNoted?.invoke(civInfo, offendingCiv, demand, null)
+                    if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) com.unciv.logic.automation.RulerOverrides.demandMade?.invoke(civInfo, offendingCiv, demand)
                 }
             }
         }

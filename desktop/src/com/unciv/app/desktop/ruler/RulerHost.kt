@@ -111,12 +111,9 @@ object RulerHost {
         RulerOverrides.spendingNoted = { civ, gold, what -> if (civ.civID in RulerOverrides.ruledCivs) spending.getOrPut(civ.civName) { ArrayList() } += Pair(gold, what) }
         RulerOverrides.unitHandler = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.handle(unit) }
         RulerOverrides.rulersFirst = { civ -> units.rearmDue(civ) }
-        // Demands pass between the officials of two powers on their own: the chancery hears of each, and of the grudge it leaves
-        RulerOverrides.demandNoted = { civ, other, demand, agreed -> log(civ, when (agreed) {
-            null -> "The officials made a demand of ${other.civName}: \"${demand.demandText}\" Their answer comes on their turn; a demand is resented whatever the answer."
-            true -> "${other.civName} demanded of us: \"${demand.demandText}\" The officials agreed - a promise now binds us, and ${other.civName} takes it ill that it was asked."
-            false -> "${other.civName} demanded of us: \"${demand.demandText}\" The officials refused, and ${other.civName} will hold that against us."
-        }) }
+        // The officials make demands of their own, and the chancery hears of each (a demand made of us waits on the desk instead - RulerDiplomacy.demands)
+        RulerOverrides.demandMade = { civ, other, demand -> log(civ, "The officials made a demand of ${other.civName}: \"${demand.demandText}\" Their answer comes on their turn; a demand is resented whatever the answer" +
+            (if (demand == com.unciv.logic.civilization.diplomacy.Demand.DoNotAttackUs) ", and if they refuse this one, they are at war with us" else "") + ".") }
         RulerOverrides.underOrders = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.underOrders(unit) }
         RulerOverrides.tradeAnswered = { request, receiver, outcome -> diplomacy.settle(request, receiver, outcome) }
         RulerOverrides.unitDisbanded = { civ, unit, why -> if (civ.civID in RulerOverrides.ruledCivs) disbandedFor.getOrPut(civ.civName) { HashMap() }[unit.id] = why }
@@ -484,7 +481,7 @@ object RulerHost {
 
     /** Every field an order may carry: an order with none of them is no order (a model that wrapped its fields in "arguments" sent nothing) */
     private val ORDER_FIELDS = listOf("personality", "research", "policyBranches", "neverBuild", "neverPropose", "goldReserve", "noGifts", "officialsRearm", "garrisonEveryCity", "posture",
-        "queue", "build", "purchase", "rearm", "cities", "units", "trade", "answerOffers", "peace", "friendship", "gift", "declareWar", "cityFocus")
+        "queue", "build", "purchase", "rearm", "cities", "units", "trade", "answerOffers", "answerDemands", "peace", "friendship", "gift", "declareWar", "cityFocus")
 
     private fun setOrders(civ: Civilization, json: JsonValue): Any? {
         val given = json.map { it.name }
@@ -649,6 +646,15 @@ object RulerHost {
         tryEach(json.get("units")) { units.give(civ, it) }
         // Answers before proposals: a counter is a refusal and a new offer in one order, and the new offer is refused as a mirror while the old one still waits
         tryEach(json.get("answerOffers")) { diplomacy.answerOffer(civ, it.getString("power"), it.getString("answer"), it.getString("terms", null)) }
+        tryEach(json.get("answerDemands")) { entry ->
+            val (told, warWith) = diplomacy.answerDemand(civ, entry.getString("power"), entry.getString("answer"))
+            if (warWith == null) told else {
+                // The refusal was a declaration: the war is ours, as if declared by order
+                ownWars += Pair(civ.civName, warWith.civName)
+                addPublicEvent("${civ.civName} has declared war on ${warWith.civName}!")
+                "$told - that refusal declared war on ${warWith.civName}. No peace can be made for ${civ.gameInfo.ruleset.modOptions.constants.minimumWarDuration} turns"
+            }
+        }
         tryEach(json.get("trade")) { diplomacy.proposeTrade(civ, it) }
         tryEach(json.get("peace")) { diplomacy.proposePeace(civ, it.asString()) }
         tryEach(json.get("friendship")) { diplomacy.proposeFriendship(civ, it.asString()) }
@@ -862,6 +868,7 @@ object RulerHost {
         }
         diplomacy.peaceOffers(civ, announce = true)
         diplomacy.tradeOffers(civ, announce = true)
+        diplomacy.demands(civ, announce = true)
         orders[civ.civName]?.let { standing ->
             val aim = standing.warAim ?: return@let
             val target = civ.gameInfo.getCities().firstOrNull { it.name == aim }
@@ -1033,7 +1040,7 @@ object RulerHost {
     // Not "demands": that is a city asking for a luxury, not a neighbour asking for tribute.
     // Not our own order's echo ("By your order: we declared war"), and not a barbarian camp cleared ("We have captured a barbarian encampment").
     private val wakeWorthy = listOf("dropped .* because", "(?<!By your order: we )declared war", "joined .* in the war against us", "denounced", "lost in action",
-        "awaits orders", "(?<!We have )captured(?! a barbarian)", "has been destroyed", "has been stuck", "offers peace", "\\(an advised court\\) offers a deal").map { Regex(it, RegexOption.IGNORE_CASE) }
+        "awaits orders", "(?<!We have )captured(?! a barbarian)", "has been destroyed", "has been stuck", "offers peace", "\\(an advised court\\) offers a deal", "demands that we").map { Regex(it, RegexOption.IGNORE_CASE) }
 
     private val warningsWoken = HashMap<String, HashSet<String>>()
     /** The world as the last advance left it (null before the first) */
@@ -1203,6 +1210,7 @@ object RulerHost {
             "log" to condensed(chanceryLog(civ, logSince ?: (turn - 12)).map { "T${it["turn"]}: ${it["text"]}" }),
             "peaceOffers" to diplomacy.peaceOffers(civ),
             "tradeOffers" to diplomacy.tradeOffers(civ),
+            "demands" to diplomacy.demands(civ),
             "dealsLedger" to diplomacy.ledger(civ),
             "standingOrders" to orders[civ.civName]?.toMap(civ)
         )
