@@ -223,6 +223,10 @@ object RulerHost {
         val ruled = json.get("ruled")?.asStringArray()?.toList() ?: throw ApiError(400, "Missing ruled: [nation names]")
         val others = json.get("others")?.asStringArray()?.toList() ?: listOf()
         val noWonders = json.get("noWonders")?.asStringArray()?.toList() ?: listOf()
+        // The shape of the world: the engine's own map types, Pangaea (one landmass) unless asked otherwise
+        val mapType = json.getString("mapType", com.unciv.logic.map.MapType.pangaea).let { given ->
+            com.unciv.logic.map.MapType.allValues.firstOrNull { it.equals(given.trim(), ignoreCase = true) }
+                ?: throw ApiError(400, "mapType takes ${com.unciv.logic.map.MapType.allValues.joinToString()}; not '$given'") }
         val newGame = GameStarter.startNewGame(GameSetupInfo(
             GameParameters().apply {
                 speed = json.getString("speed", "Quick")
@@ -234,7 +238,7 @@ object RulerHost {
                     add(Player(Constants.spectator, PlayerType.Human))
                 }
             },
-            MapParameters().apply { mapSize = MapSize(json.getString("mapSize", "Small")) }
+            MapParameters().apply { mapSize = MapSize(json.getString("mapSize", "Small")); type = mapType }
         ))
         gameInfo = newGame
         UncivGame.Current.gameInfo = newGame
@@ -362,6 +366,7 @@ object RulerHost {
             "turn" to game.turns,
             "year" to yearText(game.turns),
             "ruled" to orders.keys.toList(),
+            "mapType" to game.tileMap.mapParameters.type,
             "majorCivs" to game.majorCivs().map { mapOf("civ" to it.civName, "alive" to it.isAlive(), "era" to it.getEra().name) },
             "winner" to winner?.civName,
             "victoryType" to winner?.victoryManager?.getVictoryTypeAchieved()
@@ -1187,7 +1192,7 @@ object RulerHost {
             "cities" to civ.cities.map { city ->
                 val stats = city.cityStats.currentCityStats
                 mapOf("name" to city.name, "pop" to city.population.population, "capital" to city.isCapital(),
-                    "puppet" to city.isPuppet.takeIf { it }, "beingRazed" to city.isBeingRazed.takeIf { it },
+                    "puppet" to city.isPuppet.takeIf { it }, "beingRazed" to city.isBeingRazed.takeIf { it }, "coastal" to city.isCoastal().takeIf { it },
                     "buildings" to city.cityConstructions.getBuiltBuildings().map { it.name }.sorted(),
                     "buildQueue" to city.cityConstructions.constructionQueue,
                     "turnsLeft" to city.cityConstructions.currentConstructionName().let { current ->
@@ -1206,6 +1211,7 @@ object RulerHost {
             },
             "threats" to threats(civ),
             "strategicResources" to strategicResources(civ),
+            "religion" to religion(civ),
             "knownCivs" to diplomacy.relations(civ),
             "log" to condensed(chanceryLog(civ, logSince ?: (turn - 12)).map { "T${it["turn"]}: ${it["text"]}" }),
             "peaceOffers" to diplomacy.peaceOffers(civ),
@@ -1313,7 +1319,7 @@ object RulerHost {
     private fun warnings(civ: Civilization, citySites: List<String>? = null): List<String> {
         val warnings = ArrayList<String>()
         if (civ.getHappiness() < 0) warnings += "The people are unhappy (${civ.getHappiness()}): ${if (civ.getHappiness() <= -10) "no city grows at all" else "every city's growth is cut by three quarters"} while the mood is below zero, and production suffers - farming for food does little until the mood is mended. " +
-            "The mood is a sum, and happinessBreakdown shows its parts: every citizen costs one and every city a few; each distinct luxury gives four, and buildings, policies and wonders what they say (the build lists mark a building's mood as +N). A wide, populous realm settles a little below zero and growth is its brake; what raises it is a luxury not yet ours, a mood building not yet raised, a policy or wonder that gives it, or fewer and smaller cities."
+            "The mood is a sum, and happinessBreakdown shows its parts: every citizen costs one and every city a few; each distinct luxury gives four, and buildings, policies and wonders what they say (the build lists mark a building's mood as +N). A wide, populous realm settles a little below zero and growth is its brake; what raises it is a luxury not yet ours, a mood building not yet raised, a policy or wonder that gives it, a belief of our religion, or fewer and smaller cities."
         if (civ.tech.currentTechnologyName() == null) warnings += "Research is idle - give research goals."
         val standing = orders[civ.civName]
         val goalsLeft = standing?.research?.count { !reached(civ, it) } ?: 0
@@ -1384,6 +1390,51 @@ object RulerHost {
     }
 
     /** Barbarian camps we can see and foreign soldiers close to our cities */
+    /** A belief in words: its name and what it gives, the rulebook's brackets struck out */
+    private fun beliefInWords(belief: com.unciv.models.ruleset.Belief) = "${belief.name}: " + belief.uniques.joinToString("; ") {
+        it.replace(Regex("\\[([^\\]]*)\\]"), "$1").replace(Regex("\\s*<([^>]*)>"), " ($1)") }
+
+    /** Faith and religion, facts only: the officials run it (the Faith weight tilts them) unless a Great Prophet or Missionary is ordered to act */
+    private fun religion(civ: Civilization): Map<String, Any?> {
+        val manager = civ.religionManager
+        val ours = manager.religion
+        val pantheon = ours?.getBeliefs(com.unciv.models.ruleset.BeliefType.Pantheon)?.toList().orEmpty()
+        val founded = ours?.takeIf { it.isMajorReligion() }
+        fun named(religion: com.unciv.models.Religion) = if (religion == ours) (if (religion.isMajorReligion()) "our ${religion.getReligionDisplayName()}" else "our pantheon")
+            else "${religion.getReligionDisplayName()} (${religion.foundingCiv.civName}'s)"
+        val cities = civ.cities.map { city ->
+            val majority = city.religion.getMajorityReligion()
+            // The religion pressing hardest on the city from its neighbours: where its people are drifting
+            val pull = city.religion.getPressuresFromSurroundingCities().filter { it.value > 0 && it.key != majority?.name }.maxByOrNull { it.value }
+                ?.let { civ.gameInfo.religions[it.key] }
+            "${city.name}: ${majority?.let { named(it) } ?: "no religion"}" + (pull?.let { ", drawn toward ${named(it)} by its neighbours" } ?: "")
+        }
+        val missionaries = civ.units.getCivUnits().filter { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.MayFoundReligion) || it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CanSpreadReligion) }
+            .map { unit -> "${unit.name} #${unit.id}" + (unit.religion?.let { " (of ${civ.gameInfo.religions[it]?.let(::named) ?: it})" } ?: "") + ": " + listOfNotNull(
+                if (unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.MayFoundReligion) && manager.mayFoundReligionAtAll()) "can found our religion in a city of ours" else null,
+                if (unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.MayEnhanceReligion) && manager.mayEnhanceReligionAtAll()) "can enhance our religion in a city of ours" else null,
+                if (unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CanSpreadReligion)) "can spread its religion in a city it stands in" else null
+            ).ifEmpty { listOf("nothing it can do now") }.joinToString(", ") + " - order it with use, ability religion, in the city" }.toList()
+        return mapOf(
+            "faithPerTurn" to civ.stats.statsForNextTurn.faith.toInt(),
+            "faithStored" to manager.storedFaith,
+            "pantheon" to (pantheon.map(::beliefInWords).ifEmpty { null } ?: when {
+                manager.canFoundOrExpandPantheon() -> "none yet, and the faith for one is ours: the officials will choose it"
+                manager.numberOfBeliefsAvailable(com.unciv.models.ruleset.BeliefType.Pantheon) == 0 -> "none, and none can be had: every pantheon belief in this world is taken"
+                civ.gameInfo.civilizations.any { it.religionManager.religionState == com.unciv.logic.civilization.managers.ReligionState.EnhancedReligion }
+                    && manager.remainingFoundableReligions() == 0 ->
+                    "none, and none can be had now: the world's faiths are all founded"
+                else -> "none yet - ${manager.faithForPantheon()} faith founds one" }),
+            "religion" to (founded?.let { religion -> mapOf("name" to religion.getReligionDisplayName(), "holyCity" to manager.getHolyCity()?.name,
+                "beliefs" to religion.getAllBeliefsOrdered().filter { it.type != com.unciv.models.ruleset.BeliefType.Pantheon }.map(::beliefInWords).toList(),
+                "citiesFollowing" to manager.numberOfCitiesFollowingThisReligion()) }
+                ?: "not founded - a Great Prophet founds one in a city of ours; ${manager.remainingFoundableReligions().let { if (it > 0) "$it more can still be founded in this world" else "none is left to found in this world" }}"),
+            "nextGreatProphet" to if (manager.canGenerateProphet(ignoreFaithAmount = true)) "born when stored faith reaches about ${manager.faithForNextGreatProphet()}" else null,
+            "ourCities" to cities,
+            "prophetsAndMissionaries" to missionaries.ifEmpty { null },
+            "note" to "The officials spend faith and choose beliefs on their own; the Faith weight tilts how much they make of it. Founding, enhancing and spreading are done by a Great Prophet or Missionary of ours, with the use order (ability religion) in the right city.")
+    }
+
     /** Each strategic resource we hold or use: how many in all, how many our units take, how many the queued items will need, what is spare */
     private fun strategicResources(civ: Civilization): List<String> {
         val ruleset = civ.gameInfo.ruleset
@@ -1461,6 +1512,8 @@ object RulerHost {
                 "unlocks" to (ruleset.buildings.values.filter { it.requiredTech == t.name }.map { it.name } + ruleset.units.values.filter { it.requiredTech == t.name }.map { it.name }),
                 "effects" to t.uniques)
         }
+        find(ruleset.beliefs)?.let { b -> return mapOf("kind" to "belief", "name" to b.name, "type" to b.type.name.lowercase(), "gives" to beliefInWords(b).substringAfter(": "),
+            "heldBy" to civ.gameInfo.religions.values.filter { it.hasBelief(b.name) }.map { "${it.getReligionDisplayName()} (${it.foundingCiv.civName}'s)" }) }
         find(ruleset.policies)?.let { p -> return mapOf("kind" to "policy", "name" to p.name, "branch" to p.branch.name, "effects" to p.uniques, "adopted" to civ.policies.isAdopted(p.name)) }
         throw ApiError(404, "The rulebook has nothing called '$name'")
     }
