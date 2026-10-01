@@ -128,10 +128,10 @@ object NextTurnAutomation {
             val demandingCiv = civInfo.gameInfo.getCivilization(popupAlert.value)
             if (demandingCiv.isDefeated()) return
             val diploManager = civInfo.getDiplomacyManager(demandingCiv)!!
-            if (Automation.threatAssessment(civInfo, demandingCiv) >= ThreatLevel.High
-                || diploManager.isRelationshipLevelGT(RelationshipLevel.Ally))
-                diploManager.agreeToDemand(demand)
+            val agreed = Automation.threatAssessment(civInfo, demandingCiv) >= ThreatLevel.High || diploManager.isRelationshipLevelGT(RelationshipLevel.Ally)
+            if (agreed) diploManager.agreeToDemand(demand)
             else diploManager.refuseDemand(demand)
+            if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) com.unciv.logic.automation.RulerOverrides.demandNoted?.invoke(civInfo, demandingCiv, demand, agreed)
             return
         }
     }
@@ -711,8 +711,10 @@ object NextTurnAutomation {
             else -> {
                 val threatLevel = Automation.threatAssessment(civInfo, offendingCiv)
                 if (threatLevel < ThreatLevel.High // don't piss them off for no reason please.
-                    || demand == Demand.DoNotAttackUs) 
+                    || demand == Demand.DoNotAttackUs) {
                     offendingCiv.popupAlerts.add(PopupAlert(demand.demandAlert, civInfo.civID))
+                    if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) com.unciv.logic.automation.RulerOverrides.demandNoted?.invoke(civInfo, offendingCiv, demand, null)
+                }
             }
         }
         diplomacyManager.removeFlag(demand.violationOccurred)

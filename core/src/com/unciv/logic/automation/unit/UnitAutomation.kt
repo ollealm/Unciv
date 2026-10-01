@@ -142,6 +142,14 @@ object UnitAutomation {
 
         if (tryFogBust(unit)) return
 
+        // A land unit with nothing left to do stays wherever it last stopped - at sea, embarked, it stayed there for good (Run 12: soldiers
+        // off Seoul and Troyes for 60 to 100 turns). It comes ashore on our own ground, or any shore, instead
+        if (unit.isEmbarked() && unit.baseUnit.isLandUnit) {
+            val ashore = unit.getTile().getTilesInDistance(10).filter { it.isLand }.sortedWith(compareBy({ it.getOwner() != unit.civ }, { it.aerialDistanceTo(unit.getTile()) }))
+                .take(20).firstOrNull { unit.movement.canMoveTo(it) && unit.movement.canReach(it) }
+            if (ashore != null) { unit.movement.headTowards(ashore); return }
+        }
+
         // Idle CS units should wander so they don't obstruct players so much
         if (unit.civ.isCityState)
             wander(unit, stayInTerritory = true)

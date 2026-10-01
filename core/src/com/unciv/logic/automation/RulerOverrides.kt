@@ -41,6 +41,9 @@ object RulerOverrides {
         else -> civ.getKnownCivs().any { it.isMajorCiv() && civ.isAtWarWith(it) }
     }
 
+    /** The officials' demands of another power, and their answers to a power's demand of us: (our civ, the other power, the demand, agreed - null for a demand we made) */
+    @Volatile var demandNoted: ((Civilization, Civilization, com.unciv.logic.civilization.diplomacy.Demand, Boolean?) -> Unit)? = null
+
     /** Called for a ruled civ before its officials spend any gold: the ruler's own purchases due this turn come first */
     @Volatile var rulersFirst: ((Civilization) -> Unit)? = null
 

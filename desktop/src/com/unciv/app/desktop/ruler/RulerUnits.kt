@@ -67,6 +67,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     /** The rest of what a restart would lose: which Great People were handed to the officials, and how long each unit has stood where it stands */
     fun stateToMap() = mapOf(
         "released" to released.toList(),
+        "embarkedSince" to embarkedSince.mapKeys { it.key.toString() },
         "rearmNext" to rearmNext.mapKeys { it.key.toString() },
         "stillSince" to stillSince.mapKeys { it.key.toString() }.mapValues { mapOf("spot" to it.value.first, "turn" to it.value.second) })
 
@@ -74,6 +75,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         released.clear(); stillSince.clear(); rearmNext.clear()
         json?.get("released")?.forEach { released += it.asInt() }
         json?.get("rearmNext")?.forEach { rearmNext[it.name.toInt()] = it.asInt() }
+        embarkedSince.clear(); json?.get("embarkedSince")?.forEach { embarkedSince[it.name.toInt()] = it.asInt() }
         json?.get("stillSince")?.forEach { stillSince[it.name.toInt()] = Pair(it.getString("spot"), it.getInt("turn")) }
     }
 
@@ -83,9 +85,12 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
     /** How many turns a unit has stood on the same tile - reckoned each turn by the host's bookkeeping */
     private val stillSince = HashMap<Int, Pair<String, Int>>()
+    /** Since which turn each land unit of ours has been at sea, embarked */
+    private val embarkedSince = HashMap<Int, Int>()
     fun noteStanding(civ: Civilization) {
         val turn = civ.gameInfo.turns
         for (unit in civ.units.getCivUnits()) {
+            if (unit.isEmbarked()) embarkedSince.putIfAbsent(unit.id, turn) else embarkedSince.remove(unit.id)
             val spot = unit.getTile().position.toString()
             val was = stillSince[unit.id]
             if (was == null || was.first != spot) stillSince[unit.id] = Pair(spot, turn)
@@ -101,8 +106,11 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         // A Great Person is the ruler's to spend: the officials never touch one unless it was released to them.
         // Caught here, in the automation's own loop, because one born at the start of a turn would otherwise be spent within it.
         if (unit.id !in orders && unit.id !in released && unit.isGreatPerson()) {
-            orders[unit.id] = Order("hold", null, null)
-            log(unit.civ, "A ${unit.name} #${unit.id} is at ${where(unit.civ, unit.getTile())} and awaits orders (use, move, or release to the officials).")
+            // One born in the open waits in the nearest town of ours rather than in the field; a general or an admiral belongs beside the host
+            val shelter = if (unit.isGreatPersonOfType("War") || unit.getTile().let { it.isCityCenter() && it.getOwner() == unit.civ }) null else shelterFor(unit)
+            orders[unit.id] = Order("hold", shelter?.position?.x?.toInt(), shelter?.position?.y?.toInt())
+            log(unit.civ, "A ${unit.name} #${unit.id} is at ${where(unit.civ, unit.getTile())} and awaits orders (use, move, or release to the officials)" +
+                (shelter?.let { "; meanwhile it walks to ${it.getCity()!!.name} and waits there" } ?: "") + ".")
         }
         val order = orders[unit.id] ?: return false
         if (order.action == "gift") return withCityStatePassage(unit, recipientOf(unit.civ, order)) { checkGift(unit, order) ?: carryOut(unit, order) }
@@ -142,6 +150,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         if (target != null && unit.getTile() != target) {
             // The escort and upgrade routines may have moved this soldier already this turn: no movement left is not "cannot reach"
             if (unit.currentMovement <= 0f) return true
+            if (order.action == "hold" && unit.isGreatPerson() && (!canMarch(unit, target) || order.turnsStuck >= 2)) { order.x = null; order.y = null; return true }
             if (!canMarch(unit, target)) {
                 log(civ, "Our ${unit.name} cannot reach ${where(civ, target)}; the order is dropped and the officials take it back.")
                 drop(unit)
@@ -304,6 +313,10 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             .sortedBy { it.aerialDistanceTo(unit.getTile()) }.take(20) // path-finding is dear; twenty of the nearest is plenty
             .firstOrNull { canMarch(unit, it) }
 
+    /** The nearest town of ours a held Great Person can walk to and wait in */
+    private fun shelterFor(unit: MapUnit): Tile? = unit.civ.cities.map { it.getCenterTile() }.filter { it.civilianUnit == null || it.civilianUnit == unit }
+        .sortedBy { it.aerialDistanceTo(unit.getTile()) }.take(8).firstOrNull { canMarch(unit, it) }
+
     /** An order dropped for good: a Great Person goes to the officials with it, or the hold at the top of [handle] would take it back next turn and the ruler would be asked again */
     private fun drop(unit: MapUnit) {
         orders.remove(unit.id)
@@ -438,7 +451,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             else -> "automated"
         }
         val health = if (unit.health < 100) ", ${unit.health} hp" else ""
-        return "${unit.name} #${unit.id} at ${where(civ, unit.getTile())}, $state$health"
+        val atSea = if (unit.isEmbarked()) ", at sea, embarked" + (embarkedSince[unit.id]?.let { " since turn $it" } ?: "") else ""
+        return "${unit.name} #${unit.id} at ${where(civ, unit.getTile())}$atSea, $state$health"
     }
 
     /** Why a city cannot be founded on this tile, or null if it can */
@@ -501,7 +515,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         // Said once each way, so a run can be checked for what this gate did
         val before = landLeft[civ.civName]?.second ?: true
         if (before && !any) log(civ, "No land is left within our reach for a new city; the officials will train no settlers until that changes.")
-        if (!before && any) log(civ, "There is land for a new city again; the officials may train settlers.")
+        if (!before && any && civ.cities.isNotEmpty()) log(civ, "There is land for a new city again; the officials may train settlers.") // a realm that has just fallen has no cities, not new land
         landLeft[civ.civName] = Pair(turn, any)
         return any
     }
