@@ -35,7 +35,10 @@ object UseGoldAutomation {
 
     private fun spendGold(civ: Civilization) {
         // A ruler's standing order says when the officials re-arm on their own (by default only in war)
+        // ...and never with a strategic resource the ruler's own pending proposal offers (Greece's Horses for Copper lapsed the turn the officials re-armed a Pikeman)
+        val promised = if (com.unciv.logic.automation.RulerOverrides.mayRearm(civ)) com.unciv.logic.automation.RulerOverrides.promised?.invoke(civ) ?: emptyMap() else emptyMap()
         if (com.unciv.logic.automation.RulerOverrides.mayRearm(civ)) for (unit in civ.units.getCivUnits().toList()) {
+            if (com.unciv.logic.automation.RulerOverrides.spendsPromised(unit, promised)) continue
             val name = unit.name
             val tile = unit.getTile()
             itemised(civ, { "re-arming a $name as ${(if (unit.isCivilian()) tile.civilianUnit else tile.militaryUnit)?.name ?: "something newer"}" }) { UnitAutomation.tryUpgradeUnit(unit) }

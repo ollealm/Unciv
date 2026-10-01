@@ -23,6 +23,8 @@ import com.unciv.logic.trade.TradeRequest
  *  says so, with the terms. Every offer made to an advised court waits for its ruler in the same way (answerOffers).
  */
 private const val PEACE_OFFER_WAITS = 8
+/** Turns the officials of both sides leave terms alone after a court refused them: the engine's own wait after a human player's refusal */
+private const val HOLD_OFF = 10
 /** A treaty's duration in a brief: it ticks down, so terms are compared without it */
 private val DURATION = Regex(" for \\d+ turns?\\b")
 
@@ -47,6 +49,30 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
     /** Terms as an advisor tends to copy them: durations, case and spacing are what get dropped or changed */
     private fun loosely(text: String) = text.replace(DURATION, "").replace(Regex("\\s+"), " ").trim().lowercase()
     private fun isLuxury(game: GameInfo, name: String) = game.ruleset.tileResources[name]?.resourceType?.name == "Luxury"
+
+    /** A court's refusal (or a lapse) holds the officials of both sides off those terms for [HOLD_OFF] turns, as the engine holds them off a human
+     *  player's refusal. The engine's own declined flags ([TradeRequest.decline]) are set only on the proposer's side, and for five turns when the one
+     *  refusing counts as an AI - a ruled court does - so the refusing side's own officials offered the very deal their court had just refused, the next turn */
+    private fun holdOff(decliner: Civilization, request: TradeRequest) {
+        val proposer = decliner.gameInfo.getCivilization(request.requestingCiv)
+        val offers = request.trade.ourOffers + request.trade.theirOffers
+        val flags = listOfNotNull(
+            DiplomacyFlags.DeclinedLuxExchange.takeIf { offers.isNotEmpty() && offers.all { it.type == TradeOfferType.Luxury_Resource } },
+            DiplomacyFlags.DeclinedResearchAgreement.takeIf { offers.any { it.name == Constants.researchAgreement } },
+            DiplomacyFlags.DeclinedDefensivePact.takeIf { offers.any { it.name == Constants.defensivePact } },
+            DiplomacyFlags.DeclinedOpenBorders.takeIf { offers.any { it.name == Constants.openBorders } },
+            DiplomacyFlags.DeclinedEmbassy.takeIf { offers.any { it.name == Constants.acceptEmbassy } })
+        for (manager in listOfNotNull(proposer.getDiplomacyManager(decliner), decliner.getDiplomacyManager(proposer)))
+            for (flag in flags) if (manager.getFlag(flag) < HOLD_OFF) manager.setFlag(flag, HOLD_OFF)
+    }
+
+    /** What one side of a request can no longer give, named from [civ]'s side ("our Horses x1", "Greece's Copper x1"); the request holds the trade as [receiver] sees it */
+    private fun shortOf(request: TradeRequest, receiver: Civilization, civ: Civilization): List<String> {
+        val game = civ.gameInfo
+        val logic = TradeLogic(receiver, civ)
+        return request.trade.theirOffers.filter { offer -> logic.theirAvailableOffers.none { it.name == offer.name && it.amount >= offer.amount } }.map { "our ${it.brief(game)}" } +
+            request.trade.ourOffers.filter { offer -> logic.ourAvailableOffers.none { it.name == offer.name && it.amount >= offer.amount } }.map { "${receiver.civName}'s ${it.brief(game)}" }
+    }
 
     /** A deal in force gives [civ] these luxuries: its other requests still asking for any of them are withdrawn, for a second supply adds nothing and would be paid for twice */
     private fun withdrawDuplicates(civ: Civilization, gained: Collection<String>, except: TradeRequest) {
@@ -120,7 +146,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
             "countered" -> { counters += "${civ.civName}<${receiver.civName}"; "got a counteroffer, which now waits on our desk for your answer (answerOffers accept or refuse)" }
             "lapsed" -> "waited $PEACE_OFFER_WAITS turns at their court unanswered and lapsed as refused"
             "invalid" -> "could not be honoured when their officials weighed it (a resource or the treasury had changed) and was dropped"
-            "voided" -> "lapsed: one side could no longer supply what was offered (a resource ran out, or a treaty state changed)"
+            "voided" -> shortOf(request, receiver, civ).let { short -> if (short.isEmpty()) "lapsed: one side could no longer supply what was offered (a resource ran out, or a treaty state changed)"
+                else "lapsed: ${short.joinToString(" and ")} ${if (short.size == 1) "was" else "were"} no longer there to give" }
             "withdrawn" -> "was withdrawn: it asked the same swap as the offer of theirs we accepted, and a deal is made once"
             "duplicate" -> "was withdrawn: what it asked for now comes to us by another deal, and a second supply of a luxury adds nothing"
             else -> "ended without a recorded answer"
@@ -175,6 +202,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         if (json.get("give")?.any { it.getString("item").equals(Constants.researchAgreement, ignoreCase = true) } == true ||
             json.get("want")?.any { it.getString("item").equals(Constants.researchAgreement, ignoreCase = true) } == true)
             researchAgreementLacks(civ, other)?.let { throw IllegalArgumentException("A research agreement with ${other.civName} cannot be made: $it") }
+        if (listOf("give", "want").any { side -> json.get(side)?.any { it.getString("item").equals(Constants.defensivePact, ignoreCase = true) } == true })
+            defensivePactLacks(civ, other)?.takeIf { inForce(civ, other, Constants.defensivePact) == null }?.let { throw IllegalArgumentException("A defensive pact with ${other.civName} cannot be made: $it") }
         add(json.get("give"), logic.ourAvailableOffers, trade.ourOffers, "We")
         add(json.get("want"), logic.theirAvailableOffers, trade.theirOffers, other.civName)
         if (trade.ourOffers.isEmpty() && trade.theirOffers.isEmpty()) throw IllegalArgumentException("An empty trade")
@@ -227,6 +256,19 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
             ours.hasFlag(DiplomacyFlags.ResearchAgreement) || ours.otherCivDiplomacy().hasFlag(DiplomacyFlags.ResearchAgreement) -> "one is already running between us"
             civ.gold < cost -> "it costs $cost gold from each side and our treasury holds ${civ.gold}"
             other.gold < cost -> "it costs $cost gold from each side and ${other.civName} has less than that"
+            else -> null
+        }
+    }
+
+    /** What a defensive pact between the two lacks, as the rules have it (DiplomacyFunctions.canSignDefensivePactWith); null when nothing does */
+    private fun defensivePactLacks(civ: Civilization, other: Civilization): String? {
+        val ours = civ.getDiplomacyManager(other) ?: return "we have not met them"
+        return when {
+            !civ.diplomacyFunctions.canSignDefensivePact() -> "we cannot sign defensive pacts yet (it takes the learning that allows it)"
+            !other.diplomacyFunctions.canSignDefensivePact() -> "${other.civName} cannot sign defensive pacts yet"
+            !civ.diplomacyFunctions.meetsEmbassyRequirementFor(other) -> "we have no shared embassies with ${other.civName}"
+            !ours.hasFlag(DiplomacyFlags.DeclarationOfFriendship) -> "there is no Declaration of Friendship between us (propose one with the friendship order first)"
+            ours.hasFlag(DiplomacyFlags.DefensivePact) || ours.otherCivDiplomacy().hasFlag(DiplomacyFlags.DefensivePact) || ours.diplomaticStatus == DiplomaticStatus.DefensivePact -> "one is already in force between us"
             else -> null
         }
     }
@@ -304,15 +346,9 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
                 entry["protectedByUs"] = ours.diplomaticStatus == DiplomaticStatus.Protector
             } else {
                 entry["cities"] = other.cities.size
-                entry["score"] = other.calculateTotalScore().toInt()
                 entry["militaryStrength"] = other.getStatForRanking(com.unciv.ui.screens.victoryscreen.RankingType.Force)
-                // What the bare figure hides: the age of their arms, and how hard their cities hit back
+                // What the bare figure hides: the age of their arms (how hard each city hits back is in warEstimate)
                 entry["era"] = other.getEra().name
-                val seen = other.cities.filter { it.getCenterTile().isExplored(civ) }
-                if (seen.isNotEmpty()) entry["cityDefence"] = seen.sortedByDescending { com.unciv.logic.battle.CityCombatant(it).getCityStrength() }.take(3)
-                    .joinToString { "${it.name} ${com.unciv.logic.battle.CityCombatant(it).getCityStrength()}" }
-                val soldiersSeen = other.units.getCivUnits().filter { it.isMilitary() && it.getTile().isVisible(civ) }.groupingBy { it.name }.eachCount()
-                if (soldiersSeen.isNotEmpty()) entry["soldiersInSight"] = soldiersSeen.entries.joinToString { "${it.value} ${it.key}" }
                 entry["techs"] = other.tech.techsResearched.size
                 entry["friendship"] = ours.hasFlag(DiplomacyFlags.DeclarationOfFriendship)
                 entry["openBordersForUs"] = theirs?.hasOpenBorders ?: false
@@ -378,7 +414,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
                     turn
                 }
             if (announce && turn - since >= PEACE_OFFER_WAITS) {
-                civ.tradeRequests.remove(request); request.decline(civ); dealOfferedOn.remove(key)
+                civ.tradeRequests.remove(request); request.decline(civ); holdOff(civ, request); dealOfferedOn.remove(key)
                 noteGone(civ, other, terms, "went unanswered and lapsed as refused")
                 settle(request, civ, "lapsed")
                 other.addNotification("[${civ.civName}] has denied your trade request", com.unciv.logic.civilization.NotificationCategory.Trade, civ.civName, com.unciv.logic.civilization.NotificationIcon.Trade)
@@ -461,11 +497,11 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
             }
             "refuse" -> {
                 civ.tradeRequests.remove(request); dealOfferedOn.remove(key)
-                request.decline(civ)
+                request.decline(civ); holdOff(civ, request)
                 settle(request, civ, "declined")
                 other.addNotification("[${civ.civName}] has denied your trade request", com.unciv.logic.civilization.NotificationCategory.Trade, civ.civName, com.unciv.logic.civilization.NotificationIcon.Trade)
                 log(civ, "By your order: we refused ${other.civName}'s offer ($summary).")
-                "Refused ${other.civName}'s offer: $summary"
+                "Refused ${other.civName}'s offer: $summary. Neither side's officials offer these terms again for $HOLD_OFF turns; you still may"
             }
             else -> throw IllegalArgumentException("answer must be accept or refuse")
         }
@@ -540,8 +576,74 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         return Pair(told.joinToString("; "), from.takeIf { !wasAtWar && civ.isAtWarWith(it) })
     }
 
+    /** Strategic resources the ruler's own proposals still waiting on other desks offer, by name and amount: the officials' re-arming leaves them alone */
+    fun promised(civ: Civilization): Map<String, Int> {
+        val game = civ.gameInfo
+        val ours = pending.filter { it.first == civ.civName && it.third != "peace" }
+        if (ours.isEmpty()) return emptyMap()
+        return game.civilizations.flatMap { other -> other.tradeRequests.filter { request -> request.requestingCiv == civ.civID && ours.any { it.second == other.civName && it.third == request.trade.reverse().brief(game) } } }
+            .flatMap { it.trade.theirOffers }.filter { it.type == TradeOfferType.Strategic_Resource } // the request holds the trade as its receiver sees it: their offers are ours
+            .groupingBy { it.name }.fold(0) { sum, offer -> sum + offer.amount }
+    }
+
+    /** A deal the ruler ordered offered again the turn it ends, once: the terms as dealsInForce words them, and the goods each side gives (name, amount) */
+    class Renewal(val civ: String, val partner: String, val terms: String, val give: List<Pair<String, Int>>, val want: List<Pair<String, Int>>) {
+        fun toMap() = mapOf("civ" to civ, "partner" to partner, "terms" to terms, "give" to give.map { mapOf("item" to it.first, "amount" to it.second) }, "want" to want.map { mapOf("item" to it.first, "amount" to it.second) })
+        /** "Open Borders", "Horses and Copper": the goods, gold left out unless it is all there is */
+        val goods get() = (give + want).map { it.first }.filterNot { it == "Gold" || it == "Gold per turn" }.ifEmpty { (give + want).map { it.first } }.distinct().joinToString(" and ")
+    }
+    val renewals = ArrayList<Renewal>()
+
+    /** The renew order: a deal now in force with [name] is proposed again, on the same terms and as our own proposal, the turn it ends - once. [terms] picks it as answerOffers picks an offer */
+    fun orderRenewal(civ: Civilization, name: String, terms: String?): String {
+        val other = civ.known(name)
+        val game = civ.gameInfo
+        val running = civ.getDiplomacyManager(other)!!.trades.filter { trade -> (trade.ourOffers + trade.theirOffers).let { offers -> offers.none { it.name == Constants.peaceTreaty } && offers.any { it.duration > 0 } } }
+        if (running.isEmpty()) throw IllegalArgumentException("No deal with $name is in force that could be renewed (a peace treaty needs no renewing)")
+        val trade = when {
+            terms != null -> running.firstOrNull { it.brief(game).equals(terms.trim(), ignoreCase = true) } ?: running.singleOrNull { loosely(it.brief(game)) == loosely(terms) }
+                ?: running.singleOrNull { loosely(it.brief(game)).contains(loosely(terms)) }
+                ?: throw IllegalArgumentException("No deal with $name in force reads '$terms'; in force: ${running.joinToString("; ") { it.brief(game) }}")
+            running.size == 1 -> running.single()
+            else -> throw IllegalArgumentException("$name and we have ${running.size} deals in force; say which with terms, as listed: ${running.joinToString("; ") { it.brief(game) }}")
+        }
+        val words = trade.brief(game).replace(DURATION, "")
+        val renewal = Renewal(civ.civName, other.civName, words, trade.ourOffers.map { it.name to it.amount }, trade.theirOffers.map { it.name to it.amount })
+        renewals.removeAll { it.civ == civ.civName && it.partner == other.civName && it.terms == words }
+        renewals += renewal
+        val turns = (trade.ourOffers + trade.theirOffers).maxOf { it.duration }
+        log(civ, "By your order: the ${renewal.goods} deal with ${other.civName} ($words) is to be offered again, on the same terms, the turn it ends.")
+        return "The ${renewal.goods} deal with ${other.civName} ($words) ends in $turns turn${if (turns == 1) "" else "s"}; the turn it ends it is proposed again on the same terms, as our own proposal, once"
+    }
+
+    /** After the turn: each renewal ordered for a deal that has now ended is proposed again, as the ruler's own proposal; the order is spent either way.
+     *  [ended] and [replaced] are the turn's deals as dealsInForce words them ("Partner: terms") */
+    fun renewEnded(civ: Civilization, ended: Collection<String>, replaced: Collection<String>) {
+        for (renewal in renewals.filter { it.civ == civ.civName }) {
+            val key = "${renewal.partner}: ${renewal.terms}"
+            if (key in replaced) {
+                renewals.remove(renewal)
+                log(civ, "The ${renewal.goods} deal with ${renewal.partner} was renewed the turn it ended without your order's help, so the order to offer it again is spent.")
+                continue
+            }
+            if (key !in ended) continue
+            renewals.remove(renewal)
+            val json = JsonValue(JsonValue.ValueType.`object`).apply {
+                addChild("with", JsonValue(renewal.partner))
+                for ((side, offers) in listOf("give" to renewal.give, "want" to renewal.want)) addChild(side, JsonValue(JsonValue.ValueType.array).also { array ->
+                    for ((item, amount) in offers) array.addChild(JsonValue(JsonValue.ValueType.`object`).apply { addChild("item", JsonValue(item)); addChild("amount", JsonValue(amount.toLong())) }) })
+            }
+            try {
+                proposeTrade(civ, json)
+                log(civ, "By your order: the ${renewal.goods} deal with ${renewal.partner} ended and was offered again.")
+            } catch (ex: IllegalArgumentException) {
+                log(civ, "By your order the ${renewal.goods} deal with ${renewal.partner} was to be offered again when it ended, but it cannot be: ${ex.message?.removeSuffix(".")}. The order is spent.")
+            }
+        }
+    }
+
     /** Forget everything of one game */
-    fun reset() { pending.clear(); officialsPending.clear(); peaceOfferedOn.clear(); dealOfferedOn.clear(); demandOfferedOn.clear(); oursOut.clear(); counters.clear(); gone.clear() }
+    fun reset() { renewals.clear(); pending.clear(); officialsPending.clear(); peaceOfferedOn.clear(); dealOfferedOn.clear(); demandOfferedOn.clear(); oursOut.clear(); counters.clear(); gone.clear() }
 
     /** What a restart would otherwise lose: which proposals are ours to settle, and when each waiting offer was first seen */
     fun toMap() = mapOf(
@@ -549,7 +651,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         "officialsPending" to officialsPending.map { mapOf("from" to it.first, "to" to it.second, "terms" to it.third) },
         "peaceOfferedOn" to peaceOfferedOn,
         "dealOfferedOn" to dealOfferedOn,
-        "demandOfferedOn" to demandOfferedOn)
+        "demandOfferedOn" to demandOfferedOn,
+        "renewals" to renewals.map { it.toMap() })
 
     fun load(json: JsonValue?) {
         reset()
@@ -558,6 +661,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         json?.get("peaceOfferedOn")?.forEach { peaceOfferedOn[it.name] = it.asInt() }
         json?.get("dealOfferedOn")?.forEach { dealOfferedOn[reworded(it.name)] = it.asInt() }
         json?.get("demandOfferedOn")?.forEach { demandOfferedOn[it.name] = it.asInt() }
+        json?.get("renewals")?.forEach { entry -> renewals += Renewal(entry.getString("civ"), entry.getString("partner"), entry.getString("terms"),
+            entry.get("give").map { it.getString("item") to it.getInt("amount") }, entry.get("want").map { it.getString("item") to it.getInt("amount") }) }
     }
 
     /**
@@ -596,7 +701,9 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         return mapOf(
             "goldPerTurnWePay" to trades.sumOf { goldPerTurn(it.second.ourOffers) },
             "goldPerTurnWeReceive" to trades.sumOf { goldPerTurn(it.second.theirOffers) },
-            "endingSoon" to endingSoon(civ, 5))
+            "endingSoon" to endingSoon(civ, 5).map { deal -> deal + if (renewals.any { it.civ == civ.civName && deal.replace(DURATION, "") == "${it.partner}: ${it.terms}" }) " - by your order, offered again the turn it ends"
+                else " - order renew to have it offered again the turn it ends" },
+            "renewOrdered" to renewals.filter { it.civ == civ.civName }.map { "${it.partner}: ${it.terms}" }.ifEmpty { null })
     }
 
     /** Deals with at most this many turns left - the time to decide whether they are worth renewing */
@@ -610,7 +717,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
     /** A pact that cannot be offered because it already runs: say so, with the turns left, instead of "not tradeable" */
     private fun inForce(civ: Civilization, other: Civilization, item: String): String? {
         val running = civ.getDiplomacyManager(other)?.trades?.flatMap { it.ourOffers + it.theirOffers }?.firstOrNull { it.name.equals(item, ignoreCase = true) } ?: return null
-        return "'$item' is already in force with ${other.civName}" + (if (running.duration > 0) ", ${running.duration} more turns; it can be offered again once it ends (the officials often renew such pacts on their own)" else "")
+        return "'$item' is already in force with ${other.civName}" + (if (running.duration > 0) ", ${running.duration} more turns; it can be offered again once it ends - order renew to have it offered again the turn it does (the officials often renew such pacts on their own)" else "")
     }
 
     private fun luxuries(civ: Civilization) = civ.getCivResourcesByName()

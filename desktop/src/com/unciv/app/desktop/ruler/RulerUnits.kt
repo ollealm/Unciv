@@ -332,8 +332,13 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         }
     }
 
-    /** Our soldiers that newer arms we know could replace (whether or not we can pay or have the resources now) */
-    fun rearmable(civ: Civilization) = civ.units.getCivUnits().filter { unit -> unit.isMilitary() && UnitActionsUpgrade.getUpgradeActions(unit).any() }.toList()
+    /** The newer arms we know how to make for this soldier, whatever they cost or need and wherever it stands: the one test the re-arm warning and
+     *  the rearm order share (the order's own old test also asked that it stand on our land, so "order rearm" was said of soldiers abroad it then refused) */
+    fun newerArms(unit: MapUnit): List<com.unciv.models.ruleset.unit.BaseUnit> = if (!unit.isMilitary()) emptyList() else unit.baseUnit.getUpgradeUnits(unit.cache.state)
+        .mapNotNull { unit.civ.gameInfo.ruleset.units[it] }.map { unit.civ.getEquivalentUnit(it) }.filter { unit.upgrade.canUpgrade(it, ignoreResources = true) }.toList()
+
+    /** Our soldiers that newer arms we know could replace (whether or not we can pay, have the resources, or they stand where it can be done now) */
+    fun rearmable(civ: Civilization) = civ.units.getCivUnits().filter { newerArms(it).isNotEmpty() }.toList()
 
     /** Re-arm one of our units by the ruler's hand, paid from the treasury above [reserve]: (done, what to tell). A unit that has spent its movement
      *  is re-armed at the start of our next turn instead, as a player's would be */
@@ -440,6 +445,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         val turns = if (tile == unit.getTile()) 0 else kotlin.math.ceil(steps / unit.getMaxMovement().coerceAtLeast(1).toFloat()).toInt()
         return "${unit.name} #${unit.id} will be given to $name at ${where(civ, tile)}" + (if (turns > 0) ", about $turns turns away" else "")
     }
+
+    /** Left wholly to the officials: no order of ours, not fortified, asleep or exploring - what describeUnit calls "automated" */
+    fun leftToOfficials(unit: MapUnit) = orders[unit.id] == null && unit.action?.startsWith("Fortify") != true && unit.action != "Sleep" && unit.action?.contains("explore", ignoreCase = true) != true
 
     fun describeUnit(civ: Civilization, unit: MapUnit): String {
         val order = orders[unit.id]

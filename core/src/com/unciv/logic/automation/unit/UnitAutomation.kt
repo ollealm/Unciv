@@ -92,17 +92,20 @@ object UnitAutomation {
         if (tryHeadTowardsOurSiegedCity(unit)) return
 
         // A ruled civ's posture: on "defend" no soldier leaves home ground; on "raid" the host pillages but never assaults a city
-        val posture = com.unciv.logic.automation.RulerOverrides.postures[unit.civ.civID]
+        val posture = com.unciv.logic.automation.RulerOverrides.postures[unit.civ.civID] // a ruled civ that never set one fights as under attack
+            ?: com.unciv.logic.automation.RulerOverrides.Posture().takeIf { unit.civ.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs }
         if (posture != null && unit.isMilitary() && unit.civ.isAtWar()) {
             // the home reserve: the soldiers nearest our cities, as many as the ruler asked to keep back, never march out
             val inReserve = posture.reserve > 0 && unit.baseUnit.isLandUnit && unit.civ.units.getCivUnits()
                 .filter { it.isMilitary() && it.baseUnit.isLandUnit }
                 .sortedBy { soldier -> unit.civ.cities.minOfOrNull { it.getCenterTile().aerialDistanceTo(soldier.getTile()) } ?: 99 }
                 .take(posture.reserve).any { it.id == unit.id }
-            if (posture.stance == "defend" || inReserve) {
+            // A soldier far behind our best arms is no part of an attack: it holds home ground as a defending host does
+            val outclassed = com.unciv.logic.automation.RulerOverrides.outclassed(unit)
+            if (posture.stance == "defend" || inReserve || outclassed) {
                 // A defending host holds its own ground: out of any enemy city's guns first, then only an enemy on or beside our land is fought, and a
                 // soldier left abroad walks home. The reserve of an attacking or raiding host keeps the old habit and fights whatever is within reach
-                val holdsGround = posture.stance == "defend"
+                val holdsGround = posture.stance == "defend" || outclassed
                 if (holdsGround && tryLeaveEnemyCityRange(unit)) return
                 if (tryAttacking(unit, if (holdsGround) homeGroundTargets(unit) else null)) return
                 if (tryGarrisoningLandUnit(unit)) return
