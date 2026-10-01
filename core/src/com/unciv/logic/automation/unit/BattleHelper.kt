@@ -8,17 +8,20 @@ import com.unciv.logic.battle.MapUnitCombatant
 import com.unciv.logic.battle.TargetHelper
 import com.unciv.logic.city.City
 import com.unciv.logic.map.mapunit.MapUnit
+import com.unciv.logic.map.tile.Tile
 import com.unciv.models.ruleset.unique.GameContext
 import com.unciv.models.ruleset.unique.UniqueType
 import yairm210.purity.annotations.Readonly
 
 object BattleHelper {
 
-    /** Returns true if the unit cannot further move this turn - NOT if an attack was successful! */
-    fun tryAttackNearbyEnemy(unit: MapUnit, stayOnTile: Boolean = false): Boolean {
+    /** Returns true if the unit cannot further move this turn - NOT if an attack was successful! A ruler's defend posture passes [tilesToCheck], the targets
+     *  it allows, and [keepOutOfCityGuns], so that no attack is made from a tile an enemy city can bombard */
+    fun tryAttackNearbyEnemy(unit: MapUnit, stayOnTile: Boolean = false, tilesToCheck: List<Tile>? = null, keepOutOfCityGuns: Boolean = false): Boolean {
         if (unit.hasUnique(UniqueType.CannotAttack)) return false
         val distanceToTiles = unit.movement.getDistanceToTiles()
-        val attackableEnemies = TargetHelper.getAttackableEnemies(unit, distanceToTiles, stayOnTile=stayOnTile)
+        val attackableEnemies = TargetHelper.getAttackableEnemies(unit, distanceToTiles, tilesToCheck = tilesToCheck, stayOnTile = stayOnTile)
+            .filter { !keepOutOfCityGuns || !UnitAutomation.underEnemyCityGuns(unit.civ, it.tileToAttackFrom) }
             // Only take enemies we can fight without dying or are made to die
             .filter {
                 val defender = Battle.getMapCombatantOfTile(it.tileToAttack)

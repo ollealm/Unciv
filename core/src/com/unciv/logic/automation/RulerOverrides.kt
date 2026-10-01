@@ -51,7 +51,7 @@ object RulerOverrides {
     val noGifts: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     /** Kinds of deal a ruled civ's officials may not propose on their own (a standing order of the ruler): "Open Borders", "Research Agreement",
-     *  "Defensive Pact", "Declaration of Friendship", "luxuries", or "all" */
+     *  "Defensive Pact", "Declaration of Friendship", "luxuries", "calls to war" (asking another power to join a war of ours), or "all" */
     val noProposals = ConcurrentHashMap<String, Set<String>>()
     fun mayPropose(civ: com.unciv.logic.civilization.Civilization, kind: String) = noProposals[civ.civID]?.let { "all" in it || kind in it } != true
 

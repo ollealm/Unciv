@@ -61,7 +61,7 @@ object RulerHost {
         var policyBranches = ArrayList<String>()
         /** Buildings and units the officials must never queue on their own */
         var neverBuild = ArrayList<String>()
-        /** Kinds of deal the officials must never propose on their own: Open Borders, Research Agreement, Defensive Pact, Declaration of Friendship, luxuries, all */
+        /** Kinds of deal the officials must never propose on their own: Open Borders, Research Agreement, Defensive Pact, Declaration of Friendship, luxuries, calls to war, all */
         var neverPropose = ArrayList<String>()
         /** Gold the officials must leave untouched; null = they spend as they see fit */
         var goldReserve: Int? = null
@@ -387,7 +387,7 @@ object RulerHost {
         json.get("policyBranches")?.let { policyBranches = ArrayList(it.asStringArray().toList()) }
         json.get("neverBuild")?.let { neverBuild = ArrayList(it.asStringArray().toList()) }
         json.get("neverPropose")?.let { list ->
-            val kinds = listOf(Constants.openBorders, Constants.researchAgreement, Constants.defensivePact, "Declaration of Friendship", "luxuries", "all")
+            val kinds = listOf(Constants.openBorders, Constants.researchAgreement, Constants.defensivePact, "Declaration of Friendship", "luxuries", "calls to war", "all")
             neverPropose = ArrayList(list.asStringArray().map { given -> kinds.firstOrNull { it.equals(given.trim(), ignoreCase = true) || it.equals(given.trim().removeSuffix("s"), ignoreCase = true) }
                 ?: throw ApiError(400, "neverPropose takes ${kinds.joinToString()}; not '$given'") })
         }
@@ -1219,8 +1219,11 @@ object RulerHost {
         val soldiers = civ.units.getCivUnits().filter { it.isMilitary() && it.baseUnit.isLandUnit }.toList()
         val siege = soldiers.filter { it.baseUnit.isProbablySiegeUnit() }
         val melee = soldiers.filter { it.baseUnit.isMelee() }
+        val aircraft = civ.units.getCivUnits().count { it.isMilitary() && it.baseUnit.isAirUnit() }
         val bestEngine = siege.maxByOrNull { it.baseUnit.rangedStrength }
         val bestFoot = melee.maxByOrNull { it.baseUnit.strength }
+        // A city heals this much every turn (the engine's CityTurnManager): what breaks it is what all our engines take off in a turn beyond that
+        val healing = 20
         // The engine's own combat sum, at full health and even luck: what one volley of our best engine takes off a city, and what the city does to our best foot soldier
         fun volley(unit: com.unciv.logic.map.mapunit.MapUnit, city: City) = com.unciv.logic.battle.BattleDamage.calculateDamageToDefender(
             com.unciv.logic.battle.MapUnitCombatant(unit), com.unciv.logic.battle.CityCombatant(city), city.getCenterTile(), 0.5f)
@@ -1231,7 +1234,26 @@ object RulerHost {
                 val defence = com.unciv.logic.battle.CityCombatant(city).getCityStrength()
                 val perVolley = bestEngine?.let { volley(it, city) } ?: 0
                 val volleysToBreak = if (perVolley > 0) (city.health + perVolley - 1) / perVolley else null
+                val perTurn = perVolley * siege.size - healing
+                val turnsToBreak = if (perTurn > 0) (city.health + perTurn - 1) / perTurn else null
                 val hitOnFoot = bestFoot?.let { cityHits(it, city) }
+                // What stands about the city within three tiles, on the tiles we can see: its soldiers, and whatever shoots at aircraft (a SAM, a fighter on
+                // its field, a building that intercepts). Of the tiles we cannot see we say nothing - the walls alone misled three sieges in Run 11
+                val near = city.getCenterTile().getTilesInDistance(3).filter { it.isVisible(civ) }.toList()
+                val defenders = near.filter { it != city.getCenterTile() }.flatMap { it.getUnits() }.filter { it.civ == city.civ && it.isMilitary() && it.baseUnit.isLandUnit }
+                val defendersStrength = defenders.sumOf { it.baseUnit.strength.coerceAtLeast(it.baseUnit.rangedStrength) }
+                val antiAirUnits = near.flatMap { it.getUnits() }.filter { it.civ == city.civ && it.interceptChance() > 0 }
+                val antiAir = antiAirUnits.size + city.cityConstructions.getBuiltBuildings().count { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.ChanceInterceptAirAttacks) }
+                fun s(n: Int) = if (n == 1) "" else "s"
+                val beside = when {
+                    near.isEmpty() -> "what stands beside them is beyond our sight"
+                    defenders.isEmpty() && antiAir == 0 -> "we see nothing standing beside them"
+                    else -> listOfNotNull(
+                        defenders.takeIf { it.isNotEmpty() }?.let { "the ${it.size} defender${s(it.size)} beside them (strength $defendersStrength together)" },
+                        antiAir.takeIf { it > 0 }?.let { "$it anti-air (${(antiAirUnits.map { u -> u.name } + if (antiAir > antiAirUnits.size) listOf("the city's own") else emptyList()).distinct().joinToString(", ")})" +
+                            (if (aircraft > 0) " against our $aircraft aircraft" else "") }
+                    ).joinToString(" and ") + (if (defenders.size + antiAir == 1) " is" else " are") + " another matter"
+                }
                 // The approaches: how many land tiles touch the city, and how many of those an enemy soldier stands on
                 val approaches = city.getCenterTile().neighbors.filter { it.isLand && !it.isImpassible() }.toList()
                 val heldApproaches = approaches.count { it.militaryUnit != null && it.militaryUnit!!.civ != civ }
@@ -1243,25 +1265,28 @@ object RulerHost {
                 }
                 val verdict = when {
                     bestEngine == null -> "no siege engines - the walls cannot be broken"
-                    volleysToBreak!! <= siege.size * 2 -> "would fall within a few turns of concerted bombardment"
-                    volleysToBreak <= siege.size * 5 -> "a siege of some turns, under fire the whole time"
-                    else -> "beyond what our engines can break before they are shot to pieces"
+                    turnsToBreak == null -> "our ${siege.size} engine${s(siege.size)} together take less off the walls in a turn (${perVolley * siege.size}) than the $healing they heal - what we have cannot break them"
+                    turnsToBreak <= 2 -> "the walls would fall in $volleysToBreak volleys - $turnsToBreak turn${s(turnsToBreak)} of all our engines firing, healing counted; $beside"
+                    turnsToBreak <= 5 -> "a siege of $turnsToBreak turns under fire the whole time ($volleysToBreak volleys, healing counted); $beside"
+                    else -> "beyond what our engines can break before they are shot to pieces ($turnsToBreak turns of bombardment, healing counted); $beside"
                 }
                 mapOf("city" to city.name, "of" to city.civ.civName, "defence" to defence, "health" to city.health, "walls" to city.cityConstructions.builtBuildings.any { "Walls" in it || "Castle" in it },
                     "garrison" to city.getCenterTile().militaryUnit?.name, "tilesFromOurNearestCity" to civ.cities.minOfOrNull { it.getCenterTile().aerialDistanceTo(city.getCenterTile()) },
-                    "oneVolleyOfOurBestEngineTakes" to perVolley, "volleysToBreak" to volleysToBreak, "cityShotAtOurBestFootSoldierTakes" to hitOnFoot, "approaches" to gate, "verdict" to verdict)
+                    "oneVolleyOfOurBestEngineTakes" to perVolley, "volleysToBreak" to volleysToBreak, "healsPerTurn" to healing, "turnsToBreak" to turnsToBreak,
+                    "defendersWithin3Tiles" to if (near.isEmpty()) null else defenders.size, "defendersStrength" to if (near.isEmpty()) null else defendersStrength, "antiAirWithin3Tiles" to if (near.isEmpty()) null else antiAir,
+                    "cityShotAtOurBestFootSoldierTakes" to hitOnFoot, "approaches" to gate, "verdict" to verdict)
             }.sortedBy { it["volleysToBreak"] as Int? ?: 999 }
         val unseen = civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.associate { other -> other.civName to other.cities.count { !it.getCenterTile().isExplored(civ) } }.filterValues { it > 0 }
         return mapOf(
             "ourBestEngine" to bestEngine?.name, "ourBestFootSoldier" to bestFoot?.name, "siegeEngines" to siege.size, "footSoldiers" to melee.size,
-            "ranged" to soldiers.count { it.baseUnit.isRanged() && !it.baseUnit.isProbablySiegeUnit() },
+            "ranged" to soldiers.count { it.baseUnit.isRanged() && !it.baseUnit.isProbablySiegeUnit() }, "ourAircraft" to aircraft,
             "citiesWeHaveSeen" to cities,
             "citiesNeverSeen" to unseen,
             "whoElseWouldFight" to civ.getKnownCivs().filter { it.isMajorCiv() && !civ.isAtWarWith(it) }.associate { target -> target.civName to
                 (civ.gameInfo.civilizations.filter { ally -> ally != target && ally != civ && ally.isAlive() && ((ally.isMajorCiv() && ally.getDiplomacyManager(target)?.diplomaticStatus == com.unciv.logic.civilization.diplomacy.DiplomaticStatus.DefensivePact) || (ally.isCityState && ally.allyCiv == target)) }
                     .map { it.civName + (if (it.isCityState) " (city-state ally)" else " (defensive pact)") }) }.filterValues { it.isNotEmpty() },
 
-            "howToRead" to "Sums from the chancery's own reckoning of battle, at full health and even luck. A city is taken by breaking its health with engines and then walking a foot soldier in; it heals each turn, shoots one volley a turn at anything within two tiles, and its garrison and walls do the rest. Bowmen and crossbows barely scratch walls. What we have never seen we cannot judge - say so.")
+            "howToRead" to "Sums from the chancery's own reckoning of battle, at full health and even luck. A city is taken by breaking its health with engines and then walking a foot soldier in; it heals each turn, shoots one volley a turn at anything within two tiles, and its garrison and walls do the rest. Defenders and anti-air are counted within three tiles of the city, on the tiles we can see this turn. Bowmen and crossbows barely scratch walls. What we have never seen we cannot judge - say so.")
     }
 
     /** The log as a look-in should read it: no bookkeeping echoes, repeats folded, and never more than the last sixty lines */

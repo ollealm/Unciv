@@ -404,8 +404,10 @@ object NextTurnAutomation {
         val isAtWar = civInfo.isAtWar()
         val sortedUnits = civInfo.units.getCivUnits().sortedBy { unit -> getUnitPriority(unit, isAtWar) }
 
-        val aim = RulerOverrides.postures[civInfo.civID]?.warAim
-        val citiesRequiringManualPlacement = civInfo.getKnownCivs().filter { it.isAtWarWith(civInfo) }
+        val posture = RulerOverrides.postures[civInfo.civID]
+        val aim = posture?.warAim
+        // A defending host lays no siege: the routine would otherwise gather it around any enemy city with enough of ours near and keep it under the walls' guns, stance or no stance
+        val citiesRequiringManualPlacement = if (posture?.stance == "defend") emptyList() else civInfo.getKnownCivs().filter { it.isAtWarWith(civInfo) }
             .flatMap { it.cities }
             .filter {
                 var count = 0

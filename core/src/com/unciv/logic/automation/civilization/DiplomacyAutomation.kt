@@ -457,6 +457,7 @@ object DiplomacyAutomation {
 
     internal fun askForHelp(civInfo: Civilization) {
         if (!civInfo.isAtWar() || civInfo.cities.isEmpty() || civInfo.diplomacy.isEmpty()) return
+        if (!com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, "calls to war")) return // a ruler's standing order: whom to call into our wars is the ruler's to decide
 
         val enemyCivs = civInfo.getCivsAtWarWith().filter { it.isMajorCiv() }
             .sortedByDescending { it.getStatForRanking(RankingType.Force) }

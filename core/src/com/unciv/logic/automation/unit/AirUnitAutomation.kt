@@ -84,6 +84,14 @@ object AirUnitAutomation {
         tryMoveToCitiesToAerialAttackFrom(pathsToCities, unit)
     }
 
+    /** A ruled civ's defend posture grounds the air arm: a plane strikes only an enemy standing on or beside our own land, never a city, and otherwise
+     *  stays on its field, where a fighter that has not moved intercepts whatever comes over our land. No sweep, no sortie against the enemy's cities
+     *  or the SAMs about them - that is what bled the bombers for turns on end before Weldiya */
+    fun automateHomeDefence(unit: MapUnit) {
+        if (unit.health < 75) return // Wait and heal
+        BattleHelper.tryAttackNearbyEnemy(unit, tilesToCheck = UnitAutomation.homeGroundTargets(unit))
+    }
+
     private fun tryAirSweep(unit: MapUnit, tilesWithEnemyUnitsInRange: List<Tile>): Boolean {
         val targetTile = tilesWithEnemyUnitsInRange.filter {
             tile -> tile.getUnits().any { it.civ.isAtWarWith(unit.civ)
