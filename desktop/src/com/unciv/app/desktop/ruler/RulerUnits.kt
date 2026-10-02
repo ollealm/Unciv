@@ -111,6 +111,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             val shelter = if (unit.isGreatPersonOfType("War") || unit.getTile().let { it.isCityCenter() && it.getOwner() == unit.civ && !claimed(unit, it) }) null else shelterFor(unit)
             orders[unit.id] = Order("hold", shelter?.position?.x?.toInt(), shelter?.position?.y?.toInt())
             log(unit.civ, "A ${unit.name} #${unit.id} is at ${where(unit.civ, unit.getTile())} and awaits orders (use, move, or release to the officials)" +
+                (greatImprovementOf(unit)?.let { "; with use, ability improvement, it can raise $it" } ?: "") +
                 (shelter?.let { if (it.isCityCenter()) "; meanwhile it walks to ${it.getCity()!!.name} and waits there" else "; meanwhile it waits beside ${it.getCity()!!.name}, whose town another of ours holds" } ?: "") + ".")
         }
         val order = orders[unit.id] ?: return false
@@ -528,7 +529,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             "religion" -> "a city of ours to found or enhance our religion in, or a city of another faith to spread it to"
             else -> "movement left this turn"
         }
-        return "it can now ${open.joinToString().ifEmpty { "do nothing here" }}" + (has - open.toSet()).takeIf { it.isNotEmpty() }?.let { blocked -> "; " + blocked.joinToString("; ") { "$it needs ${why(it)}" } }.orEmpty()
+        val named = { word: String -> if (word == "improvement") greatImprovementOf(unit)?.let { "improvement - $it" } ?: word else word }
+        return "it can now ${open.joinToString { named(it) }.ifEmpty { "do nothing here" }}" + (has - open.toSet()).takeIf { it.isNotEmpty() }?.let { blocked -> "; " + blocked.joinToString("; ") { "${named(it)} needs ${why(it)}" } }.orEmpty()
     }
 
     /** The way there for a unit given a full turn's movement - orders are given between turns, when units have spent theirs, and Unciv finds no path for a spent unit */
@@ -643,6 +645,32 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             "trade mission" to listOf(UniqueType.CanTradeWithCityStateForGoldAndInfluence),
             "religion" to listOf(UniqueType.MayFoundReligion, UniqueType.MayEnhanceReligion, UniqueType.CanSpreadReligion),
             "golden age" to listOf(UniqueType.OneTimeEnterGoldenAge, UniqueType.OneTimeEnterGoldenAgeTurns))
+
+        /** A line of the rulebook in words: "[+2 Science] <after discovering [Scientific Theory]>" -> "+2 Science (after discovering Scientific Theory)" */
+        fun inWords(unique: String) = unique.replace(Regex("\\[([^\\]]*)\\]"), "$1").replace(Regex("\\s*<([^>]*)>"), " ($1)")
+
+        /** Yields in words, without the game's stat icons: "+6 Faith, +1 Gold" */
+        fun statsInWords(stats: com.unciv.models.stats.Stats) = stats.filter { it.value != 0f }.joinToString { "${if (it.value > 0) "+" else ""}${it.value.toInt()} ${it.key.name}" }
+
+        /** Rulebook lines a ruler has no use for: where the map generator puts a thing, and the AI's own weights */
+        fun isRulebookNoise(unique: String) = listOf("Generated", "Minor deposits", "Guaranteed with", "Deposits", "Considered ", "A Region", "Must be adjacent", "Must not be", "Must be on", "Occurs ").any { unique.startsWith(it) }
+            || "for AI decisions" in unique || "Will not be displayed" in unique
+
+        /** A tile improvement told plainly: its yield and the bonuses that come later - or, for one that yields nothing (a Citadel), what it does */
+        fun improvementInWords(improvement: com.unciv.models.ruleset.tile.TileImprovement): String {
+            val stats = statsInWords(improvement.cloneStats()).ifEmpty { null }
+            val later = improvement.uniques.filter { "after discovering" in it || "<" in it && it.startsWith("[+") }.map { inWords(it) }
+            val does = improvement.uniques.filter { it != "Great Improvement" && it !in listOf("Removes removable features when built", "Will not be replaced by automated units") && !it.startsWith("Pillaging") && !it.startsWith("[+") && !isRulebookNoise(it) }.map { inWords(it) }
+            return (listOfNotNull(stats?.let { "$it a turn on a worked tile" }) + later).ifEmpty { does }.joinToString("; ")
+        }
+
+        /** The improvement this unit can raise in an instant (a Great Person's), with what it gives and whether it uses the unit up; null for one that raises none */
+        fun greatImprovementOf(unit: MapUnit): String? {
+            val unique = unit.getMatchingUniques(UniqueType.ConstructImprovementInstantly).firstOrNull() ?: return null
+            val improvement = unit.civ.gameInfo.ruleset.tileImprovements[unique.params[0]] ?: return null
+            val consumed = "consuming" in unique.text
+            return "a ${improvement.name} (${improvementInWords(improvement)}${if (consumed) "; it uses up the ${unit.baseUnit.name}" else ""})"
+        }
 
         /** "(x,y), 3 tiles NE of Rome" */
         fun where(civ: Civilization, tile: Tile): String {

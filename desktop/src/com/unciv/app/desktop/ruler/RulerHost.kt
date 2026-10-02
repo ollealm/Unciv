@@ -1673,7 +1673,8 @@ object RulerHost {
             .map { unit -> "${unit.name} #${unit.id}" + (unit.religion?.let { " (of ${civ.gameInfo.religions[it]?.let(::named) ?: it})" } ?: "") + ": " + listOfNotNull(
                 if (unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.MayFoundReligion) && manager.mayFoundReligionAtAll()) "can found our religion in a city of ours" else null,
                 if (unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.MayEnhanceReligion) && manager.mayEnhanceReligionAtAll()) "can enhance our religion in a city of ours" else null,
-                if (unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CanSpreadReligion)) "can spread its religion in a city it stands in" else null
+                if (unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CanSpreadReligion)) "can spread its religion in a city it stands in" else null,
+                RulerUnits.greatImprovementOf(unit)?.let { "can raise $it on an unimproved tile of ours (use, ability improvement)" }
             ).ifEmpty { listOf("nothing it can do now") }.joinToString(", ") + " - order it with use, ability religion, in the city" }.toList()
         return mapOf(
             "faithPerTurn" to civ.stats.statsForNextTurn.faith.toInt(),
@@ -1793,7 +1794,60 @@ object RulerHost {
         find(ruleset.beliefs)?.let { b -> return mapOf("kind" to "belief", "name" to b.name, "type" to b.type.name.lowercase(), "gives" to beliefInWords(b).substringAfter(": "),
             "heldBy" to civ.gameInfo.religions.values.filter { it.hasBelief(b.name) }.map { "${it.getReligionDisplayName()} (${it.foundingCiv.civName}'s)" }) }
         find(ruleset.policies)?.let { p -> return mapOf("kind" to "policy", "name" to p.name, "branch" to p.branch.name, "effects" to p.uniques, "adopted" to civ.policies.isAdopted(p.name)) }
-        throw ApiError(404, "The rulebook has nothing called '$name'")
+        val words = { uniques: Collection<String> -> uniques.filterNot { RulerUnits.isRulebookNoise(it) }.map { RulerUnits.inWords(it) } }
+        val yields = { stats: com.unciv.models.stats.Stats -> RulerUnits.statsInWords(stats).ifEmpty { null } }
+        find(ruleset.tileImprovements)?.let { i ->
+            val great = i.hasUnique(com.unciv.models.ruleset.unique.UniqueType.GreatImprovement)
+            // Who raises it: the Great Person whose ability names it (and whether that uses the unit up), or the workers
+            val raisers = ruleset.units.values.filter { u -> u.uniqueTo == null && u.uniqueObjects.any { it.type == com.unciv.models.ruleset.unique.UniqueType.ConstructImprovementInstantly && it.params[0] == i.name } }
+                .map { u -> u.name + if (u.uniqueObjects.any { it.type == com.unciv.models.ruleset.unique.UniqueType.ConstructImprovementInstantly && it.params[0] == i.name && "consuming" in it.text }) " (in an instant, and it uses the unit up)" else " (in an instant)" }
+            return mapOf("kind" to if (great) "great improvement" else "tile improvement", "name" to i.name,
+                "gives" to RulerUnits.improvementInWords(i),
+                "builtOn" to i.terrainsCanBeBuiltOn.joinToString().ifEmpty { "a resource's tile only" },
+                "builtBy" to raisers.ifEmpty { listOf(if (i.terrainsCanBeBuiltOn.any { ruleset.terrains[it]?.type == com.unciv.models.ruleset.tile.TerrainType.Water }) "Work Boats" else "a Worker") }.joinToString(" or "),
+                "requiresTech" to i.techRequired, "weHaveTheTech" to (i.techRequired == null || civ.tech.isResearched(i.techRequired!!)),
+                "uniqueTo" to i.uniqueTo,
+                "effects" to words(i.uniques.filter { it != "Great Improvement" && !it.startsWith("[+") }),
+                "note" to if (great) "a great improvement: the officials' workers never replace it, and pillaging it ruins it until repaired" else null)
+        }
+        find(ruleset.tileResources)?.let { r ->
+            return mapOf("kind" to "${r.resourceType.name.lowercase()} resource", "name" to r.name,
+                "gives" to yields(r.cloneStats()),
+                "improvedBy" to r.getImprovements().toList(), "whenImproved" to r.improvementStats?.let { yields(it) },
+                "revealedBy" to r.revealedBy, "weCanSeeIt" to (r.revealedBy == null || civ.tech.isResearched(r.revealedBy!!)),
+                "weHave" to (civ.getCivResourcesByName()[r.name] ?: 0),
+                "effects" to words(r.uniques).ifEmpty { null },
+                "note" to when (r.resourceType) {
+                    com.unciv.models.ruleset.tile.ResourceType.Luxury -> "each distinct luxury we hold makes the people happier; a second of the same adds nothing, but can be traded"
+                    com.unciv.models.ruleset.tile.ResourceType.Strategic -> "some units and buildings need it to be built and to stand; what we hold is in the briefing's strategicResources"
+                    else -> "it adds to the tile's yield once improved; it cannot be traded" })
+        }
+        find(ruleset.terrains)?.let { t ->
+            return mapOf("kind" to when (t.type) {
+                    com.unciv.models.ruleset.tile.TerrainType.NaturalWonder -> "natural wonder"
+                    com.unciv.models.ruleset.tile.TerrainType.TerrainFeature -> "terrain feature"
+                    else -> "terrain" }, "name" to t.name,
+                "yields" to yields(t.cloneStats()), "movementCost" to if (t.impassable) "impassable" else t.movementCost,
+                "defence" to if (t.defenceBonus != 0f) "${(t.defenceBonus * 100).toInt()}% for a unit standing on it" else null,
+                "effects" to words(t.uniques).ifEmpty { null })
+        }
+        find(ruleset.unitPromotions)?.let { p ->
+            return mapOf("kind" to "promotion", "name" to p.name, "effects" to words(p.uniques), "requires" to p.prerequisites.ifEmpty { null }, "forUnitTypes" to p.unitTypes)
+        }
+        find(ruleset.nations.filterValues { it.isMajorCiv })?.let { n ->
+            return mapOf("kind" to "people", "name" to n.name, "leader" to n.leaderName,
+                "ability" to (n.uniqueName.ifBlank { null }?.let { "$it: " } ?: "") + (n.uniqueText.ifBlank { null } ?: words(n.uniques).joinToString("; ")),
+                "uniqueUnits" to ruleset.units.values.filter { it.uniqueTo == n.name }.map { u -> u.name + (u.replaces?.let { " (in place of the $it)" } ?: "") },
+                "uniqueBuildings" to ruleset.buildings.values.filter { it.uniqueTo == n.name }.map { b -> b.name + (b.replaces?.let { " (in place of the $it)" } ?: "") },
+                "uniqueImprovements" to ruleset.tileImprovements.values.filter { it.uniqueTo == n.name }.map { it.name }.ifEmpty { null })
+        }
+        // A city-state kind, or a city-state by name (its kind)
+        (find(ruleset.cityStateTypes) ?: civ.gameInfo.civilizations.firstOrNull { it.isCityState && it.civName.equals(name, ignoreCase = true) }?.cityStateType)?.let { k ->
+            return mapOf("kind" to "city-state kind", "name" to k.name,
+                "toAFriend" to words(k.friendBonusUniques), "toItsAlly" to words(k.allyBonusUniques),
+                "note" to "a city-state is a friend at 30 influence and allied at 60 with the most influence of anyone; an ally also gets its luxuries and strategic resources, and its vote when the world votes")
+        }
+        throw ApiError(404, "The rulebook has nothing called '$name'. look_up knows buildings and wonders, units, technologies, policies, beliefs, treaties, tile improvements (great improvements too), resources, terrain and natural wonders, promotions, peoples (by name: their ability and unique units and buildings) and city-state kinds (or a city-state by name)")
     }
 
     /** The treaties a deal can carry, as the rulebook would explain them: what each binds, what it costs, how long it runs, what it needs */
