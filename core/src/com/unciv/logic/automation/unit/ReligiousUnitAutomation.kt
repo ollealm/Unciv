@@ -24,6 +24,8 @@ object ReligiousUnitAutomation {
         
         @Readonly
         fun isValidSpreadReligionTarget(city: City): Boolean {
+            // A ruled civ's word is its ruler's: the promise is kept whatever the other side's standing (China's missionaries broke one the turn after it was given, Run 19)
+            if (com.unciv.logic.automation.RulerOverrides.keepsPromise(unit.civ, city.civ, DiplomacyFlags.AgreedToNotSpreadReligion)) return false
             val diplomacyManager = unit.civ.getDiplomacyManager(city.civ)
             if (diplomacyManager?.hasFlag(DiplomacyFlags.AgreedToNotSpreadReligion) == true){
                 // See NextTurnAutomation - these are the conditions under which AI agrees to religious demands

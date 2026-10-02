@@ -115,6 +115,7 @@ object RulerHost {
         RulerOverrides.forbidden = { civ, construction -> civ.civID in RulerOverrides.ruledCivs && isForbidden(civ, construction) }
         RulerOverrides.spendingNoted = { civ, gold, what -> if (civ.civID in RulerOverrides.ruledCivs) spending.getOrPut(civ.civName) { ArrayList() } += Pair(gold, what) }
         RulerOverrides.unitHandler = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.handle(unit) }
+        units.researchRefill = { civ -> applyResearchGoals(civ) }
         RulerOverrides.rulersFirst = { civ -> units.rearmDue(civ) }
         RulerOverrides.worldVoteOf = { civ -> castWorldVote(civ) }
         RulerOverrides.promised = { civ -> diplomacy.promised(civ) }
@@ -500,7 +501,9 @@ object RulerHost {
             com.unciv.models.ruleset.RejectionReasonType.PuppetWonder -> "a puppet city builds no wonders"
             // The engine's word for an "Only available <...>" condition not met: the condition itself is the reason
             com.unciv.models.ruleset.RejectionReasonType.ShouldNotBeDisplayed -> unmetCondition(city, construction)
-            com.unciv.models.ruleset.RejectionReasonType.HiddenWithoutVictory, com.unciv.models.ruleset.RejectionReasonType.DisabledBySetting, com.unciv.models.ruleset.RejectionReasonType.WonderDisabledEra -> "it is not part of this world"
+            // The spaceship's own buildings in a world without the spaceship victory: useless, so nobody builds them (RulerOverrides.servesOnlyAnAbsentVictory)
+            com.unciv.models.ruleset.RejectionReasonType.HiddenWithoutVictory -> if (RulerOverrides.servesOnlyAnAbsentVictory(construction, city.civ.gameInfo)) "it serves only the spaceship, and this world has no scientific victory (see waysToWin)" else "it is not part of this world"
+            com.unciv.models.ruleset.RejectionReasonType.DisabledBySetting, com.unciv.models.ruleset.RejectionReasonType.WonderDisabledEra -> "it is not part of this world"
             com.unciv.models.ruleset.RejectionReasonType.CanOnlyBeBuiltInSpecificCities, com.unciv.models.ruleset.RejectionReasonType.MustBeOnTile, com.unciv.models.ruleset.RejectionReasonType.MustNotBeOnTile,
             com.unciv.models.ruleset.RejectionReasonType.MustBeNextToTile, com.unciv.models.ruleset.RejectionReasonType.MustNotBeNextToTile, com.unciv.models.ruleset.RejectionReasonType.MustOwnTile -> "${city.name} does not lie where it can be built" + (reason.errorMessage.takeIf { it != reason.type.errorMessage }?.let { " ($it)" } ?: "")
             else -> reason.errorMessage.removeSuffix("!").replace(Regex("\\[([^\\]]*)\\]"), "$1")
@@ -805,18 +808,22 @@ object RulerHost {
     private fun reached(civ: Civilization, tech: String) =
         civ.tech.isResearched(tech) && civ.gameInfo.ruleset.technologies[tech]?.isContinuallyResearchable() != true
 
+    /** The engine's research queue holds the path to the first research goal still ahead. Called before every turn, and again mid-turn when a technology
+     *  lands by a Great Scientist's hand and leaves the queue empty (RulerUnits.researchRefill) */
+    private fun applyResearchGoals(civ: Civilization) {
+        val standing = orders[civ.civName] ?: return
+        val goal = standing.research.firstOrNull { !reached(civ, it) } ?: return
+        val path = civ.tech.getRequiredTechsToDestination(civ.gameInfo.ruleset.technologies[goal]!!).map { it.name }
+        if (path.isNotEmpty() && civ.tech.techsToResearch != path) {
+            civ.tech.techsToResearch.clear()
+            civ.tech.techsToResearch.addAll(path)
+        }
+    }
+
     private fun applyStandingOrders(civ: Civilization) {
         val standing = orders[civ.civName] ?: return
         val ruleset = civ.gameInfo.ruleset
-
-        val goal = standing.research.firstOrNull { !reached(civ, it) }
-        if (goal != null) {
-            val path = civ.tech.getRequiredTechsToDestination(ruleset.technologies[goal]!!).map { it.name }
-            if (path.isNotEmpty() && civ.tech.techsToResearch != path) {
-                civ.tech.techsToResearch.clear()
-                civ.tech.techsToResearch.addAll(path)
-            }
-        }
+        applyResearchGoals(civ)
 
         if (standing.garrisonEveryCity) for (city in civ.cities) {
             val centre = city.getCenterTile()

@@ -153,11 +153,13 @@ object UnitAutomation {
         if (tryFogBust(unit)) return
 
         // A land unit with nothing left to do stays wherever it last stopped - at sea, embarked, it stayed there for good (Run 12: soldiers
-        // off Seoul and Troyes for 60 to 100 turns). It comes ashore on our own ground, or any shore, instead
+        // off Seoul and Troyes for 60 to 100 turns). It comes ashore on our own ground, or any shore it may set foot on, instead: the twenty nearest
+        // land tiles were once tried whoever held them, and a soldier off another realm's closed coast sat there (Run 19). Failing every shore, it sails home
         if (unit.isEmbarked() && unit.baseUnit.isLandUnit) {
-            val ashore = unit.getTile().getTilesInDistance(10).filter { it.isLand }.sortedWith(compareBy({ it.getOwner() != unit.civ }, { it.aerialDistanceTo(unit.getTile()) }))
-                .take(20).firstOrNull { unit.movement.canMoveTo(it) && unit.movement.canReach(it) }
+            val ashore = unit.getTile().getTilesInDistance(10).filter { it.isLand && unit.movement.canMoveTo(it) }
+                .sortedWith(compareBy({ it.getOwner() != unit.civ }, { it.aerialDistanceTo(unit.getTile()) })).take(8).firstOrNull { unit.movement.canReach(it) }
             if (ashore != null) { unit.movement.headTowards(ashore); return }
+            if (tryHeadHome(unit)) return
         }
 
         // Idle CS units should wander so they don't obstruct players so much
@@ -165,10 +167,16 @@ object UnitAutomation {
             wander(unit, stayInTerritory = true)
     }
 
+    /** A ruled civ's land unit explores on foot: it never sets out to explore the sea. Embarked, the explore routine kept India's Trebuchet
+     *  drifting over the ocean for twenty turns and more (Run 19), and the ashore rule at the end of automateUnitMoves never got its turn */
+    @Readonly
+    private fun exploresOnFoot(unit: MapUnit) = unit.baseUnit.isLandUnit && unit.civ.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs
+
     @Readonly
     private fun isGoodTileToExplore(unit: MapUnit, tile: Tile, unitVisibilityRange: Int): Boolean {
         // These should be ordered by increasing computational cost
-        return (tile.getOwner() == null || !tile.getOwner()!!.isCityState)
+        return (tile.isLand || !exploresOnFoot(unit))
+                && (tile.getOwner() == null || !tile.getOwner()!!.isCityState)
                 && tile.getTilesInDistance(unitVisibilityRange).any { !unit.civ.hasExplored(it) }
                 && (!unit.civ.isCityState || tile.neighbors.any { it.getOwner() == unit.civ }) // Don't want city-states exploring far outside their borders
                 && unit.getDamageFromTerrain(tile) <= 0    // Don't take unnecessary damage
@@ -200,6 +208,9 @@ object UnitAutomation {
         // Nothing immediate, lets look further. Number increases exponentially with distance - at 10 this took a looong time
         for (tile in unit.currentTile.getTilesInDistance(5))
             if (isGoodTileToExplore(unit, tile, unitVisibilityRange)) {
+                // On foot means by a path over land that exists: headTowards a tile with no path moves nothing yet counts as done, and India's Pikeman
+                // stood embarked off a shore it could not enter, turn upon turn (Run 19), while a path over water would carry it out to sea
+                if (exploresOnFoot(unit) && unit.movement.getShortestPath(tile).let { path -> path.isEmpty() || path.any { it.isWater } }) continue
                 unit.movement.headTowards(tile)
                 return true
             }

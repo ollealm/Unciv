@@ -1,11 +1,18 @@
 package com.unciv.logic.automation
 
+import com.unciv.logic.GameInfo
 import com.unciv.logic.battle.ICombatant
+import com.unciv.logic.civilization.AlertType
 import com.unciv.logic.civilization.Civilization
+import com.unciv.logic.civilization.diplomacy.DiplomacyFlags
 import com.unciv.logic.map.mapunit.MapUnit
 import com.unciv.logic.map.tile.Tile
+import com.unciv.logic.trade.TradeOfferType
 import com.unciv.logic.trade.TradeRequest
+import com.unciv.models.ruleset.INonPerpetualConstruction
 import com.unciv.models.ruleset.nation.Personality
+import com.unciv.models.ruleset.unique.IHasUniques
+import com.unciv.models.ruleset.unique.UniqueType
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -78,6 +85,36 @@ object RulerOverrides {
      *  "Defensive Pact", "Declaration of Friendship", "luxuries", "calls to war" (asking another power to join a war of ours), or "all" */
     val noProposals = ConcurrentHashMap<String, Set<String>>()
     fun mayPropose(civ: com.unciv.logic.civilization.Civilization, kind: String) = noProposals[civ.civID]?.let { "all" in it || kind in it } != true
+
+    /** Does [other]'s own offer of this kind of deal already wait on a ruled civ's desk for its advisor? Then its officials propose none of that kind
+     *  to them - the two would cross (China and Egypt each proposed a Research Agreement while the other's waited, Run 19). Luxuries are one kind;
+     *  a proposal of friendship waits as an alert, not a trade. An unruled civ answers its desk before it proposes, so its proposals never cross */
+    @yairm210.purity.annotations.Readonly
+    fun crossesWaitingOffer(civ: Civilization, other: Civilization, kind: String): Boolean {
+        if (civ.civID !in ruledCivs) return false
+        if (kind == "Declaration of Friendship") return civ.popupAlerts.any { it.type == AlertType.DeclarationOfFriendship && it.value == other.civID }
+        return civ.tradeRequests.any { request -> request.requestingCiv == other.civID && (request.trade.ourOffers + request.trade.theirOffers)
+            .any { offer -> if (kind == "luxuries") offer.type == TradeOfferType.Luxury_Resource else offer.name == kind } }
+    }
+
+    /** A ruled civ keeps the promises its advisor gave: true when [other] holds our word under [promise] (the flag sits on the promisee's side, toward
+     *  us - Demand.kt). The engine's own automation reneges unless the other side is an Ally; a ruler's word is not the officials' to break.
+     *  An explicit order of the ruler's is another matter and is not gated here. Unruled civs keep the engine's habit */
+    @yairm210.purity.annotations.Readonly
+    fun keepsPromise(civ: Civilization, other: Civilization, promise: DiplomacyFlags): Boolean =
+        civ.civID in ruledCivs && other.getDiplomacyManager(civ)?.hasFlag(promise) == true
+
+    /** A building that serves only the spaceship - enabling its parts, or speeding their construction - in a world whose spaceship victory is off:
+     *  nobody builds it, officials or ruler (Egypt's officials queued a Spaceship Factory with the Scientific victory off, Run 19). The parts and the
+     *  Apollo Program bar themselves by their "Only available" lines; the Spaceship Factory carries none, and its +3 production is no reason to raise
+     *  it. Every civ's, not only a ruled one's: the thing is useless to anyone */
+    @yairm210.purity.annotations.Readonly
+    fun servesOnlyAnAbsentVictory(construction: INonPerpetualConstruction, game: GameInfo): Boolean {
+        val spaceshipVictories = game.ruleset.victories.values.filter { it.requiredSpaceshipParts.isNotEmpty() }
+        if (spaceshipVictories.isEmpty() || spaceshipVictories.any { it.name in game.gameParameters.victoryTypes }) return false
+        val purpose = (construction as IHasUniques).uniqueObjects.filter { it.type != UniqueType.OnlyAvailable && it.type != UniqueType.CannotBeHurried && it.type != UniqueType.TriggersAlertOnCompletion }
+        return purpose.isNotEmpty() && purpose.all { it.type == UniqueType.EnablesConstructionOfSpaceshipParts || it.type == UniqueType.SpaceshipPart || "Spaceship part" in it.params }
+    }
 
     /** Called with (civ, unit, why) when a ruled civ's automation disbands a unit for a reason of its own, before it goes */
     @Volatile var unitDisbanded: ((com.unciv.logic.civilization.Civilization, MapUnit, String) -> Unit)? = null

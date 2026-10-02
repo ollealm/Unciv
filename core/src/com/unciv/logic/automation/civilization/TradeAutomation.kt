@@ -198,7 +198,7 @@ object TradeAutomation {
         }) {
 
             val isEnemy = civInfo.getDiplomacyManager(otherCiv)!!.isRelationshipLevelLE(RelationshipLevel.Enemy)
-            if (isEnemy || otherCiv.tradeRequests.any { it.requestingCiv == civInfo.civID })
+            if (isEnemy || otherCiv.tradeRequests.any { it.requestingCiv == civInfo.civID } || RulerOverrides.crossesWaitingOffer(civInfo, otherCiv, "luxuries"))
                 continue
 
             val trades = potentialLuxuryTrades(civInfo, otherCiv)

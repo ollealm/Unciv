@@ -36,6 +36,7 @@ object DiplomacyAutomation {
             .filter {
                 civInfo.diplomacyFunctions.canSignDeclarationOfFriendshipWith(it)
                     && !civInfo.getDiplomacyManager(it)!!.hasFlag(DiplomacyFlags.DeclinedDeclarationOfFriendship)
+                    && !com.unciv.logic.automation.RulerOverrides.crossesWaitingOffer(civInfo, it, "Declaration of Friendship")
             }
             .sortedByDescending { it.getDiplomacyManager(civInfo)!!.relationshipLevel() }.toList()
         for (otherCiv in civsThatWeCanDeclareFriendshipWith) {
@@ -184,6 +185,7 @@ object DiplomacyAutomation {
                 && civInfo.diplomacyFunctions.meetsEmbassyRequirementFor(it)
                 && !ourDiploManager.hasFlag(DiplomacyFlags.DeclinedOpenBorders)
                 && !areWeOfferingTrade(civInfo, it, Constants.openBorders)
+                && !com.unciv.logic.automation.RulerOverrides.crossesWaitingOffer(civInfo, it, Constants.openBorders)
         }.sortedByDescending { it.getDiplomacyManager(civInfo)!!.relationshipLevel() }
 
         for (otherCiv in civsThatWeCanOpenBordersWith) {
@@ -256,6 +258,7 @@ object DiplomacyAutomation {
             civInfo.diplomacyFunctions.canSignResearchAgreementWith(it)
                 && !civInfo.getDiplomacyManager(it)!!.hasFlag(DiplomacyFlags.DeclinedResearchAgreement)
                 && !areWeOfferingTrade(civInfo, it, Constants.researchAgreement)
+                && !com.unciv.logic.automation.RulerOverrides.crossesWaitingOffer(civInfo, it, Constants.researchAgreement)
         }.sortedByDescending { it.stats.statsForNextTurn.science }
 
         for (otherCiv in civsThatWeCanSignResearchAgreementWith) {
@@ -282,6 +285,7 @@ object DiplomacyAutomation {
                 && !ourDiploManager.hasFlag(DiplomacyFlags.DeclinedDefensivePact)
                 && ourDiploManager.opinionOfOtherCiv() > 70f * civInfo.getPersonality().inverseScaledFocus(PersonalityValue.Aggressive)
                 && !areWeOfferingTrade(civInfo, it, Constants.defensivePact)
+                && !com.unciv.logic.automation.RulerOverrides.crossesWaitingOffer(civInfo, it, Constants.defensivePact)
         }
 
         for (otherCiv in civsThatWeCanSignDefensivePactWith) {

@@ -3,6 +3,7 @@ package com.unciv.app.desktop.ruler
 import com.badlogic.gdx.utils.JsonValue
 import com.unciv.logic.automation.unit.CityLocationTileRanker
 import com.unciv.logic.civilization.Civilization
+import com.unciv.logic.civilization.diplomacy.DiplomacyFlags
 import com.unciv.logic.map.HexMath
 import com.unciv.logic.map.mapunit.MapUnit
 import com.unciv.logic.map.tile.Tile
@@ -30,6 +31,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
     /** unit id -> order */
     val orders = HashMap<Int, Order>()
+
+    /** Set by the host: puts the path to the standing research goals' next goal into the engine's queue, which holds only the path to the first */
+    var researchRefill: (Civilization) -> Unit = {}
 
     /** Units given away by order since the host last reckoned its losses: gone from our rolls, but neither lost nor disbanded */
     val given = HashSet<Int>()
@@ -165,8 +169,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 drop(unit)
                 return false
             }
-            // B9: a civilian (a Great Person on its way to use itself) whose target holds one of our own civilians changes places with it
-            if (order.action != "hold" && unit.isCivilian() && target.civilianUnit?.civ == civ && unit.getTile().aerialDistanceTo(target) == 1 && unit.movement.canUnitSwapTo(target)) {
+            // A civilian whose target holds one of our own civilians changes places with it: a Great Person on its way to use itself, or a Settler held or
+            // sent where our Worker stands (China's waited three turns beside its own Worker and lost its order, Run 19). A held Great Person never gets here: it found another place above
+            if (unit.isCivilian() && target.civilianUnit?.civ == civ && unit.getTile().aerialDistanceTo(target) == 1 && unit.movement.canUnitSwapTo(target)) {
                 unit.movement.swapMoveToTile(target)
             } else unit.movement.headTowards(target)
             if (unit.getTile() != target) {
@@ -175,8 +180,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 order.lastSpot = spot
                 if (order.turnsStuck >= 3) {
                     val blocker = target.militaryUnit?.takeIf { !unit.isCivilian() } ?: target.civilianUnit?.takeIf { unit.isCivilian() }
-                    // One of our own holds the city: the relief waits beside it and swaps in the turn it can, instead of giving up
-                    if (order.action == "garrison" && blocker != null && blocker.civ == civ) {
+                    // One of our own holds the place - a garrison's relief, or a civilian bound where our Worker stands: it waits beside it and swaps in the turn it can, instead of giving up
+                    if (blocker != null && blocker.civ == civ && (order.action == "garrison" || unit.isCivilian())) {
                         if (order.turnsStuck == 3) log(civ, "Our ${unit.name} #${unit.id} waits beside ${where(civ, target)}: our ${blocker.name} #${blocker.id} holds it and cannot change places yet. It swaps in as soon as it can.")
                         return true
                     }
@@ -194,8 +199,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             "settle" -> {
                 // Founding needs movement left; a settler that walked the last stretch this turn founds next turn
                 if (unit.currentMovement <= 0f) return true
+                val broken = promiseBroken(civ, unit.getTile(), "settle") // judged before the founding, which the other side's flags answer to
                 if (UnitActions.invokeUnitAction(unit, UnitActionType.FoundCity)) {
-                    log(civ, "Our Settler founded ${civ.cities.last().name} at ${where(civ, unit.getTile())}.")
+                    log(civ, "Our Settler founded ${civ.cities.last().name} at ${where(civ, unit.getTile())}${broken.orEmpty()}.")
                     orders.remove(unit.id)
                     true
                 } else {
@@ -210,8 +216,10 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 if (unit.currentMovement <= 0f) return true
                 // A Great Person can usually be spent more than one way; the ruler says which, or gets the first that works
                 val wanted = ABILITIES.filter { order.ability == null || it in abilitiesNamed(order.ability) }
+                // The first Great Scientist's boost finished the only technology the engine's queue held, and the second found no research under way (Run 19): the goals' next path is set before the boost
+                if (UnitActionType.HurryResearch in wanted && civ.tech.currentTechnologyName() == null) researchRefill(civ)
                 val used = wanted.firstOrNull { UnitActions.invokeUnitAction(unit, it) }
-                if (used != null) log(civ, "Our ${unit.name} used its ability (${used.name}) at ${where(civ, unit.getTile())}.")
+                if (used != null) log(civ, "Our ${unit.name} used its ability (${used.name}) at ${where(civ, unit.getTile())}${if (used == UnitActionType.SpreadReligion) promiseBroken(civ, unit.getTile(), "religion").orEmpty() else ""}.")
                 else {
                     order.turnsStuck += 1
                     if (order.turnsStuck == 1) log(civ, "Our ${unit.name} #${unit.id} could not use its ability at ${where(civ, unit.getTile())}${order.ability?.let { " ($it)" } ?: ""}: ${abilitiesHere(unit)}. Name one with the order and stand where it applies. It tries again for two more turns, then the order is dropped.")
@@ -450,7 +458,23 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         orders[unitId] = Order(action, x, y, ability)
         released -= unitId // an order given is the ruler's hand back on it
         val turns = if (target == unit.getTile()) 0 else kotlin.math.ceil(path.size / unit.getMaxMovement().coerceAtLeast(1).toFloat()).toInt()
-        return "${unit.name} #$unitId will $action at ${where(civ, target)}" + (if (turns > 0) ", about $turns turns away" else "")
+        // A ruler may break the realm's word, but never unknowing: the reply says which promise the order breaks
+        val broken = when { action == "settle" -> promiseBroken(civ, target, "settle"); action == "use" && (ability == null || "religion" in ability.lowercase()) -> promiseBroken(civ, target, "religion"); else -> null }
+        return "${unit.name} #$unitId will $action at ${where(civ, target)}" + (if (turns > 0) ", about $turns turns away" else "") + broken.orEmpty()
+    }
+
+    /** The promise an order at this tile would break, as a clause for the reply and the log: a city founded within six tiles of a power that holds our
+     *  word not to settle near them, or our religion spread into a city of one that holds our word to spare them. The officials keep these promises on
+     *  their own (RulerOverrides.keepsPromise); the ruler's own order stands, said plainly. Null when no promise is touched */
+    fun promiseBroken(civ: Civilization, tile: Tile, what: String): String? {
+        val (flag, deed) = when (what) {
+            "settle" -> DiplomacyFlags.AgreedToNotSettleNearUs to "settle near them"
+            else -> DiplomacyFlags.AgreedToNotSpreadReligion to "spread our religion to them"
+        }
+        val touched = if (what == "settle") civ.getKnownCivs().filter { other -> other.isMajorCiv() && other.cities.any { it.getCenterTile().aerialDistanceTo(tile) <= 6 } }.toList()
+            else listOfNotNull(tile.getCity()?.civ?.takeIf { it != civ })
+        val wronged = touched.firstOrNull { it.getDiplomacyManager(civ)?.hasFlag(flag) == true } ?: return null
+        return " - this breaks our promise to ${wronged.civName} not to $deed"
     }
 
     /** {unit, action: "gift", to}: march onto the nearest of their land we can reach, and be given to them there */
@@ -518,7 +542,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         val open = has.filter { word -> ABILITY_WORDS[word]!!.any { type -> UnitActions.getUnitActions(unit, type).any { it.action != null } } }
         fun why(word: String) = when (word) {
             "improvement" -> "an unimproved tile of ours outside a city to stand on, where its improvement can be built"
-            "hurry research" -> if (unit.civ.tech.currentTechnologyName() == null) "research under way" else "research that can be hurried"
+            "hurry research" -> if (unit.civ.tech.currentTechnologyName() == null) "research under way - every research goal is reached; give the next with orders.research" else "research that can be hurried"
             "hurry production" -> when {
                 city == null || city.civ != unit.civ -> "a city of ours building a building or a wonder"
                 city.cityConstructions.getCurrentConstruction() !is com.unciv.models.ruleset.Building -> "a building or a wonder under way in ${city.name}, not ${city.cityConstructions.currentConstructionName().ifEmpty { "nothing" }}"
@@ -547,7 +571,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
      *  can embark, sites across the sea from the same survey, marked so (Run 18's two continents: the list hid every overseas site) */
     fun citySites(civ: Civilization): List<String> {
         val settler = civ.units.getCivUnits().firstOrNull { it.hasUnique(UniqueType.FoundCity) }
+        // A realm with no city yet has no home landmass by its cities: the ground its settler, or any of its people, stands on is home (at turn 0 every site read "across the sea", Run 19)
         val home = civ.cities.map { it.getCenterTile().getContinent() }.toSet()
+            .ifEmpty { (listOfNotNull(settler) + civ.units.getCivUnits()).map { it.getTile() }.filter { it.isLand }.map { it.getContinent() }.toSet() }
         val surveyed = survey(civ)
         val ranked: Map<Tile, Float> = settler?.let { CityLocationTileRanker.getBestTilesToFoundCity(it, 8, 0f).tileRankMap }
             ?.filterKeys { settleProblem(civ, it) == null }?.takeIf { it.isNotEmpty() }
@@ -558,7 +584,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             .take(5).map { it.key to it.value }.toList()
         val overseas = surveyed.filterKeys { it.getContinent() !in home && near.none { (tile, _) -> tile == it } }.entries.sortedByDescending { it.value }
             .take(if (near.isEmpty()) 5 else 2).map { it.key to it.value }
-        return (near + overseas).map { (tile, rank) -> describeSite(civ, tile, rank) + (if (tile.getContinent() in home) "" else crossing(civ, tile)) }
+        return (near + overseas).map { (tile, rank) -> describeSite(civ, tile, rank) + (if (tile.getContinent() in home) "" else crossing(civ, tile)) + promiseBroken(civ, tile, "settle")?.replace(" - this breaks", " - settling here breaks").orEmpty() }
     }
 
     /** How a site across the sea is reached: from which coastal city of ours, and that the settler embarks on its own (the move and settle orders path across water) */
