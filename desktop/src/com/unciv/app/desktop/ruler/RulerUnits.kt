@@ -106,11 +106,12 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         // A Great Person is the ruler's to spend: the officials never touch one unless it was released to them.
         // Caught here, in the automation's own loop, because one born at the start of a turn would otherwise be spent within it.
         if (unit.id !in orders && unit.id !in released && unit.isGreatPerson()) {
-            // One born in the open waits in the nearest town of ours rather than in the field; a general or an admiral belongs beside the host
-            val shelter = if (unit.isGreatPersonOfType("War") || unit.getTile().let { it.isCityCenter() && it.getOwner() == unit.civ }) null else shelterFor(unit)
+            // One born in the open waits in the nearest town of ours rather than in the field; a general or an admiral belongs beside the host.
+            // One born in a town another of ours already waits in, or is bound for, moves on too: two never share a place
+            val shelter = if (unit.isGreatPersonOfType("War") || unit.getTile().let { it.isCityCenter() && it.getOwner() == unit.civ && !claimed(unit, it) }) null else shelterFor(unit)
             orders[unit.id] = Order("hold", shelter?.position?.x?.toInt(), shelter?.position?.y?.toInt())
             log(unit.civ, "A ${unit.name} #${unit.id} is at ${where(unit.civ, unit.getTile())} and awaits orders (use, move, or release to the officials)" +
-                (shelter?.let { "; meanwhile it walks to ${it.getCity()!!.name} and waits there" } ?: "") + ".")
+                (shelter?.let { if (it.isCityCenter()) "; meanwhile it walks to ${it.getCity()!!.name} and waits there" else "; meanwhile it waits beside ${it.getCity()!!.name}, whose town another of ours holds" } ?: "") + ".")
         }
         val order = orders[unit.id] ?: return false
         if (order.action == "gift") return withCityStatePassage(unit, recipientOf(unit.civ, order)) { checkGift(unit, order) ?: carryOut(unit, order) }
@@ -151,13 +152,20 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             // The escort and upgrade routines may have moved this soldier already this turn: no movement left is not "cannot reach"
             if (unit.currentMovement <= 0f) return true
             if (order.action == "hold" && unit.isGreatPerson() && (!canMarch(unit, target) || order.turnsStuck >= 2)) { order.x = null; order.y = null; return true }
+            // A held one whose waiting place another of ours has taken meanwhile looks for another (Mongolia's two prophets swapped places every turn from T239)
+            if (order.action == "hold" && unit.isGreatPerson() && claimed(unit, target)) {
+                val other = shelterFor(unit)
+                order.x = other?.position?.x?.toInt(); order.y = other?.position?.y?.toInt(); order.turnsStuck = 0
+                if (other == null || other == unit.getTile()) return true
+                return carryOut(unit, order)
+            }
             if (!canMarch(unit, target)) {
                 log(civ, "Our ${unit.name} cannot reach ${where(civ, target)}; the order is dropped and the officials take it back.")
                 drop(unit)
                 return false
             }
             // B9: a civilian (a Great Person on its way to use itself) whose target holds one of our own civilians changes places with it
-            if (unit.isCivilian() && target.civilianUnit?.civ == civ && unit.getTile().aerialDistanceTo(target) == 1 && unit.movement.canUnitSwapTo(target)) {
+            if (order.action != "hold" && unit.isCivilian() && target.civilianUnit?.civ == civ && unit.getTile().aerialDistanceTo(target) == 1 && unit.movement.canUnitSwapTo(target)) {
                 unit.movement.swapMoveToTile(target)
             } else unit.movement.headTowards(target)
             if (unit.getTile() != target) {
@@ -204,10 +212,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 val used = wanted.firstOrNull { UnitActions.invokeUnitAction(unit, it) }
                 if (used != null) log(civ, "Our ${unit.name} used its ability (${used.name}) at ${where(civ, unit.getTile())}.")
                 else {
-                    val known = ABILITY_WORDS.filter { (_, types) -> types.any { UnitActions.getUnitActions(unit, it).any() } }.keys
                     order.turnsStuck += 1
-                    if (order.turnsStuck == 1) log(civ, "Our ${unit.name} #${unit.id} could not use its ability at ${where(civ, unit.getTile())}: nothing to use it on here (trade missions need a city-state's city, improvements need an unimproved tile of ours, hurrying needs a city). " +
-                        "It can: ${known.joinToString().ifEmpty { "nothing here" }} - name one with the order and stand where it applies. It tries again for two more turns, then the order is dropped.")
+                    if (order.turnsStuck == 1) log(civ, "Our ${unit.name} #${unit.id} could not use its ability at ${where(civ, unit.getTile())}${order.ability?.let { " ($it)" } ?: ""}: ${abilitiesHere(unit)}. Name one with the order and stand where it applies. It tries again for two more turns, then the order is dropped.")
                     if (order.turnsStuck < 3) return true
                     log(civ, "Our ${unit.name} #${unit.id} still could not use its ability at ${where(civ, unit.getTile())}; the order is dropped and the officials take it back.")
                     drop(unit)
@@ -313,9 +319,16 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             .sortedBy { it.aerialDistanceTo(unit.getTile()) }.take(20) // path-finding is dear; twenty of the nearest is plenty
             .firstOrNull { canMarch(unit, it) }
 
-    /** The nearest town of ours a held Great Person can walk to and wait in */
-    private fun shelterFor(unit: MapUnit): Tile? = unit.civ.cities.map { it.getCenterTile() }.filter { it.civilianUnit == null || it.civilianUnit == unit }
+    /** Is this tile held, or waited for, by another civilian of ours under a hold order: a second Great Person must not be sent there */
+    private fun claimed(unit: MapUnit, tile: Tile) = (tile.civilianUnit?.takeIf { it != unit && it.civ == unit.civ } != null) ||
+        orders.any { (id, order) -> id != unit.id && order.action == "hold" && order.x == tile.position.x.toInt() && order.y == tile.position.y.toInt() }
+
+    /** The nearest town of ours a held Great Person can walk to and wait in - or, with every town near taken, the nearest free tile of ours beside one */
+    private fun shelterFor(unit: MapUnit): Tile? = unit.civ.cities.map { it.getCenterTile() }.filter { !claimed(unit, it) }
         .sortedBy { it.aerialDistanceTo(unit.getTile()) }.take(8).firstOrNull { canMarch(unit, it) }
+        ?: unit.civ.cities.map { it.getCenterTile() }.sortedBy { it.aerialDistanceTo(unit.getTile()) }.take(4).flatMap { it.neighbors.toList() }
+            .filter { it.isLand && !it.isImpassible() && it.getOwner() == unit.civ && it.civilianUnit == null && !claimed(unit, it) }
+            .sortedBy { it.aerialDistanceTo(unit.getTile()) }.take(8).firstOrNull { canMarch(unit, it) }
 
     /** An order dropped for good: a Great Person goes to the officials with it, or the hold at the top of [handle] would take it back next turn and the ruler would be asked again */
     private fun drop(unit: MapUnit) {
@@ -405,9 +418,17 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
         val target = if (x != null) civ.gameInfo.tileMap[x!!, y!!] else unit.getTile()
         if (action == "settle") settleProblem(civ, target)?.let { throw IllegalArgumentException("Cannot found a city at ${where(civ, target)}: $it" + nearestSiteHint(civ, unit, target)) }
+        // A way this unit does not have at all (a Great Prophet has no golden age) is refused now, not tried for three turns
+        json.get("ability")?.takeUnless { it.isNull }?.asString()?.lowercase()?.trim()?.let { ability -> if (action == "use" && ABILITY_UNIQUES[ability]?.none { unit.hasUnique(it) } == true)
+            throw IllegalArgumentException("${unit.name} #$unitId has no '$ability' to use; the ways it has: ${ABILITY_UNIQUES.filter { (_, uniques) -> uniques.any { unit.hasUnique(it) } }.keys.joinToString().ifEmpty { "none" }}") }
         if (action == "use") when (json.get("ability")?.takeUnless { it.isNull }?.asString()?.lowercase()?.trim()) {
             "trade mission" -> if (!(target.isCityCenter() && target.getOwner()?.isCityState == true)) throw IllegalArgumentException("A trade mission needs a city-state's city as its target; ${where(civ, target)} is not one")
-            "hurry production" -> target.getCity()?.let { city -> if (city.cityConstructions.getCurrentConstruction() !is com.unciv.models.ruleset.INonPerpetualConstruction) throw IllegalArgumentException("${city.name} is building nothing that can be hurried right now (its queue is empty or set to Science/Gold); queue something first") }
+            "hurry production" -> target.getCity()?.let { city -> when (val current = city.cityConstructions.getCurrentConstruction()) {
+                // A Great Engineer hurries a building or a wonder (UnitActionsGreatPerson), never a unit - spaceship parts are units - nor what the rules bar
+                !is com.unciv.models.ruleset.INonPerpetualConstruction -> throw IllegalArgumentException("${city.name} is building nothing that can be hurried right now (its queue is empty or set to Science/Gold); queue something first")
+                !is com.unciv.models.ruleset.Building -> throw IllegalArgumentException("${city.name} is building ${current.name}, a unit: hurrying production speeds only a building or a wonder; put one first in ${city.name}'s queue")
+                else -> if (current.hasUnique(UniqueType.CannotBeHurried)) throw IllegalArgumentException("${current.name} cannot be hurried - the rules of this world forbid it; put another building or wonder first in ${city.name}'s queue")
+            } }
         }
         if (action == "garrison" && !target.isCityCenter()) throw IllegalArgumentException("garrison needs a city")
         if (action == "garrison" && unit.isCivilian()) throw IllegalArgumentException("Only soldiers can garrison")
@@ -460,7 +481,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         }
         val health = if (unit.health < 100) ", ${unit.health} hp" else ""
         val atSea = if (unit.isEmbarked()) ", at sea, embarked" + (embarkedSince[unit.id]?.let { " since turn $it" } ?: "") else ""
-        return "${unit.name} #${unit.id} at ${where(civ, unit.getTile())}$atSea, $state$health"
+        // A ship left to the officials that has not moved in ten turns: said, as an embarked soldier's time at sea is (Babylon's Caravel sat 86 turns off Seoul)
+        val idle = if (state == "automated" && unit.isMilitary() && unit.baseUnit.isWaterUnit && turnsStill(unit) >= 10) ", idle here since turn ${civ.gameInfo.turns - turnsStill(unit)}" else ""
+        return "${unit.name} #${unit.id} at ${where(civ, unit.getTile())}$atSea, $state$health$idle"
     }
 
     /** Why a city cannot be founded on this tile, or null if it can */
@@ -485,6 +508,29 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         return ". Nearest good site: ${where(civ, best.key)}"
     }
 
+    /** The ways this Great Person can be spent, by the order's words: those open where it stands now, and each of the others with what it waits on.
+     *  Only the abilities it has at all (a Great Prophet has no golden age), and open means the engine would carry it out now - not merely list it */
+    fun abilitiesHere(unit: MapUnit): String {
+        val tile = unit.getTile()
+        val city = tile.getCity()?.takeIf { tile.isCityCenter() }
+        val has = ABILITY_UNIQUES.filter { (_, uniques) -> uniques.any { unit.hasUnique(it) } }.keys
+        val open = has.filter { word -> ABILITY_WORDS[word]!!.any { type -> UnitActions.getUnitActions(unit, type).any { it.action != null } } }
+        fun why(word: String) = when (word) {
+            "improvement" -> "an unimproved tile of ours outside a city to stand on, where its improvement can be built"
+            "hurry research" -> if (unit.civ.tech.currentTechnologyName() == null) "research under way" else "research that can be hurried"
+            "hurry production" -> when {
+                city == null || city.civ != unit.civ -> "a city of ours building a building or a wonder"
+                city.cityConstructions.getCurrentConstruction() !is com.unciv.models.ruleset.Building -> "a building or a wonder under way in ${city.name}, not ${city.cityConstructions.currentConstructionName().ifEmpty { "nothing" }}"
+                !city.cityConstructions.canBeHurried() -> "work that can be hurried: ${city.cityConstructions.currentConstructionName()} cannot be"
+                else -> "more work left on ${city.cityConstructions.currentConstructionName()}"
+            }
+            "trade mission" -> "a city-state's land to stand in, at peace with us"
+            "religion" -> "a city of ours to found or enhance our religion in, or a city of another faith to spread it to"
+            else -> "movement left this turn"
+        }
+        return "it can now ${open.joinToString().ifEmpty { "do nothing here" }}" + (has - open.toSet()).takeIf { it.isNotEmpty() }?.let { blocked -> "; " + blocked.joinToString("; ") { "$it needs ${why(it)}" } }.orEmpty()
+    }
+
     /** The way there for a unit given a full turn's movement - orders are given between turns, when units have spent theirs, and Unciv finds no path for a spent unit */
     /** Could this unit, given a full turn's movement, walk to that tile at all? */
     fun canMarch(unit: MapUnit, target: Tile) = target == unit.getTile() || pathTo(unit, target).isNotEmpty()
@@ -495,31 +541,39 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         return try { unit.movement.getShortestPath(target) } finally { unit.currentMovement = spent }
     }
 
-    /** Best places to found a city near our lands: the officials' ranking when a settler can judge, else our own simple survey */
+    /** Best places to found a city near our lands: the officials' ranking when a settler can judge, else our own simple survey - and, once our people
+     *  can embark, sites across the sea from the same survey, marked so (Run 18's two continents: the list hid every overseas site) */
     fun citySites(civ: Civilization): List<String> {
         val settler = civ.units.getCivUnits().firstOrNull { it.hasUnique(UniqueType.FoundCity) }
+        val home = civ.cities.map { it.getCenterTile().getContinent() }.toSet()
+        val surveyed = survey(civ)
         val ranked: Map<Tile, Float> = settler?.let { CityLocationTileRanker.getBestTilesToFoundCity(it, 8, 0f).tileRankMap }
             ?.filterKeys { settleProblem(civ, it) == null }?.takeIf { it.isNotEmpty() }
-            ?: survey(civ)
+            ?: surveyed.filterKeys { it.getContinent() in home }
         // A site nobody can walk to is no site: asked of the settler if we have one, else judged by landmass
-        val home = civ.cities.map { it.getCenterTile().getContinent() }.toSet()
-        return ranked.entries.sortedByDescending { it.value }.asSequence()
+        val near = ranked.entries.sortedByDescending { it.value }.asSequence()
             .filter { (tile, _) -> if (settler != null) tile == settler.getTile() || pathTo(settler, tile).isNotEmpty() else tile.getContinent() in home }
-            .take(5).map { (tile, rank) -> describeSite(civ, tile, rank) }.toList()
+            .take(5).map { it.key to it.value }.toList()
+        val overseas = surveyed.filterKeys { it.getContinent() !in home && near.none { (tile, _) -> tile == it } }.entries.sortedByDescending { it.value }
+            .take(if (near.isEmpty()) 5 else 2).map { it.key to it.value }
+        return (near + overseas).map { (tile, rank) -> describeSite(civ, tile, rank) + (if (tile.getContinent() in home) "" else crossing(civ, tile)) }
     }
 
-    /** Is there anywhere left to found a city, on a landmass we already live on? Reckoned once a turn per civ. */
+    /** How a site across the sea is reached: from which coastal city of ours, and that the settler embarks on its own (the move and settle orders path across water) */
+    private fun crossing(civ: Civilization, tile: Tile): String {
+        val port = civ.cities.filter { it.isCoastal() }.minByOrNull { it.getCenterTile().aerialDistanceTo(tile) } ?: return " - across the sea"
+        return " - across the sea, ${port.getCenterTile().aerialDistanceTo(tile)} tiles from ${port.name}, our nearest coastal city; a settler ordered there embarks and crosses on its own"
+    }
+
+    /** Is there anywhere left to found a city within our reach? The same survey as the briefing's sites, so the officials' settler gate and the
+     *  briefing never disagree; unexplored ground in reach still counts as possible land. Reckoned once a turn per civ. */
     private val landLeft = HashMap<String, Pair<Int, Boolean>>()
     fun hasLandForACity(civ: Civilization): Boolean {
         val turn = civ.gameInfo.turns
         landLeft[civ.civName]?.takeIf { it.first == turn }?.let { return it.second }
-        // Generous on purpose: this only has to catch the case where there is plainly nowhere to go. The officials' settlers range
-        // far (15 tiles and more), and once our people can embark any shore will do.
-        val home = civ.cities.map { it.getCenterTile().getContinent() }.toSet()
         // Unexplored ground counts as possible land: early on almost nothing is explored, and a gate that closes then starves the realm of settlers
-        val any = civ.cities.isEmpty() || civ.cities.asSequence().flatMap { it.getCenterTile().getTilesInDistance(16) }
-            .any { tile -> !tile.isExplored(civ) && (civ.tech.unitsCanEmbark || tile.isLand)
-                || (civ.tech.unitsCanEmbark || tile.getContinent() in home) && settleProblem(civ, tile) == null }
+        val any = civ.cities.isEmpty() || survey(civ).isNotEmpty() || civ.cities.asSequence().flatMap { it.getCenterTile().getTilesInDistance(REACH) }
+            .any { tile -> !tile.isExplored(civ) && (civ.tech.unitsCanEmbark || tile.isLand) }
         // Said once each way, so a run can be checked for what this gate did
         val before = landLeft[civ.civName]?.second ?: true
         if (before && !any) log(civ, "No land is left within our reach for a new city; the officials will train no settlers until that changes.")
@@ -528,11 +582,13 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         return any
     }
 
-    /** Land within reach of our cities that could take a city, scored by what lies around it */
+    /** Explored land within reach of our cities that could take a city - on a landmass we live on, or across the sea once our people can embark -
+     *  scored by what lies around it, nearer home the better */
     private fun survey(civ: Civilization): Map<Tile, Float> {
         if (civ.cities.isEmpty()) return emptyMap()
-        val candidates = civ.cities.asSequence().flatMap { it.getCenterTile().getTilesInDistance(9) }.distinct()
-            .filter { it.isExplored(civ) && settleProblem(civ, it) == null }
+        val home = civ.cities.map { it.getCenterTile().getContinent() }.toSet()
+        val candidates = civ.cities.asSequence().flatMap { it.getCenterTile().getTilesInDistance(REACH) }.distinct()
+            .filter { it.isExplored(civ) && it.isLand && (civ.tech.unitsCanEmbark || it.getContinent() in home) && settleProblem(civ, it) == null }
         return candidates.associateWith { tile ->
             var score = 0f
             for (near in tile.getTilesInDistance(2)) {
@@ -562,6 +618,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     }
 
     companion object {
+        /** How far from our cities the land survey looks: the officials' settlers range as far (15 tiles and more) */
+        private const val REACH = 16
         private val ABILITIES = listOf(UnitActionType.ConductTradeMission, UnitActionType.HurryResearch, UnitActionType.HurryWonder,
             UnitActionType.HurryBuilding, UnitActionType.HurryPolicy, UnitActionType.FoundReligion, UnitActionType.EnhanceReligion,
             UnitActionType.TriggerUnique, UnitActionType.CreateImprovement, UnitActionType.SpreadReligion)
@@ -576,6 +634,15 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             "religion" to listOf(UnitActionType.FoundReligion, UnitActionType.EnhanceReligion, UnitActionType.SpreadReligion),
             "golden age" to listOf(UnitActionType.TriggerUnique))
         private fun abilitiesNamed(word: String) = ABILITY_WORDS[word.lowercase().trim()] ?: emptyList()
+        /** What makes a unit have each way at all, whatever the tile it stands on */
+        private val ABILITY_UNIQUES = mapOf(
+            "improvement" to listOf(UniqueType.ConstructImprovementInstantly),
+            "hurry research" to listOf(UniqueType.CanHurryResearch),
+            "hurry production" to listOf(UniqueType.CanSpeedupWonderConstruction, UniqueType.CanSpeedupConstruction),
+            "hurry policy" to listOf(UniqueType.CanHurryPolicy),
+            "trade mission" to listOf(UniqueType.CanTradeWithCityStateForGoldAndInfluence),
+            "religion" to listOf(UniqueType.MayFoundReligion, UniqueType.MayEnhanceReligion, UniqueType.CanSpreadReligion),
+            "golden age" to listOf(UniqueType.OneTimeEnterGoldenAge, UniqueType.OneTimeEnterGoldenAgeTurns))
 
         /** "(x,y), 3 tiles NE of Rome" */
         fun where(civ: Civilization, tile: Tile): String {

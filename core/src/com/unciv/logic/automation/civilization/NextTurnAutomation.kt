@@ -114,14 +114,14 @@ object NextTurnAutomation {
     }
     
     private fun respondToPopupAlerts(civInfo: Civilization) {
-        // A ruler's court answers the demands made of it: they stay on its desk for the advisor, as offers do
+        // A ruler's court answers the demands and the proposals of friendship made to it: they stay on its desk for the advisor, as offers do
         val ruled = civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs
         for (popupAlert in civInfo.popupAlerts.toList()) { // toList because this can trigger other things that give alerts, like Golden Age
             if (!ruled) respondToDemandAlert(civInfo, popupAlert)
-            if (popupAlert.type == AlertType.DeclarationOfFriendship)
+            if (popupAlert.type == AlertType.DeclarationOfFriendship && !ruled)
                 respondToDeclarationOfFriendship(civInfo, popupAlert)
         }
-        if (ruled) civInfo.popupAlerts.removeAll { alert -> Demand.entries.none { it.demandAlert == alert.type } }
+        if (ruled) civInfo.popupAlerts.removeAll { alert -> alert.type != AlertType.DeclarationOfFriendship && Demand.entries.none { it.demandAlert == alert.type } }
         else civInfo.popupAlerts.clear() // AIs don't care about popups.
     }
 
