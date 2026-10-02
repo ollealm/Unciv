@@ -118,7 +118,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 (greatImprovementOf(unit)?.let { "; with use, ability improvement, it can raise $it" } ?: "") +
                 (shelter?.let { if (it.isCityCenter()) "; meanwhile it walks to ${it.getCity()!!.name} and waits there" else "; meanwhile it waits beside ${it.getCity()!!.name}, whose town another of ours holds" } ?: "") + ".")
         }
-        val order = orders[unit.id] ?: return false
+        // A unit set exploring before the host explored it itself (older saves) carries the explore action and no order: it is the ruler's explorer still
+        val order = orders[unit.id] ?: (if (unit.isExploring() && unit.id !in released) Order("explore", null, null).also { orders[unit.id] = it } else return false)
         if (order.action == "gift") return withCityStatePassage(unit, recipientOf(unit.civ, order)) { checkGift(unit, order) ?: carryOut(unit, order) }
         return carryOut(unit, order)
     }
@@ -253,7 +254,20 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             }
             "hold" -> true
             "disband" -> { log(civ, "By your order: our ${unit.name} #${unit.id} was disbanded."); orders.remove(unit.id); unit.disband(); true }
-            "explore" -> { unit.action = UnitActionType.Explore.value; orders.remove(unit.id); false }
+            // Explored by our own hand each turn: left to the officials, an AI-played realm's routine never reads the unit's explore action, and a ship
+            // sent to explore did whatever the officials had in mind instead (Babylon's Caravel sat 86 turns, Run 18). Done when nothing in reach is unexplored
+            "explore" -> {
+                unit.action = UnitActionType.Explore.value
+                if (!unit.hasMovement()) return true
+                com.unciv.logic.automation.unit.UnitAutomation.automatedExplore(unit)
+                if (!unit.isDestroyed && !unit.isExploring()) {
+                    orders.remove(unit.id)
+                    civ.notifications.removeAll { it.text == "${unit.shortDisplayName()} finished exploring." } // the engine's own word for it: ours below says more
+                    log(civ, "Our ${unit.name} #${unit.id} has explored all it can reach ${if (unit.baseUnit.isLandUnit) "on foot" else "by sea"} and is back under the officials, at ${where(civ, unit.getTile())}." +
+                        (if (unit.baseUnit.isLandUnit) " Lands beyond the water are found only by ships." else ""))
+                }
+                true
+            }
             else -> { orders.remove(unit.id); true } // "move": arrived, released to the officials from next turn
         }
     }
@@ -411,7 +425,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         if (action !in listOf("move", "settle", "fortify", "garrison", "hold", "explore", "use", "gift", "disband", "release"))
             throw IllegalArgumentException("Unknown unit action $action; use move, settle, fortify, garrison, hold, explore, use, gift, disband or release")
         if (action == "disband") { orders.remove(unitId); val name = unit.name; unit.disband(); log(civ, "By your order: our $name #$unitId was disbanded."); return "$name #$unitId disbanded." }
-        if (action == "release") { orders.remove(unitId); released += unitId; return "${unit.name} #$unitId is back under the officials." }
+        if (action == "release") { orders.remove(unitId); released += unitId; if (unit.isExploring()) unit.action = null; return "${unit.name} #$unitId is back under the officials." }
         if (action == "settle" && !unit.hasUnique(UniqueType.FoundCity)) throw IllegalArgumentException("${unit.name} cannot found cities")
         if (action == "explore" && unit.isCivilian()) throw IllegalArgumentException("Civilians cannot explore; send a military unit")
         if (action == "gift") return giveGift(civ, unit, json)
@@ -460,6 +474,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         val turns = if (target == unit.getTile()) 0 else kotlin.math.ceil(path.size / unit.getMaxMovement().coerceAtLeast(1).toFloat()).toInt()
         // A ruler may break the realm's word, but never unknowing: the reply says which promise the order breaks
         val broken = when { action == "settle" -> promiseBroken(civ, target, "settle"); action == "use" && (ability == null || "religion" in ability.lowercase()) -> promiseBroken(civ, target, "religion"); else -> null }
+        if (action == "explore") return "${unit.name} #$unitId will explore" + (if (turns > 0) " from ${where(civ, target)}, about $turns turns away" else "") + ", turn after turn, until nothing within its reach is left unexplored; then it is back under the officials. " +
+            (if (unit.baseUnit.isLandUnit) "It explores the land it can walk: it does not cross the sea - the sea is for ships." else "A ship explores the sea and the coasts it can reach.")
         return "${unit.name} #$unitId will $action at ${where(civ, target)}" + (if (turns > 0) ", about $turns turns away" else "") + broken.orEmpty()
     }
 

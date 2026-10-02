@@ -1693,7 +1693,21 @@ object RulerHost {
                 warnings += "${hanging.joinToString { it.name }} ${if (hanging.size == 1) "is" else "are"} joined to the capital only by way of foreign land, under Open Borders with ${pacts.joinToString(" and ").ifEmpty { "a neighbour" }}. When that pact lapses ${if (hanging.size == 1) "it is" else "they are"} cut off until it is renewed: keep it renewed, or build a road of our own."
             }
         }
+        noShipAtSea(civ)?.let { warnings += it }
         return warnings
+    }
+
+    /** A realm that has not met every great power finds the rest beyond the water only by sea, our land units exploring on foot: said when no warship
+     *  of ours is afloat and a coastal city of ours could build one (on an archipelago in Run 18 the officials built only Work Boats) */
+    private fun noShipAtSea(civ: Civilization): String? {
+        val game = civ.gameInfo
+        val others = game.civilizations.count { it.isMajorCiv() && it.isAlive() && it != civ }
+        val met = civ.getKnownCivs().count { it.isMajorCiv() && it.isAlive() }
+        if (met >= others || civ.units.getCivUnits().any { it.isMilitary() && it.baseUnit.isWaterUnit }) return null
+        val canBuild = civ.cities.filter { it.isCoastal() }.flatMap { city -> game.ruleset.units.values.filter { it.isWaterUnit && it.isMilitary && it.isBuildable(city.cityConstructions) } }.distinct()
+        if (canBuild.isEmpty()) return null
+        return "We have no ship at sea, and have met $met of the $others other great powers: on foot our people find only the land they can walk to, and lands beyond the water are found only by ships - " +
+            "${canBuild.sortedBy { it.cost }.first().name} or better, ordered to explore."
     }
 
     /** Barbarian camps we can see and foreign soldiers close to our cities */
