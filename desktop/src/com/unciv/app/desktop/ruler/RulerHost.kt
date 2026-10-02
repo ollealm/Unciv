@@ -1701,6 +1701,7 @@ object RulerHost {
      *  of ours is afloat and a coastal city of ours could build one (on an archipelago in Run 18 the officials built only Work Boats) */
     private fun noShipAtSea(civ: Civilization): String? {
         val game = civ.gameInfo
+        if (game.tileMap.mapParameters.type == com.unciv.logic.map.MapType.pangaea) return null // one landmass: every people can be walked to, and the line would only press ships on a court that needs none
         val others = game.civilizations.count { it.isMajorCiv() && it.isAlive() && it != civ }
         val met = civ.getKnownCivs().count { it.isMajorCiv() && it.isAlive() }
         if (met >= others || civ.units.getCivUnits().any { it.isMilitary() && it.baseUnit.isWaterUnit }) return null
