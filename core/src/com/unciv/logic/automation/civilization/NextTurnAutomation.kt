@@ -654,6 +654,9 @@ object NextTurnAutomation {
     // However, that can be added in another update, this PR is large enough as it is.
     private fun tryVoteForDiplomaticVictory(civ: Civilization) {
         if (!civ.mayVoteForDiplomaticVictory()) return
+        // A ruled realm's vote is its ruler's: cast as pledged, or an abstention - the officials do not choose it
+        val rulersVote = com.unciv.logic.automation.RulerOverrides.worldVoteOf
+        if (civ.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs && rulersVote != null) return civ.diplomaticVoteForCiv(rulersVote(civ))
         val rng = civ.state.stateBasedRandom("NextTurnAutomation.tryVoteForDiplomaticVictory")
 
         val chosenCiv: Civilization? = if (civ.isMajorCiv()) {

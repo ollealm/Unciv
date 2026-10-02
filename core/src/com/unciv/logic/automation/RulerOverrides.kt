@@ -65,6 +65,9 @@ object RulerOverrides {
      *  they wait on its desk (its popupAlerts) for the advisor */
     @Volatile var demandMade: ((Civilization, Civilization, com.unciv.logic.civilization.diplomacy.Demand) -> Unit)? = null
 
+    /** A ruled civ's vote for world leader, when the world votes: the civID of the power it is pledged to, or null to abstain - never the officials' choice */
+    @Volatile var worldVoteOf: ((Civilization) -> String?)? = null
+
     /** Called for a ruled civ before its officials spend any gold: the ruler's own purchases due this turn come first */
     @Volatile var rulersFirst: ((Civilization) -> Unit)? = null
 

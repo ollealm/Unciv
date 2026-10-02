@@ -159,6 +159,8 @@ class TurnManager(val civInfo: Civilization) {
     private fun handleDiplomaticVictoryFlags() {
         if (civInfo.flagsCountdown[CivFlags.ShouldResetDiplomaticVotes.name] == 0) {
             civInfo.gameInfo.diplomaticVictoryVotesCast.clear()
+            // The next vote must be counted too: nothing set this back, so only the first vote of a game could ever be won
+            civInfo.gameInfo.diplomaticVictoryVotesProcessed = false
             civInfo.removeFlag(CivFlags.ShowDiplomaticVotingResults.name)
             civInfo.removeFlag(CivFlags.ShouldResetDiplomaticVotes.name)
         }

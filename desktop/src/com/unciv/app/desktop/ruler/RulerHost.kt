@@ -71,6 +71,8 @@ object RulerHost {
         var officialsRearm = "war"
         /** Keep a soldier inside every city: when one stands empty, the nearest free soldier is sent in under a garrison order */
         var garrisonEveryCity = false
+        /** The great power our vote for world leader is pledged to, when the world votes; null = we abstain */
+        var worldVote: String? = null
         /** The posture of arms: warAim (an enemy city the host converges on), stance attack|defend|raid, reserve (soldiers kept home) */
         var warAim: String? = null
         var stance: String = "attack"
@@ -82,6 +84,7 @@ object RulerHost {
             "noGifts" to noGifts,
             "officialsRearm" to officialsRearm,
             "garrisonEveryCity" to garrisonEveryCity,
+            "worldVote" to (worldVote ?: "not pledged: we abstain when the world votes"),
             "posture" to (if (civ?.isAtWar() == true || warAim != null || stance != "attack" || reserve != 0) mapOf("warAim" to warAim, "stance" to stance, "reserve" to reserve)
                 else "the officials' own (attack when at war); set it when a war comes"),
             "personality" to personality,
@@ -113,6 +116,7 @@ object RulerHost {
         RulerOverrides.spendingNoted = { civ, gold, what -> if (civ.civID in RulerOverrides.ruledCivs) spending.getOrPut(civ.civName) { ArrayList() } += Pair(gold, what) }
         RulerOverrides.unitHandler = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.handle(unit) }
         RulerOverrides.rulersFirst = { civ -> units.rearmDue(civ) }
+        RulerOverrides.worldVoteOf = { civ -> castWorldVote(civ) }
         RulerOverrides.promised = { civ -> diplomacy.promised(civ) }
         // The officials make demands of their own, and the chancery hears of each (a demand made of us waits on the desk instead - RulerDiplomacy.demands)
         RulerOverrides.demandMade = { civ, other, demand -> log(civ, "The officials made a demand of ${other.civName}: \"${demand.demandText}\" Their answer comes on their turn; a demand is resented whatever the answer" +
@@ -283,6 +287,7 @@ object RulerHost {
             "chancery" to chancery,
             "unitOrders" to units.toMap(),
             "unitState" to units.stateToMap(),
+            "worldVoteState" to mapOf("tallied" to voteTallied, "reminded" to voteReminded, "unHolder" to unHolder),
             "diplomacy" to diplomacy.toMap(),
             "ownWars" to ownWars.map { "${it.first}>${it.second}" },
             "trail" to trail.toMap(),
@@ -349,6 +354,12 @@ object RulerHost {
         }
         units.load(host.get("unitOrders"))
         units.loadState(host.get("unitState")) // older files have none: the clocks start afresh
+        voteReminded.clear()
+        host.get("worldVoteState")?.let { saved ->
+            voteTallied = saved.getInt("tallied", -1); unHolder = saved.getString("unHolder", null)
+            saved.get("reminded")?.forEach { voteReminded[it.name] = it.asInt() } }
+            // A save from before the vote was the ruler's: whoever holds the United Nations now is no news
+            ?: run { voteTallied = -1; unHolder = loaded.civilizations.firstOrNull { it.isMajorCiv() }?.victoryManager?.getUNBuildingAndOwnerNames()?.second?.let { loaded.getCivilization(it).civName } }
         diplomacy.load(host.get("diplomacy"))
         ownWars.clear(); host.get("ownWars")?.asStringArray()?.forEach { ownWars += Pair(it.substringBefore(">"), it.substringAfter(">")) }
         units.dropMistakenHolds(loaded, chancery.values)
@@ -408,6 +419,7 @@ object RulerHost {
             officialsRearm = mode
         }
         json.get("garrisonEveryCity")?.takeUnless { it.isNull }?.let { garrisonEveryCity = it.asBoolean() }
+        if (json.has("worldVote")) worldVote = json.get("worldVote").takeUnless { it.isNull }?.asString()?.takeUnless { it.startsWith("not pledged") }
         json.get("acknowledged")?.let { acknowledged = ArrayList(it.asStringArray().toList()) } // as saved; the order is "acknowledge", matched in setOrders
         json.get("posture")?.takeUnless { it.isNull }?.let { posture ->
             if (posture.has("warAim")) warAim = posture.get("warAim").takeUnless { it.isNull }?.asString()
@@ -517,7 +529,7 @@ object RulerHost {
 
     /** Every field an order may carry: an order with none of them is no order (a model that wrapped its fields in "arguments" sent nothing) */
     private val ORDER_FIELDS = listOf("personality", "research", "policyBranches", "neverBuild", "neverPropose", "goldReserve", "noGifts", "officialsRearm", "garrisonEveryCity", "posture",
-        "queue", "build", "purchase", "rearm", "cities", "units", "trade", "renew", "answerOffers", "answerDemands", "peace", "friendship", "gift", "declareWar", "cityFocus", "acknowledge")
+        "queue", "build", "purchase", "rearm", "cities", "units", "trade", "renew", "answerOffers", "answerDemands", "peace", "friendship", "gift", "declareWar", "cityFocus", "acknowledge", "worldVote")
 
     private fun setOrders(civ: Civilization, json: JsonValue): Any? {
         val given = json.map { it.name }
@@ -525,6 +537,14 @@ object RulerHost {
         if (given.none { it in ORDER_FIELDS }) throw ApiError(400, "Nothing in this order is an order" + (if (unknown.isNotEmpty()) " (${unknown.joinToString()} is not a field)" else "") + "; the fields are ${ORDER_FIELDS.joinToString()}. Nothing was changed.")
         if (unknown.isNotEmpty()) throw ApiError(400, "${unknown.joinToString()} ${if (unknown.size == 1) "is not a field" else "are not fields"} of an order; the fields are ${ORDER_FIELDS.joinToString()}. Nothing was changed - send the order again with the fields themselves.")
         val ruleset = civ.gameInfo.ruleset
+        // The pledge of our vote: a great power we know and that stands - never ourselves, which the game forbids
+        json.get("worldVote")?.takeUnless { it.isNull }?.asString()?.trim()?.let { name ->
+            if (name.equals(civ.civName, ignoreCase = true)) throw ApiError(400, "worldVote cannot be ourselves: no power may vote for itself. Pledge it to another great power, or null to abstain")
+            val power = civ.getKnownCivs().firstOrNull { it.isMajorCiv() && it.isAlive() && it.civName.equals(name, ignoreCase = true) }
+                ?: throw ApiError(400, "worldVote names a great power we know and that stands: ${civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.joinToString { it.civName }}; not '$name'" +
+                    (if (civ.getKnownCivs().any { it.isCityState && it.civName.equals(name, ignoreCase = true) }) " - a city-state cannot be voted for" else ""))
+            json.remove("worldVote"); json.addChild("worldVote", JsonValue(power.civName))
+        }
         val standing = orders.getOrPut(civ.civName) { StandingOrders() }
         val alreadyKnown = ArrayList<String>()
         val rejected = ArrayList<String>()
@@ -1039,6 +1059,59 @@ object RulerHost {
         }
     }
 
+    /** The turn whose vote was last told, the vote each realm was last reminded of, and who held the United Nations at the last look - so each is told once */
+    private var voteTallied = -1
+    private val voteReminded = HashMap<String, Int>()
+    private var unHolder: String? = null
+
+    /** A ruled realm's vote when the world votes: as pledged, or an abstention - and the chancery says which */
+    private fun castWorldVote(civ: Civilization): String? {
+        val pledged = orders[civ.civName]?.worldVote
+        val power = pledged?.let { name -> civ.getKnownCivs().firstOrNull { it.civName == name && it.isMajorCiv() && !it.isDefeated() } }
+        log(civ, when {
+            power != null -> "The world voted for its leader: by your pledge, our vote went to ${power.civName}."
+            pledged != null -> "The world voted for its leader: our vote was pledged to $pledged, who no longer stands, so we abstained."
+            else -> "The world voted for its leader: our vote was not pledged, so we abstained."
+        })
+        return power?.civID
+    }
+
+    /** After a turn: the United Nations standing for the first time, a vote drawing near with our vote unpledged, and the tally once the votes are counted */
+    private fun noteWorldVote(game: GameInfo, ruled: List<Civilization>) {
+        if ("Diplomatic" !in game.gameParameters.victoryTypes || ruled.isEmpty()) return
+        val holder = ruled.first().victoryManager.getUNBuildingAndOwnerNames().second?.let { game.getCivilization(it) }
+        if (holder != null && unHolder == null) for (civ in ruled.filter { it.isAlive() }) {
+            val pledged = orders[civ.civName]?.worldVote
+            log(civ, "The United Nations now stands, built by ${if (holder == civ) "us" else holder.civName}: the world votes for its leader in ${civ.getTurnsTillNextDiplomaticVote() ?: civ.getTurnsBetweenDiplomaticVotes()} turns, and every ${civ.getTurnsBetweenDiplomaticVotes()} turns after. " +
+                (pledged?.let { "Our vote is pledged to $it." } ?: "Our vote is not pledged: unpledged, we abstain - set worldVote to pledge it."))
+        }
+        unHolder = holder?.civName
+        // A vote close at hand with our vote unpledged: said once per vote, in time for a look-in
+        for (civ in ruled.filter { it.isAlive() }) {
+            val due = civ.getTurnsTillNextDiplomaticVote() ?: continue
+            if (due !in 1..4 || orders[civ.civName]?.worldVote != null || voteReminded[civ.civName] == game.turns + due) continue
+            voteReminded[civ.civName] = game.turns + due
+            log(civ, "The world votes for its leader in $due turn${if (due == 1) "" else "s"}, and our vote is not pledged: unpledged, we abstain. Set worldVote to pledge it to a great power.")
+        }
+        // The votes are counted the turn after they are cast, and cleared the turn after that: told once, to every realm
+        val votes = game.diplomaticVictoryVotesCast
+        if (votes.isEmpty() || !game.diplomaticVictoryVotesProcessed || voteTallied == game.turns - 1 || voteTallied == game.turns) return
+        voteTallied = game.turns
+        val unOwner = holder?.civID
+        val name = { id: String -> game.civilizations.firstOrNull { it.civID == id }?.civName ?: id }
+        val tally = votes.entries.filter { it.value != null }.groupBy { it.value!! }.mapValues { (_, cast) -> cast.sumOf { if (it.key == unOwner) 2 else 1 } }.entries.sortedByDescending { it.value }
+        val abstained = votes.values.count { it == null }
+        val elected = game.civilizations.firstOrNull { it.isMajorCiv() && it.victoryManager.hasEnoughVotesForDiplomaticVictory() }
+        val needed = (diplomaticFacts(ruled.first())?.get("votes") as? String)?.let { Regex("(\\d+) are needed").find(it)?.groupValues?.get(1) }
+        val counted = tally.joinToString { "${name(it.key)} ${it.value}" }.ifEmpty { "no power had a vote" } + (if (abstained > 0) "; $abstained abstained" else "")
+        for (civ in ruled.filter { it.isAlive() }) {
+            val ours = votes[civ.civID]
+            log(civ, "The world's vote for its leader was counted: $counted. We ${if (votes.containsKey(civ.civID)) (ours?.let { "voted for ${name(it)}" } ?: "abstained") else "did not vote"}. " +
+                (if (elected != null) "${if (elected == civ) "We are" else "${elected.civName} is"} elected world leader${needed?.let { ", with the $it votes needed" } ?: ""}."
+                 else "Nobody won the${needed?.let { " $it" } ?: ""} votes needed; the world votes again in ${civ.getTurnsBetweenDiplomaticVotes()} turns."))
+        }
+    }
+
     /** A diplomatic victory in facts, when one is in play: who votes, how many votes there are and how many win, what calls the vote, and the city-states each power we know holds */
     private fun diplomaticFacts(civ: Civilization): Map<String, Any?>? {
         val game = civ.gameInfo
@@ -1055,7 +1128,8 @@ object RulerHost {
             "unitedNations" to if (holder != null) "built by ${if (holder == civ) "us" else holder.civName}: the world votes for a leader every $every turns" + (civ.getTurnsTillNextDiplomaticVote()?.let { "; the next vote in $it turn${if (it == 1) "" else "s"}" } ?: "")
                 else "not yet built (${un.name} is a wonder${un.requiredTech?.let { " that needs $it" } ?: ""}): nobody votes until it stands; the first vote comes $every turns after it is built, then one every $every turns",
             "votes" to "$total votes in all${if (holder == null) " once it stands" else ""}: one for each of the ${voters.count { it.isMajorCiv() }} great powers and ${voters.count { it.isCityState }} city-states still standing, and a second for the holder of the ${un.name}. $needed are needed to win, and the most votes with no tie. No power may vote for itself - the holder's two votes go to another",
-            "howTheyVote" to "a city-state votes for its ally, and abstains without one; a great power votes for the great power it regards most highly - our own vote too, cast by the officials",
+            "howTheyVote" to "a city-state votes for its ally, and abstains without one; a great power the game plays votes for the great power it regards most highly. Our own vote is ours: cast as pledged (worldVote), or we abstain",
+            "ourVote" to (orders[civ.civName]?.worldVote?.let { "pledged to $it" } ?: "not pledged - we abstain when the world votes"),
             "cityStatesWeKnow" to civ.getKnownCivs().count { it.isCityState && it.isAlive() },
             "cityStateAllies" to powers.associate { power -> (if (power == civ) "us" else power.civName) to civ.getKnownCivs().count { it.isCityState && it.isAlive() && it.allyCiv == power } })
     }
@@ -1196,7 +1270,7 @@ object RulerHost {
     // Not "demands": that is a city asking for a luxury, not a neighbour asking for tribute.
     // Not our own order's echo ("By your order: we declared war"), and not a barbarian camp cleared ("We have captured a barbarian encampment").
     private val wakeWorthy = listOf("dropped .* because", "(?<!By your order: we )declared war", "joined .* in the war against us", "denounced", "lost in action",
-        "awaits orders", "(?<!We have )captured(?! a barbarian)", "has been destroyed", "has been stuck", "offers peace", "\\(an advised court\\) offers a deal", "demands that we", "proposes a Declaration of Friendship").map { Regex(it, RegexOption.IGNORE_CASE) }
+        "awaits orders", "The United Nations now stands", "our vote is not pledged", "(?<!We have )captured(?! a barbarian)", "has been destroyed", "has been stuck", "offers peace", "\\(an advised court\\) offers a deal", "demands that we", "proposes a Declaration of Friendship").map { Regex(it, RegexOption.IGNORE_CASE) }
 
     private val warningsWoken = HashMap<String, HashSet<String>>()
     /** The world as the last advance left it (null before the first) */
@@ -1230,6 +1304,7 @@ object RulerHost {
             try {
                 recordPublicEvents(before, after)
                 for (civ in ruledCivs) recordChancery(civ, civSnapshots[civ]!!)
+                noteWorldVote(game, ruledCivs)
             } finally { settling = false }
             units.forgetTheDead(game)
 
