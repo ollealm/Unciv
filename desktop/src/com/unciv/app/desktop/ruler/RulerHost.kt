@@ -1017,16 +1017,18 @@ object RulerHost {
         }
         // Deals: say exactly what came into force and what ended
         val dealsNow = diplomacy.dealsInForce(civ)
-        for (deal in diplomacy.endingSoon(civ, 5) - diplomacy.endingSoon(civ, 4).toSet()) log(civ, "A deal ends in five turns: $deal. It can be offered again once it has ended (turn ${turn + 5}), not before; if it is still worth its price, order renew to have it offered again the turn it ends.")
+        for (deal in diplomacy.endingSoon(civ, 5) - diplomacy.endingSoon(civ, 4).toSet()) log(civ, "A deal ends in five turns, at turn ${turn + 5}: $deal. The same terms can be offered to them again only once it has ended; order renew and they are offered again that very turn, as our proposal.")
         val began = (dealsNow - before.deals).toList(); val ended = (before.deals - dealsNow).toList()
         // A deal that ends the turn its renewal begins was replaced, not lost: same partner, same goods, only the numbers differ
         val goodsOf = { deal: String -> deal.replace(Regex(" x\\d+"), "").replace(Regex("\\d+"), "#") }
         val (changed, lapsed) = ended.partition { old -> began.any { goodsOf(it) == goodsOf(old) } }
         // Renewed within the turn on the very same terms (another court's bookkeeping took our officials' offer): it reads the same, but its turns went up
         val replaced = changed + diplomacy.dealTurnsLeft(civ).filter { (deal, left) -> deal in before.deals && left > (before.turnsLeft[deal] ?: left) }.keys
+        val renewedAs = changed.associateWith { old -> began.first { goodsOf(it) == goodsOf(old) } }
         if (began.isNotEmpty() || replaced.isNotEmpty() || lapsed.isNotEmpty()) log(civ, "Deals: " + listOfNotNull(
-            began.takeIf { it.isNotEmpty() }?.let { "in force with " + it.joinToString("; ") },
-            replaced.takeIf { it.isNotEmpty() }?.let { "replaced by the renewal: " + it.joinToString("; ") },
+            (began - renewedAs.values.toSet()).takeIf { it.isNotEmpty() }?.let { "in force with " + it.joinToString("; ") },
+            // A renewal says which terms now hold: the new ones beside the old, or the same terms running again
+            replaced.takeIf { it.isNotEmpty() }?.let { old -> old.joinToString("; ") { ended -> renewedAs[ended]?.let { now -> "renewed, and these terms now hold - $now (in place of: ${ended.substringAfter(": ")})" } ?: "renewed on the same terms, which run again from now - $ended" } },
             lapsed.takeIf { it.isNotEmpty() }?.let { "ended with " + it.joinToString("; ") }).joinToString(". ") + ".")
         diplomacy.renewEnded(civ, lapsed, replaced) // the renewals ordered for deals that ended this turn go out now, as our own proposals
         diplomacy.officialsDealings(civ)
@@ -1040,6 +1042,7 @@ object RulerHost {
             if (city.cityConstructions.constructionQueue.isEmpty()) city.cityConstructions.chooseNextConstruction()
         }
         for ((what, items) in paid.groupBy { it.second }) log(civ, "The officials spent ${items.sumOf { it.first }} gold on ${what}.")
+        officialsSpent[civ.civName] = paid.groupBy { it.second }.map { (what, items) -> "${items.sumOf { it.first }} gold on $what" }
         if (paid.isNotEmpty()) log(civ, "The treasury now holds ${civ.gold} gold.")
         val unexplained = before.gold - civ.gold - paid.sumOf { it.first }
         // Worth a line when it is more than a turn's income (never for trifles under 10): forty gold is a fortune in one age and small change in another
@@ -1113,6 +1116,25 @@ object RulerHost {
     }
 
     /** A diplomatic victory in facts, when one is in play: who votes, how many votes there are and how many win, what calls the vote, and the city-states each power we know holds */
+    /** What the officials spent from the treasury in the last turn, per realm: the gold breakdown's last line (not kept across a restart) */
+    private val officialsSpent = HashMap<String, List<String>>()
+
+    /** Gold a turn by source, as the game's own overview shows it: income and expenses, the officials' gifts and purchases of the last turn apart */
+    private fun goldBreakdown(civ: Civilization): Map<String, Any?> {
+        val bySource = civ.stats.getStatMapForNextTurn().mapValues { it.value.gold.toInt() }.filterValues { it != 0 }
+        val units = civ.units.getCivUnits().count()
+        // The overview's own headings, a few put plainly
+        val named = { key: String -> when (key) {
+            "Unit upkeep" -> "Unit upkeep ($units units)"; "Maintenance" -> "Buildings' upkeep"; "Trade" -> "Deals (gold per turn)"
+            "Construction" -> "Cities building gold"; else -> key } }
+        return mapOf(
+            "income" to bySource.filterValues { it > 0 }.entries.sortedByDescending { it.value }.associate { named(it.key) to it.value },
+            "expenses" to bySource.filterValues { it < 0 }.entries.sortedBy { it.value }.associate { named(it.key) to it.value },
+            "net" to bySource.values.sum(),
+            "officialsSpentLastTurn" to officialsSpent[civ.civName]?.ifEmpty { listOf("nothing") },
+            "note" to "the officials' gifts and purchases are spent from the treasury, not from these figures")
+    }
+
     private fun diplomaticFacts(civ: Civilization): Map<String, Any?>? {
         val game = civ.gameInfo
         if ("Diplomatic" !in game.gameParameters.victoryTypes) return null
@@ -1121,17 +1143,25 @@ object RulerHost {
         val voters = game.civilizations.filter { !it.isBarbarian && !it.isSpectator() && !it.isDefeated() }
         val total = voters.size + 1
         // VictoryManager.votesNeededForDiplomaticVictory, the original game's own sum: counted on the votes there are once the United Nations stands
-        val needed = if (total > 28) total * 35 / 100 else total * (67 - (1.1 * total).toInt()) / 100 + 1
+        val needed = diplomacy.votesNeeded(game)
         val every = civ.getTurnsBetweenDiplomaticVotes()
         val powers = (listOf(civ) + civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }).toList()
         return mapOf(
-            "unitedNations" to if (holder != null) "built by ${if (holder == civ) "us" else holder.civName}: the world votes for a leader every $every turns" + (civ.getTurnsTillNextDiplomaticVote()?.let { "; the next vote in $it turn${if (it == 1) "" else "s"}" } ?: "")
+            "unitedNations" to if (holder != null) "built by ${if (holder == civ) "us" else holder.civName}: the world votes for a leader every $every turns" + (civ.getTurnsTillNextDiplomaticVote()?.let { if (it == 0) "; the world votes this turn" else "; the next vote in $it turn${if (it == 1) "" else "s"}" } ?: "")
                 else "not yet built (${un.name} is a wonder${un.requiredTech?.let { " that needs $it" } ?: ""}): nobody votes until it stands; the first vote comes $every turns after it is built, then one every $every turns",
             "votes" to "$total votes in all${if (holder == null) " once it stands" else ""}: one for each of the ${voters.count { it.isMajorCiv() }} great powers and ${voters.count { it.isCityState }} city-states still standing, and a second for the holder of the ${un.name}. $needed are needed to win, and the most votes with no tie. No power may vote for itself - the holder's two votes go to another",
-            "howTheyVote" to "a city-state votes for its ally, and abstains without one; a great power the game plays votes for the great power it regards most highly. Our own vote is ours: cast as pledged (worldVote), or we abstain",
+            "howTheyVote" to run {
+                val courts = powers.filter { it != civ && it.civID in RulerOverrides.ruledCivs }.map { it.civName }
+                val played = powers.filter { it != civ && it.civID !in RulerOverrides.ruledCivs }.map { it.civName }
+                "a city-state votes for its ally, and abstains without one - its vote follows influence alone, never attitude. " +
+                    (if (courts.isNotEmpty()) "${courts.joinToString()} ${if (courts.size == 1) "is an advised court" else "are advised courts"}: each votes as its court has pledged, and abstains unpledged. " else "") +
+                    (if (played.isNotEmpty()) "${played.joinToString()} ${if (played.size == 1) "is" else "are"} played by the game: each votes for the great power it regards most highly. " else "") +
+                    "Our own vote is ours: cast as pledged (worldVote), or we abstain. No great power's vote is known before it is cast"
+            },
             "ourVote" to (orders[civ.civName]?.worldVote?.let { "pledged to $it" } ?: "not pledged - we abstain when the world votes"),
             "cityStatesWeKnow" to civ.getKnownCivs().count { it.isCityState && it.isAlive() },
-            "cityStateAllies" to powers.associate { power -> (if (power == civ) "us" else power.civName) to civ.getKnownCivs().count { it.isCityState && it.isAlive() && it.allyCiv == power } })
+            "cityStateAllies" to powers.associate { power -> (if (power == civ) "us" else power.civName) to civ.getKnownCivs().count { it.isCityState && it.isAlive() && it.allyCiv == power } },
+            "cityStatesWeHaveNotMet" to game.civilizations.count { it.isCityState && it.isAlive() && !civ.knows(it) }.takeIf { it > 0 }?.let { "$it - each votes for its own ally, which we cannot see" })
     }
 
     /** A cultural victory in facts, when one is in play: the branches of policy each power we know has completed against those needed, and the last step */
@@ -1387,6 +1417,7 @@ object RulerHost {
             "score" to civ.calculateTotalScore().toInt(),
             "gold" to civ.gold,
             "perTurn" to mapOf("gold" to next.gold.toInt(), "science" to next.science.toInt(), "culture" to next.culture.toInt()),
+            "goldBreakdown" to goldBreakdown(civ),
             "happiness" to civ.getHappiness(),
             "happinessBreakdown" to civ.stats.getHappinessBreakdown().filter { it.value != 0f }.mapValues { it.value.toInt() },
             // Warnings the advisor acknowledged fold to their first clause while they stand
@@ -1523,17 +1554,26 @@ object RulerHost {
                         else "our soldiers embark and cross on their own, and at sea an embarked soldier cannot attack and defends poorly") +
                         "; " + (if (warships.isEmpty()) "we have no warships to escort them" else "we have ${warships.size} warship${s(warships.size)} (${warships.groupingBy { it.name }.eachCount().entries.joinToString { "${it.value} ${it.key}" }}) to escort them") +
                         ". The reckoning below is of the walls alone, once our engines stand ashore before them"
+                // The march: from the nearest of our engines (or towns) to the walls, at the pace of our slowest engine - the walls are judged as they stand now,
+                // and a defender with warning raises and buys defenders while we march (Run 19: 1 of 7 such reckonings held)
+                val from = siege.minByOrNull { it.getTile().aerialDistanceTo(city.getCenterTile()) }?.getTile() ?: civ.cities.minByOrNull { it.getCenterTile().aerialDistanceTo(city.getCenterTile()) }?.getCenterTile()
+                val pace = siege.minOfOrNull { it.getMaxMovement() }?.coerceAtLeast(1) ?: 2
+                val marchTurns = from?.let { ((it.aerialDistanceTo(city.getCenterTile()) - 2).coerceAtLeast(0) + pace - 1) / pace }
+                val march = when {
+                    marchTurns == null -> ""
+                    marchTurns == 0 -> "our engines already stand within reach of the walls"
+                    else -> "the march there is about $marchTurns turn${s(marchTurns)} at the pace of our slowest engine, and the defender will raise and buy defenders in that time"
+                }
                 val verdict = (acrossTheSea?.let { "$it - " } ?: "") + when {
                     bestEngine == null -> "no siege engines - the walls cannot be broken"
                     turnsToBreak == null -> "our ${siege.size} engine${s(siege.size)} together take less off the walls in a turn (${fullVolley * siege.size}) than the $healing they heal - what we have cannot break them"
-                    turnsToBreak <= 2 -> "the walls would fall in $volleysToBreak volleys - $turnsToBreak turn${s(turnsToBreak)} of all our engines firing, healing counted; $beside"
-                    turnsToBreak <= 5 -> "a siege of $turnsToBreak turns under fire the whole time ($volleysToBreak volleys, healing counted); $beside"
-                    else -> "beyond what our engines can break before they are shot to pieces ($turnsToBreak turns of bombardment, healing counted); $beside"
+                    else -> "$volleysToBreak volley${s(volleysToBreak ?: 0)} once our engines stand before the walls (about $turnsToBreak turn${s(turnsToBreak)} of our ${siege.size} engine${s(siege.size)} firing together, healing counted, if the walls stay as they are now)" +
+                        (if (march.isNotEmpty()) "; $march" else "") + "; $beside"
                 }
                 mapOf("city" to city.name, "of" to city.civ.civName, "defence" to defence, "health" to city.health, "walls" to city.cityConstructions.builtBuildings.any { "Walls" in it || "Castle" in it },
                     "garrison" to city.getCenterTile().militaryUnit?.name, "tilesFromOurNearestCity" to civ.cities.minOfOrNull { it.getCenterTile().aerialDistanceTo(city.getCenterTile()) },
                     "acrossTheSea" to (acrossTheSea != null).takeIf { it },
-                    "oneVolleyOfOurBestEngineTakes" to perVolley, "volleysToBreak" to volleysToBreak, "healsPerTurn" to healing, "turnsToBreak" to turnsToBreak,
+                    "oneVolleyOfOurBestEngineTakes" to perVolley, "volleysToBreak" to volleysToBreak, "healsPerTurn" to healing, "turnsOfFireOnceThere" to turnsToBreak, "marchTurns" to marchTurns,
                     "defendersWithin3Tiles" to if (near.isEmpty()) null else defenders.size, "defendersStrength" to if (near.isEmpty()) null else defendersStrength, "antiAirWithin3Tiles" to if (near.isEmpty()) null else antiAir,
                     "cityShotAtOurBestFootSoldierTakes" to hitOnFoot, "approaches" to gate, "verdict" to verdict)
             }.sortedBy { it["volleysToBreak"] as Int? ?: 999 }
@@ -1698,7 +1738,8 @@ object RulerHost {
                 "soldiers of the ages before the Industrial, where the city's religion holds the Holy Warriors belief; and from the Industrial era on, Great Prophets (in a city following a founded religion, dearer with each bought) and the Great Person of each completed Commerce, Rationalism, Freedom, Autocracy or Order branch (1,000 faith, dearer each time). " +
                 "Before the Industrial era a Great Prophet comes only as stored faith grows. get_options.buildable gives each city's price in faith; the purchase order with with: faith buys.",
             "faithBuysNow" to civ.cities.flatMap { city -> (civ.gameInfo.ruleset.buildings.values + civ.gameInfo.ruleset.units.values).mapNotNull { item -> faithPrice(city, item)?.let { item.name to (it to city.name) } } }
-                .groupBy({ it.first }, { it.second }).map { (item, offers) -> "$item: ${offers.minOf { it.first }} faith (${offers.filter { it.first == offers.minOf { o -> o.first } }.joinToString { it.second }})" }.ifEmpty { null },
+                .groupBy({ it.first }, { it.second }).map { (item, offers) -> "$item: ${offers.minOf { it.first }} faith (${offers.filter { it.first == offers.minOf { o -> o.first } }.joinToString { it.second }})" }
+                .ifEmpty { listOf("nothing faith can buy now (the note below says what it buys, and when)") },
             "note" to "The officials spend faith by their own rule, and much of it stays unspent: until our religion is founded and enhanced they keep it for a Great Prophet (which faith can buy only from the Industrial era); after that, missionaries and an inquisitor to win back cities of ours that follow another faith, and a few missionaries abroad; once no religion is left to found in the world, a Great Person or a religious building where one can be bought. " +
                 "They choose beliefs on their own; the Faith weight tilts how much faith they make. Founding, enhancing and spreading are done by a Great Prophet or Missionary of ours, with the use order (ability religion) in the right city; the purchase order with with: faith spends the rest as you choose.")
     }

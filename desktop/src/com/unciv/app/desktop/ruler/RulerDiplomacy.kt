@@ -137,11 +137,24 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         if ("Scientific" in inPlay) game.ruleset.victories["Scientific"]?.requiredSpaceshipPartsAsCounter?.values?.sum()?.takeIf { it > 0 }?.let { total ->
             val have = other.victoryManager.currentsSpaceshipParts.values.sum()
             if (have >= total - 1) return "${other.civName} has $have of $total parts of its spaceship" }
+        if ("Diplomatic" in inPlay && other.victoryManager.getUNBuildingAndOwnerNames().second != null) {
+            // What the world can count: the city-states allied to it, each a vote for it. A great power's vote is its own to cast (and a power may not vote for itself)
+            val allies = game.civilizations.count { it.isCityState && it.isAlive() && it.allyCiv == other }
+            val needed = votesNeeded(game)
+            if (allies >= needed - 1) return "${other.civName} holds $allies of the $needed votes needed for a diplomatic victory, in the city-states allied to it"
+        }
         if ("Cultural" in inPlay) game.ruleset.victories["Cultural"]?.milestoneObjects?.firstOrNull { it.type == com.unciv.models.ruleset.MilestoneType.CompletePolicyBranches }
             ?.params?.firstOrNull()?.toIntOrNull()?.let { needed ->
                 if (other.policies.completedBranches.size >= needed) return "${other.civName} has completed the $needed branches of policy a cultural victory asks, and needs only the Utopia Project" }
         return null
     }
+    /** The votes needed to be elected world leader, as VictoryManager reckons them (the original game's own sum on the votes there are) */
+    fun votesNeeded(game: GameInfo): Int {
+        // Counted as once the United Nations stands: its holder's second vote included
+        val total = game.civilizations.count { !it.isBarbarian && !it.isSpectator() && !it.isDefeated() } + 1
+        return if (total > 28) total * 35 / 100 else total * (67 - (1.1 * total).toInt()) / 100 + 1
+    }
+
     private fun nearVictoryNote(other: Civilization?, offers: List<TradeOffer> = emptyList()) = other?.let { nearVictory(it) }?.let { fact ->
         " (note: $fact" + (if (offers.any { it.name == Constants.researchAgreement }) "; a research agreement adds to its learning" else "") + ")" } ?: ""
 
@@ -449,7 +462,10 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
             if (other.isCityState) {
                 entry["cityState"] = other.cityStateType.name
                 entry["influence"] = theirs?.getInfluence()?.toInt()
-                entry["ally"] = other.allyCiv?.civName
+                entry["ally"] = other.allyCiv?.let { ally -> if (ally == civ) "us" else "${ally.civName}, with ${other.getDiplomacyManager(ally)?.getInfluence()?.toInt() ?: 0} influence" }
+                // What a gift of ours would add now (the city-state screen's own sum), and how much our standing falls each turn
+                entry["ourGiftWouldAdd"] = listOf(250, 500, 1000).filter { civ.gold >= it }.associate { "$it gold" to other.cityStateFunctions.influenceGainedByGift(civ, it) }.ifEmpty { null }
+                entry["ourInfluenceFallsPerTurn"] = theirs?.getCityStateInfluenceDegrade()?.takeIf { it > 0f }?.let { (it * 10).toInt() / 10f }
                 entry["protectedByUs"] = ours.diplomaticStatus == DiplomaticStatus.Protector
             } else {
                 entry["cities"] = other.cities.size

@@ -1032,11 +1032,14 @@ object UniqueTriggerActivation {
 
             UniqueType.OneTimeTriggerVoting -> {
                 return {
-                    for (civ in civInfo.gameInfo.civilizations)
+                    // The countdown ticks at each power's own turn start: a power later in the turn order than the builder still has this turn's tick
+                    // to come, so it starts one higher - otherwise it reaches the vote a turn before the rest and votes early
+                    val builderAt = civInfo.gameInfo.civilizations.indexOf(civInfo)
+                    for ((index, civ) in civInfo.gameInfo.civilizations.withIndex())
                         if (!civ.isBarbarian && !civ.isSpectator())
                             civ.addFlag(
                                 CivFlags.TurnsTillNextDiplomaticVote.name,
-                                civInfo.getTurnsBetweenDiplomaticVotes()
+                                civInfo.getTurnsBetweenDiplomaticVotes() + if (index > builderAt) 1 else 0
                             )
                     if (notification != null)
                         civInfo.addNotification(notification, NotificationCategory.General, NotificationIcon.Diplomacy)

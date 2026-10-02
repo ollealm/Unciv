@@ -494,7 +494,7 @@ class DiplomacyManager() : IsPartOfGameInfoSerialization {
     }
 
     @Readonly
-    internal fun getCityStateInfluenceDegrade(): Float {
+    fun getCityStateInfluenceDegrade(): Float {
         if (getInfluence() <= getCityStateInfluenceRestingPoint())
             return 0f
 
