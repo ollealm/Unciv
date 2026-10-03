@@ -1167,7 +1167,8 @@ object RulerHost {
                 else if (civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.SelfDestructs) == true) "Our ${unit.first} was spent on its strike, launched ${describeWhere(civ, unit.second)}."
                 // A part that reached the capital is not lost: it is aboard
                 else if (civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.SpaceshipPart) == true && civ.victoryManager.currentsSpaceshipParts[unit.first] > 0) "Our ${unit.first} was added to the ship in the capital."
-                else "Our ${unit.first} ${describeWhere(civ, unit.second)} left service: disbanded by the officials to save its upkeep${needs?.let { " or to free its $it" } ?: ""}, or used up (a missionary spent).")
+                // Only what is known: no reason reached the host (every known cause has its own line above), so none is guessed - "a missionary spent" was once said of a warrior
+                else "Our ${unit.first} ${describeWhere(civ, unit.second)} is gone from our rolls; the officials did not say why.")
         }
         // Our own blows, which the engine tells only to the one struck: one line per target this turn - a city by name, a power's soldiers in the field together,
         // its ships at sea together (a blow on a barbarian Caravel once read "soldiers in the field")
