@@ -54,12 +54,17 @@ object RulerCampaigns {
                 val tile = game.tileMap.getIfTileExistsOrNull(stand.x, stand.y) ?: continue
                 if (path.lastOrNull() != tile) path += tile
             }
+            // Where it fell ends its path: the battle hook's tile, which its last stand may not be (it marched there and died the same turn)
+            val fall = if (id in last) null else trail.fallOf(id, owner, from, to)
+                // a mark kept before the unit's number was saved with it (a host restarted mid-age): the mark on its last stand is its fall
+                ?: path.lastOrNull()?.let { end -> trail.marks.firstOrNull { it.kind == "fallen" && it.id == -1 && it.turn in from..to && it.civ == owner && it.x == end.position.x && it.y == end.position.y } }
+            fall?.let { game.tileMap.getIfTileExistsOrNull(it.x, it.y) }?.let { if (path.lastOrNull() != it) path += it }
             if (path.isEmpty()) return@mapNotNull null
             // Units lost before names were kept go by what they were: a ship or a soldier
             val name = stands.lastOrNull { it.name.isNotEmpty() }?.name ?: trail.nameOf(id)
             val unit = game.ruleset.units[name]
             val sea = unit?.isWaterUnit ?: path.all { it.isWater }
-            val fell = id !in last && trail.marks.any { it.kind == "fallen" && it.turn in from..to && it.civ == owner && it.x == path.last().position.x && it.y == path.last().position.y }
+            val fell = fall != null
             val start = path.first()
             val far = path.indices.maxBy { start.aerialDistanceTo(path[it]) }
             // Went out and came home again: what it was making for is the farthest it got, not where it stands now
@@ -228,6 +233,10 @@ object RulerCampaigns {
         val names = group.map { it.name }.let { if (it.size == 1) it[0] else it.dropLast(1).joinToString(", ") + " and " + it.last() }
         if (owner == civ || group.all { it.name == owner.civName }) names else "$names of ${people(owner.civName)}"
     }
+
+    /** A place for a chancery line of [civ]'s own: its enemies reckoned here */
+    fun placeOf(civ: Civilization, tile: Tile) = placeOf(civ, tile, enemiesOf(civ))
+    fun atPlaceOf(civ: Civilization, tile: Tile) = atPlace(placeOf(civ, tile))
 
     /** A [placeOf] place with the word before it: at a city, its walls or its fields; in the country or waters beyond */
     fun atPlace(place: String) = when {

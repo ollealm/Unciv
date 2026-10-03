@@ -241,15 +241,19 @@ object RulerOverrides {
     @Volatile var unitExpended: ((Civilization, MapUnit, String) -> Unit)? = null
     fun noteExpended(unit: MapUnit, why: String) { if (unit.civ.civID in ruledCivs) unitExpended?.invoke(unit.civ, unit, why) }
 
-    /** A blow struck by a ruled civ's unit or city: the engine tells only the defender of it. [targetCity] when the blow fell on a city (its walls' health after),
-     *  else [targetUnit], the unit struck; [fell] when the blow destroyed or captured it */
-    class Strike(val attacker: Civilization, val targetCivName: String, val targetCity: String?, val targetUnit: String?, val health: Int, val maxHealth: Int, val fell: Boolean, val targetTile: Tile? = null)
+    /** A blow struck by a ruled civ's unit or city, or on one: the engine tells only the defender of it, and in its own words. [targetCity] when the blow fell on a city
+     *  (its walls' health after), else [targetUnit], the unit struck (by number in [targetUnitId], so two of a name are told apart); [fell] when the blow destroyed or
+     *  captured it; [attackerUnit] what struck, or [attackerCity] when it was a city's guns; [attackerFell] when the attacker died in the attempt */
+    class Strike(val attacker: Civilization, val targetCivName: String, val targetCity: String?, val targetUnit: String?, val health: Int, val maxHealth: Int, val fell: Boolean, val targetTile: Tile? = null,
+                 val attackerUnit: String? = null, val attackerCity: String? = null, val attackerFell: Boolean = false, val targetUnitId: Int? = null)
     @Volatile var struck: ((Strike) -> Unit)? = null
     fun noteStrike(attacker: ICombatant, defender: ICombatant, fell: Boolean) {
         val civ = attacker.getCivInfo()
-        if (civ.civID !in ruledCivs || civ == defender.getCivInfo()) return
+        if (civ == defender.getCivInfo() || (civ.civID !in ruledCivs && defender.getCivInfo().civID !in ruledCivs)) return
         struck?.invoke(Strike(civ, defender.getCivInfo().civName, if (defender.isCity()) defender.getName() else null, if (defender.isCity()) null else defender.getName(),
-            defender.getHealth().coerceAtLeast(0), defender.getMaxHealth(), fell, defender.getTile()))
+            defender.getHealth().coerceAtLeast(0), defender.getMaxHealth(), fell, defender.getTile(),
+            if (attacker.isCity()) null else attacker.getName(), if (attacker.isCity()) attacker.getName() else null, !attacker.isCity() && attacker.isDefeated(),
+            (defender as? com.unciv.logic.battle.MapUnitCombatant)?.unit?.id))
     }
 
     /** civIDs that may raise no world wonder at all (a game setting: e.g. only the rulers' realms compete for them) */

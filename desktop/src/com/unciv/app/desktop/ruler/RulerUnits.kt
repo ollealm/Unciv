@@ -148,7 +148,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             // One born in a town another of ours already waits in, or is bound for, moves on too: two never share a place
             val shelter = if (unit.isGreatPersonOfType("War") || unit.getTile().let { it.isCityCenter() && it.getOwner() == unit.civ && !claimed(unit, it) }) null else shelterFor(unit)
             orders[unit.id] = Order("hold", shelter?.position?.x?.toInt(), shelter?.position?.y?.toInt())
-            log(unit.civ, "A ${unit.name} #${unit.id} is at ${where(unit.civ, unit.getTile())} and awaits orders (use, move, or release to the officials)" +
+            log(unit.civ, "A ${unit.name} #${unit.id} ${RulerCampaigns.atPlaceOf(unit.civ, unit.getTile())} awaits orders (use, move, or release to the officials)" +
                 (greatImprovementOf(unit)?.let { "; with use, ability improvement, it can raise $it" } ?: "") +
                 (shelter?.let { if (it.isCityCenter()) "; meanwhile it walks to ${it.getCity()!!.name} and waits there" else "; meanwhile it waits beside ${it.getCity()!!.name}, whose town another of ours holds" } ?: "") + ".")
         }
@@ -164,13 +164,13 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
         if (target != null && order.action == "settle") settleProblem(civ, target)?.let { problem ->
             // The site went bad on the way (someone settled nearby): say so at once, do not walk on
-            log(civ, "Our Settler's site at ${where(civ, target)} is no longer usable: $problem${nearestSiteHint(civ, unit, target)}. The order is dropped; give a new site.")
+            log(civ, "Our Settler #${unit.id} was bound for ${RulerCampaigns.placeOf(civ, target)}, but the site is no longer usable: $problem${nearestSiteHint(civ, unit, target)}. The order is dropped; give it a new site.")
             orders.remove(unit.id)
             return true
         }
         // A garrison order does not turn a stronger soldier out of the city for a weaker one: the order is dropped, the stronger stays
         if (target != null && unit.getTile() != target && order.action == "garrison") target.militaryUnit?.takeIf { it.civ == civ && strengthOf(it) > strengthOf(unit) }?.let { holder ->
-            log(civ, "Our ${unit.name} #${unit.id} was to garrison ${target.getCity()?.name}, but our ${holder.name} #${holder.id} holding it is the stronger, so it stays and the order is dropped.")
+            log(civ, "Our ${unit.name} was to garrison ${target.getCity()?.name}, but our ${holder.name} holding it is the stronger, so it stays and the order is dropped.")
             drop(unit)
             return false
         }
@@ -192,7 +192,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         // A trade mission is carried out from any tile of the city-state's land (the engine's rule - UnitActionsGreatPerson), and its city itself no foreign
         // unit may enter: standing on their land counts as arrived (six of six missions were dropped at the gate, Run 21)
         if (target != null && unit.getTile() != target && tradeMissionLand(unit, order, target)) {
-            log(civ, "Our ${unit.name} arrived on ${target.getOwner()!!.civName}'s land at ${where(civ, unit.getTile())}.")
+            log(civ, "Our ${unit.name} arrived on ${target.getOwner()!!.civName}'s land, ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}.")
             order.x = unit.getTile().position.x.toInt(); order.y = unit.getTile().position.y.toInt()
             return carryOut(unit, order)
         }
@@ -209,7 +209,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             }
             val way = pathTo(unit, target)
             if (way.isEmpty()) {
-                log(civ, "Our ${unit.name} cannot reach ${where(civ, target)}; the order is dropped and the officials take it back.")
+                log(civ, "Our ${unit.name} cannot reach ${RulerCampaigns.placeOf(civ, target)}; the order is dropped and the officials take it back.")
                 noteGarrisonFailure(unit, order, target)
                 drop(unit)
                 return false
@@ -220,7 +220,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 unit.movement.swapMoveToTile(target)
             } else try { unit.movement.headTowards(target) } catch (_: UnitMovement.UnreachableDestinationException) {} // not moved: counted as stuck below
             if (tradeMissionLand(unit, order, target)) {
-                log(civ, "Our ${unit.name} arrived on ${target.getOwner()!!.civName}'s land at ${where(civ, unit.getTile())}.")
+                log(civ, "Our ${unit.name} arrived on ${target.getOwner()!!.civName}'s land, ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}.")
                 order.x = unit.getTile().position.x.toInt(); order.y = unit.getTile().position.y.toInt()
                 return carryOut(unit, order)
             }
@@ -234,10 +234,10 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                     val blocker = target.militaryUnit?.takeIf { !unit.isCivilian() } ?: target.civilianUnit?.takeIf { unit.isCivilian() }
                     // One of our own holds the place - a garrison's relief, or a civilian bound where our Worker stands: it waits beside it and swaps in the turn it can, instead of giving up
                     if (blocker != null && blocker.civ == civ && (order.action == "garrison" || unit.isCivilian())) {
-                        if (order.turnsStuck == 3) log(civ, "Our ${unit.name} #${unit.id} waits beside ${where(civ, target)}: our ${blocker.name} #${blocker.id} holds it and cannot change places yet. It swaps in as soon as it can.")
+                        if (order.turnsStuck == 3) log(civ, "Our ${unit.name} waits beside ${RulerCampaigns.placeOf(civ, target)}: our ${blocker.name} holds it and cannot change places yet. It swaps in as soon as it can.")
                         return true
                     }
-                    log(civ, "Our ${unit.name} #${unit.id} has been stuck for ${order.turnsStuck} turns on its way to ${where(civ, target)}, no nearer than it was" +
+                    log(civ, "Our ${unit.name} has been stuck for ${order.turnsStuck} turns on its way to ${RulerCampaigns.placeOf(civ, target)}, no nearer than it was" +
                         (blocker?.let { " - the tile is held by ${it.civ.civName}'s ${it.name}" } ?: " - no way to it opens") + ". The order is dropped and the officials take it back.")
                     noteGarrisonFailure(unit, order, target)
                     drop(unit)
@@ -245,7 +245,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 }
                 return true // still on the way
             }
-            log(civ, "Our ${unit.name} arrived at ${where(civ, target)}.")
+            log(civ, "Our ${unit.name} arrived ${RulerCampaigns.atPlaceOf(civ, target)}.")
         }
 
         return when (order.action) {
@@ -254,11 +254,11 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 if (unit.currentMovement <= 0f) return true
                 val broken = promiseBroken(civ, unit.getTile(), "settle") // judged before the founding, which the other side's flags answer to
                 if (UnitActions.invokeUnitAction(unit, UnitActionType.FoundCity)) {
-                    log(civ, "Our Settler founded ${civ.cities.last().name} at ${where(civ, unit.getTile())}${broken.orEmpty()}.")
+                    log(civ, "Our Settler founded ${civ.cities.last().name}${broken.orEmpty()}.")
                     orders.remove(unit.id)
                     true
                 } else {
-                    log(civ, "Our Settler cannot found a city at ${where(civ, unit.getTile())}: ${settleProblem(civ, unit.getTile()) ?: "the ground will not take a city"}${nearestSiteHint(civ, unit, unit.getTile())}. The order is dropped; give a new site.")
+                    log(civ, "Our Settler #${unit.id} cannot found a city ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}: ${settleProblem(civ, unit.getTile()) ?: "the ground will not take a city"}${nearestSiteHint(civ, unit, unit.getTile())}. The order is dropped; give it a new site.")
                     orders.remove(unit.id)
                     false
                 }
@@ -272,12 +272,12 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 // The first Great Scientist's boost finished the only technology the engine's queue held, and the second found no research under way (Run 19): the goals' next path is set before the boost
                 if (UnitActionType.HurryResearch in wanted && civ.tech.currentTechnologyName() == null) researchRefill(civ)
                 val used = wanted.firstOrNull { UnitActions.invokeUnitAction(unit, it) }
-                if (used != null) { usedByOrder += unit.id; log(civ, "Our ${unit.name} used its ability (${used.name}) at ${where(civ, unit.getTile())}${if (used == UnitActionType.SpreadReligion) promiseBroken(civ, unit.getTile(), "religion").orEmpty() else ""}.") }
+                if (used != null) { usedByOrder += unit.id; log(civ, "Our ${unit.name} used its ability (${used.name}) ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}${if (used == UnitActionType.SpreadReligion) promiseBroken(civ, unit.getTile(), "religion").orEmpty() else ""}.") }
                 else {
                     order.turnsStuck += 1
-                    if (order.turnsStuck == 1) log(civ, "Our ${unit.name} #${unit.id} could not use its ability at ${where(civ, unit.getTile())}${order.ability?.let { " ($it)" } ?: ""}: ${abilitiesHere(unit)}. Name one with the order and stand where it applies. It tries again for two more turns, then the order is dropped.")
+                    if (order.turnsStuck == 1) log(civ, "Our ${unit.name} #${unit.id} could not use its ability ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}${order.ability?.let { " ($it)" } ?: ""}: ${abilitiesHere(unit)}. Name one with the order and stand where it applies. It tries again for two more turns, then the order is dropped.")
                     if (order.turnsStuck < 3) return true
-                    log(civ, "Our ${unit.name} #${unit.id} still could not use its ability at ${where(civ, unit.getTile())}; the order is dropped and the officials take it back.")
+                    log(civ, "Our ${unit.name} still could not use its ability ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}; the order is dropped and the officials take it back.")
                     drop(unit)
                     return false // taken back this turn, as said
                 }
@@ -288,24 +288,24 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 // Giving needs movement left, as founding does: a soldier that marched in this turn is given next turn
                 if (unit.currentMovement <= 0f) return true
                 val recipient = recipientOf(civ, order)!!
-                val name = unit.name; val id = unit.id; val here = where(civ, unit.getTile())
+                val name = unit.name; val id = unit.id; val here = RulerCampaigns.atPlaceOf(civ, unit.getTile())
                 val influence = { recipient.getDiplomacyManager(civ)?.getInfluence() ?: 0f }
                 val before = influence()
                 orders.remove(id)
                 if (UnitActions.invokeUnitAction(unit, UnitActionType.GiftUnit)) {
                     released -= id; given += id
                     val regard = if (recipient.isCityState) ", whose regard for us rose (influence +${(influence() - before).roundToInt()}, now ${influence().toInt()})" else ""
-                    log(civ, "By your order: our $name #$id was given to ${recipient.civName} at $here$regard.")
-                    if (!recipient.isCityState) log(recipient, "${civ.civName} gave us their $name, now our $name #$id at ${where(recipient, unit.getTile())}.")
+                    log(civ, "By your order: our $name was given to ${recipient.civName} $here$regard.")
+                    if (!recipient.isCityState) log(recipient, "${civ.civName} gave us their $name, now our $name #$id ${RulerCampaigns.atPlaceOf(recipient, unit.getTile())}.") // its number: a new unit to order
                     true
                 } else {
-                    log(civ, "Our $name #$id could not be given to ${recipient.civName} at $here: ${giftProblem(civ, unit, recipient) ?: "they would not take it there"}. The order is dropped and the officials take it back.")
+                    log(civ, "Our $name could not be given to ${recipient.civName} $here: ${giftProblem(civ, unit, recipient) ?: "they would not take it there"}. The order is dropped and the officials take it back.")
                     drop(unit)
                     false
                 }
             }
             "hold" -> true
-            "disband" -> { log(civ, "By your order: our ${unit.name} #${unit.id} was disbanded."); orders.remove(unit.id); unit.disband(); true }
+            "disband" -> { log(civ, "By your order: our ${unit.name} was disbanded."); orders.remove(unit.id); unit.disband(); true }
             // Explored by our own hand each turn: left to the officials, an AI-played realm's routine never reads the unit's explore action, and a ship
             // sent to explore did whatever the officials had in mind instead (Babylon's Caravel sat 86 turns, Run 18). Done when nothing in reach is unexplored
             "explore" -> {
@@ -315,7 +315,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 if (!unit.isDestroyed && !unit.isExploring()) {
                     orders.remove(unit.id)
                     civ.notifications.removeAll { it.text == "${unit.shortDisplayName()} finished exploring." } // the engine's own word for it: ours below says more
-                    log(civ, "Our ${unit.name} #${unit.id} has explored all it can reach ${if (unit.baseUnit.isLandUnit) "on foot" else "by sea"} and is back under the officials, at ${where(civ, unit.getTile())}." +
+                    log(civ, "Our ${unit.name} has explored all it can reach ${if (unit.baseUnit.isLandUnit) "on foot" else "by sea"} and is back under the officials, ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}." +
                         (if (unit.baseUnit.isLandUnit) " Lands beyond the water are found only by ships." else ""))
                 }
                 true
@@ -360,7 +360,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         }
         if (tile != target) {
             if (target != null && tile != unit.getTile()) log(civ, "The ground our ${unit.name} #${unit.id} was marching to " +
-                (if (target.getOwner() != recipient) "is no longer ${recipient.civName}'s" else "cannot take it now") + "; it makes for ${where(civ, tile)} instead, to be given to ${recipient.civName} there.")
+                (if (target.getOwner() != recipient) "is no longer ${recipient.civName}'s" else "cannot take it now") + "; it makes for ${RulerCampaigns.placeOf(civ, tile)} instead, to be given to ${recipient.civName} there.")
             order.x = tile.position.x.toInt(); order.y = tile.position.y.toInt()
             order.turnsStuck = 0; order.stepsBest = null
         }
@@ -768,6 +768,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
         /** Rulebook lines a ruler has no use for: where the map generator puts a thing, and the AI's own weights */
         fun isRulebookNoise(unique: String) = listOf("Generated", "Minor deposits", "Guaranteed with", "Deposits", "Considered ", "A Region", "Must be adjacent", "Must not be", "Must be on", "Occurs ").any { unique.startsWith(it) }
+            // the rulebook's notes to itself: the AI's weights, what is shown or chosen where, a game setting's switch
+            || listOf("weight to this choice", "Will not be displayed", "Will not be chosen", "Will not be replaced by automated", "is enabled>").any { it in unique }
             || "for AI decisions" in unique || "Will not be displayed" in unique
 
         /** A tile improvement told plainly: its yield and the bonuses that come later - or, for one that yields nothing (a Citadel), what it does */
@@ -786,7 +788,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             return "a ${improvement.name} (${improvementInWords(improvement)}${if (consumed) "; it uses up the ${unit.baseUnit.name}" else ""})"
         }
 
-        /** "(x,y), 3 tiles NE of Rome" */
+        /** "(x,y), 3 tiles NE of Rome": for the briefing's unit list and order replies, where the advisor needs the coordinates to give orders. A chancery line, which may
+         *  reach the ruler, names a place as RulerCampaigns.placeOf does */
         fun where(civ: Civilization, tile: Tile): String {
             val coords = "(${tile.position.x},${tile.position.y})"
             val nearest = civ.cities.minByOrNull { it.getCenterTile().aerialDistanceTo(tile) } ?: return coords

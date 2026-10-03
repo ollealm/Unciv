@@ -10,13 +10,14 @@ import java.util.TreeMap
  */
 class RulerTrail {
     class Stand(val x: Int, val y: Int, val civ: String, val military: Boolean, val name: String = "")
-    /** kind: "fallen" (a military unit lost; civ is whose) or "taken" (a city changed hands; civ is the new owner) */
-    class Mark(val turn: Int, val x: Int, val y: Int, val kind: String, val civ: String)
+    /** kind: "fallen" (a military unit lost; civ is whose, id the unit's) or "taken" (a city changed hands; civ is the new owner) */
+    class Mark(val turn: Int, val x: Int, val y: Int, val kind: String, val civ: String, val id: Int = -1)
 
     /** turn -> unit id -> where it stood */
     val stands = TreeMap<Int, HashMap<Int, Stand>>()
-    /** Units the battle hook reported killed or captured since the last record: only these are marked fallen - a disbanded or used-up unit is no loss in the field */
-    val lostInBattle = HashSet<Int>()
+    /** Units the battle hook reported killed or captured since the last record, by id, as they stood where they fell: only these are marked fallen - a disbanded
+     *  or used-up unit is no loss in the field. The hook's tile, not the last stand's: a company that marched and fell in one turn fell at the end of its march */
+    val lostInBattle = HashMap<Int, Stand>()
     val marks = ArrayList<Mark>()
     /** "x,y" -> owner, as of the last recorded turn */
     private var cityOwners = HashMap<String, String>()
@@ -38,13 +39,10 @@ class RulerTrail {
         val owners = HashMap<String, String>()
         for (civ in game.civilizations) for (city in civ.cities) city.getCenterTile().position.let { owners["${it.x},${it.y}"] = civ.civName }
 
+        // An upgrade retires the old unit and raises a new one on the same spot: not a loss, and the battle hook never names it
+        for ((id, fall) in lostInBattle) if (id !in now && fall.military) marks += Mark(game.turns, fall.x, fall.y, "fallen", fall.civ, id)
         val before = stands.lowerEntry(game.turns)?.takeIf { it.key == game.turns - 1 }?.value
         if (before != null) {
-            for ((id, stand) in before) {
-                if (id in now || !stand.military) continue
-                // An upgrade retires the old unit and raises a new one on the same spot: not a loss
-                if (id in lostInBattle) marks += Mark(game.turns, stand.x, stand.y, "fallen", stand.civ)
-            }
             for ((where, owner) in owners) {
                 val previous = cityOwners[where] ?: continue
                 if (previous != owner) where.split(",").let { marks += Mark(game.turns, it[0].toInt(), it[1].toInt(), "taken", owner) }
@@ -81,6 +79,9 @@ class RulerTrail {
         return path
     }
 
+    /** Where a unit of [owner]'s fell within the turns [from]..[to], if the battle hook saw it fall */
+    fun fallOf(id: Int, owner: String, from: Int, to: Int): Mark? = marks.firstOrNull { it.kind == "fallen" && it.id == id && it.civ == owner && it.turn in from..to }
+
     /** What a unit was last called anywhere in the trail: its name may be missing from stands kept before names were saved */
     fun nameOf(id: Int): String = stands.descendingMap().values.firstNotNullOfOrNull { it[id]?.name?.takeIf { name -> name.isNotEmpty() } } ?: ""
 
@@ -89,7 +90,7 @@ class RulerTrail {
     fun toMap() = mapOf(
         "stands" to stands.mapKeys { it.key.toString() }.mapValues { turn ->
             turn.value.mapKeys { it.key.toString() }.mapValues { listOf(it.value.x, it.value.y, it.value.civ, it.value.military, it.value.name) } },
-        "marks" to marks.map { listOf(it.turn, it.x, it.y, it.kind, it.civ) },
+        "marks" to marks.map { listOf(it.turn, it.x, it.y, it.kind, it.civ, it.id) },
         "cityOwners" to cityOwners,
         "seen" to seen.mapKeys { it.key.toString() }.mapValues { turn -> turn.value.mapValues { it.value.toList() } },
         "met" to met.mapKeys { it.key.toString() }
@@ -102,7 +103,7 @@ class RulerTrail {
         }
         json?.get("seen")?.forEach { turn -> seen[turn.name.toInt()] = HashMap(turn.associate { it.name to it.asIntArray() }) }
         json?.get("met")?.forEach { turn -> met[turn.name.toInt()] = HashMap(turn.associate { it.name to it.asStringArray().toList() }) }
-        json?.get("marks")?.forEach { marks += Mark(it.getInt(0), it.getInt(1), it.getInt(2), it.getString(3), it.getString(4)) }
+        json?.get("marks")?.forEach { marks += Mark(it.getInt(0), it.getInt(1), it.getInt(2), it.getString(3), it.getString(4), if (it.size > 5) it.getInt(5) else -1) }
         json?.get("cityOwners")?.forEach { cityOwners[it.name] = it.asString() }
     }
 

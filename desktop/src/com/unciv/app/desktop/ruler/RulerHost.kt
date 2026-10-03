@@ -52,7 +52,7 @@ object RulerHost {
     /** civName -> what happened to that civ, turn by turn - the "chancery log" its advisor reads */
     private val chancery = HashMap<String, ArrayList<Map<String, Any?>>>()
     private val units = RulerUnits { civ, text -> log(civ, text) }
-    private val diplomacy = RulerDiplomacy { civ, text -> log(civ, text) }
+    private val diplomacy = RulerDiplomacy({ civ, text -> log(civ, text) }, { text -> addPublicEvent(text) })
     private val trail = RulerTrail()
     private val ages = RulerAges(trail, yearText = { turn -> yearText(turn) }, stillFor = { unit -> units.turnsStill(unit) })
 
@@ -126,7 +126,7 @@ object RulerHost {
         } }
         RulerOverrides.hasOrder = { unit -> unit.id in units.orders }
         RulerOverrides.blockFailed = { civ, what, why -> log(civ, "The officials could not finish $what this turn: $why. The units it moved stand where they were left, and the officials try again next turn.") }
-        RulerOverrides.unitNotMoved = { civ, unit, why -> log(civ, "Our ${unit.name} #${unit.id} could not be moved this turn: $why. It stands ${describeWhere(civ, unit.getTile())}, and the officials try again next turn.") }
+        RulerOverrides.unitNotMoved = { civ, unit, why -> log(civ, "Our ${unit.name} could not be moved this turn: $why. It stands ${describeWhere(civ, unit.getTile())}, and the officials try again next turn.") }
         units.researchRefill = { civ -> applyResearchGoals(civ) }
         // A city's defender warning, acknowledged while a garrison march was on its way, shows in full again when that march fails (Grand River stood empty 13 turns under an acknowledged one, Run 23)
         units.garrisonMissed = { civ, city -> city.getCity()?.name?.lowercase()?.let { name -> orders[civ.civName]?.acknowledged?.removeIf { it.startsWith("$name has no defender") || it.startsWith("$name is only held by") } } }
@@ -145,11 +145,14 @@ object RulerHost {
         RulerOverrides.faithSpent = { civ, faith, what -> faithSpending.getOrPut(civ.civName) { ArrayList() } += Pair(faith, what) }
         RulerOverrides.freeTechTaken = { civ, tech, goal -> freeTechs.getOrPut(civ.civName) { ArrayList() } += Pair(tech, goal) }
         RulerOverrides.unitDisbanded = { civ, unit, why -> if (civ.civID in RulerOverrides.ruledCivs) disbandedFor.getOrPut(civ.civName) { HashMap() }[unit.id] = why }
-        RulerOverrides.struck = { strike -> strikes.getOrPut(strike.attacker.civName) { ArrayList() } += strike }
+        RulerOverrides.struck = { strike ->
+            if (strike.attacker.civID in RulerOverrides.ruledCivs) strikes.getOrPut(strike.attacker.civName) { ArrayList() } += strike
+            if (strike.targetCivName in orders) blows.getOrPut(strike.targetCivName) { ArrayList() } += strike
+        }
         RulerOverrides.unitExpended = { civ, unit, why -> expended.getOrPut(civ.civName) { HashMap() }[unit.id] = Pair(why, unit.getTile()) }
         RulerOverrides.unitLost = { loss ->
             // The chancery's losses and the trail's fallen marks are the ruled realms' own; an oddity of arms can be anyone's
-            if (loss.civ.civID in RulerOverrides.ruledCivs) { losses.getOrPut(loss.civ.civName) { ArrayList() } += loss; trail.lostInBattle += loss.unit.id }
+            if (loss.civ.civID in RulerOverrides.ruledCivs) { losses.getOrPut(loss.civ.civName) { ArrayList() } += loss; trail.lostInBattle[loss.unit.id] = RulerTrail.Stand(loss.where.position.x.toInt(), loss.where.position.y.toInt(), loss.civ.civName, loss.unit.isMilitary(), loss.unit.name) }
             ages.noteLoss(loss, game().turns + 1)
         }
 
@@ -981,6 +984,8 @@ object RulerHost {
     /** Blows each civ's own host struck during the turn being played, in order (RulerOverrides.noteStrike): the engine tells only the one struck, so the attacker's
      *  chancery had nothing of its own fighting (three realms besieged Tenochtitlan without a line, Run 21). Told as one line per target */
     private val strikes = HashMap<String, MutableList<RulerOverrides.Strike>>()
+    /** Blows struck on each ruled civ's cities and units during the turn being played, in order: told as one line per attacker and place, in place of the engine's notice of each blow */
+    private val blows = HashMap<String, MutableList<RulerOverrides.Strike>>()
     /** Units of each civ that went by their own work or by the ground they stood on during the turn being played, by unit number: why, and where they stood (RulerOverrides.noteExpended) */
     private val expended = HashMap<String, HashMap<Int, Pair<String, Tile>>>()
     /** A ship that attacked one of our cities or units, as the attack's notice placed it: kept a few turns for the threats list */
@@ -1004,7 +1009,23 @@ object RulerHost {
     private val disbandedFor = HashMap<String, HashMap<Int, String>>()
     private val noise = listOf("has no work to do", "will end in", "will end next turn", "can be promoted", "assigned you a new quest", "no longer needs your help",
         // the engine's bare word on a trade request: our own line says which proposal and how it ended, and the deals line says what came into force
-        "has accepted your trade request", "has denied your trade request")
+        "has accepted your trade request", "has denied your trade request",
+        // a city-state's end: the host's own line (recordPublicEvents) says who took its city, to every court that knew it
+        "The City-State of [")
+    /** The engine's notice of a blow on us ("An enemy [Pikeman] ([-40] HP) has attacked [Onondaga] ([-26] HP)"): the turn's blows are folded into one line per attacker and place instead */
+    private val blowNotice = Regex("^(An enemy|Enemy city) \\[[^\\]]+\\]( \\(\\[-\\d+\\] HP\\))? (has attacked|has captured|has destroyed|has raided|was destroyed while attacking) (?!our tile improvement)")
+    /** The engine's notices in the chancery's own voice: the realm speaks as "we", a blow's arithmetic is struck ("(-40 HP)"), its templates' residue
+     *  ("Gained 1 Worker unit(s) due to adopting Citizenship") and a city's wish for a luxury in the words of a power's demand ("Ecbatana demands Copper!") are put in words */
+    private fun inOurWords(text: String): String {
+        var line = text.replace(Regex("\\s*\\(-\\d+ HP\\)"), "").replace(Regex(" {2,}"), " ")
+        line = line.replace(Regex("^You "), "We ").replace(Regex("^Your "), "Our ")
+        // "you" as the doer ("is grateful that you killed") becomes "we"; as the one done to ("rewarded you") becomes "us"
+        line = line.replace(Regex("\\b(that|because|whom|if|when|as) you\\b"), "$1 we").replace(Regex("\\byou\\b"), "us").replace(Regex("\\byour\\b"), "our")
+        line = line.replace(Regex("\\b(\\d+) (.+?) unit\\(s\\)")) { m -> "${m.groupValues[1]} ${m.groupValues[2]} unit${if (m.groupValues[1] == "1") "" else "s"}" }
+        line = line.replace(Regex(" due to (adopting|constructing|completing|researching|discovering|founding)"), " on $1")
+        line = line.replace(Regex("^([^!]+) demands ([^!]+)!$"), "$1 asks for $2.")
+        return line
+    }
 
     /** What one ruled civ looked like before a turn, to explain afterwards what the officials did */
     private class CivSnapshot(civ: Civilization) {
@@ -1035,6 +1056,7 @@ object RulerHost {
         if (theirs.isNotEmpty()) log(civ, "The officials adopted the polic${if (theirs.size == 1) "y" else "ies"} ${theirs.joinToString(" and ")}" +
             (if (orders[civ.civName]?.policyBranches.isNullOrEmpty()) " - your policy order names no branch" else " - nothing your policy order names could be adopted") + ".")
         val turn = civ.gameInfo.turns
+        val enemies = RulerCampaigns.enemiesOf(civ)
         units.noteStanding(civ)
         // The game's own notifications first - they cover research, buildings, combat, diplomacy. The turn's entry in the log holds what was
         // on the desk when our turn ended; what later powers did on their turns is still in the live list. Both are read now, in one window,
@@ -1056,7 +1078,7 @@ object RulerHost {
             if (came != null) { takenWith.getOrPut(came.groupValues[2]) { ArrayList() } += came.groupValues[1]; continue }
             if (flipped.any { "[$it]" in notification.text && ("allied with" in notification.text || "lost our alliance" in notification.text) }) continue
             // The engine's template text loses its brackets and braces ("{Gained 1 Settler unit(s)}{ }{due to adopting Collective Rule}")
-            val text = notification.text.replace("[", "").replace("]", "").replace("{", "").replace("}", "") +
+            val text = inOurWords(notification.text.replace("[", "").replace("]", "").replace("{", "").replace("}", "")) +
                 // the engine's minimum war binds the side attacked as well: say so where the war is first heard of
                 (if ("has declared war on us" in notification.text) " No peace can be made for ${civ.gameInfo.ruleset.modOptions.constants.minimumWarDuration} turns." else "")
             // "An enemy X has pillaged our Farm" says not whose: the raider still stands on the tile it pillaged
@@ -1064,7 +1086,8 @@ object RulerHost {
                 notification.actions.filterIsInstance<com.unciv.logic.civilization.LocationAction>().firstOrNull()?.location
                     ?.let { civ.gameInfo.tileMap.getIfTileExistsOrNull(it.x, it.y) }?.getUnits()?.firstOrNull { it.civ != civ && it.isMilitary() }?.civ
                 else null
-            log(civ, if (raider == null) text else text.replaceFirst(" has pillaged", " of ${if (raider.isBarbarian) "the barbarians" else RulerCampaigns.people(raider.civName)} has pillaged"))
+            // A blow on us is told below, folded with the turn's others and with whose hand it was (the engine says "An enemy Pikeman"); a civilian taken has its own loss line
+            if (!blowNotice.containsMatchIn(notification.text)) log(civ, if (raider == null) text else text.replaceFirst(" has pillaged", " of ${if (raider.isBarbarian) "the barbarians" else RulerCampaigns.people(raider.civName)} has pillaged"))
             // An attack's notice carries where the attacker stood: a ship there is remembered for the threats list, since it may sail out of sight before a look-in
             if (notification.text.startsWith("An enemy [")) notification.actions.filterIsInstance<com.unciv.logic.civilization.LocationAction>().getOrNull(1)?.location
                 ?.let { civ.gameInfo.tileMap.getIfTileExistsOrNull(it.x, it.y) }?.let { from -> from.getUnits().firstOrNull { it.civ != civ && it.isMilitary() && it.baseUnit.isWaterUnit }?.let { ship ->
@@ -1132,18 +1155,19 @@ object RulerHost {
             // The host knows whose hand spent a unit: the ruler's use order says so as it is carried out, anything else was the officials' once it was left to them
             val byWhom = if (units.usedByOrder.remove(id)) "by your order" else "by the officials once it was left to them"
             val went = expended[civ.civName]?.remove(id)
-            log(civ, if (disbandedWhy != null && !civ.isDefeated()) "Our ${unit.first} #$id ${describeWhere(civ, unit.second)} was disbanded by the officials $disbandedWhy."
-                else if (fell != null) "Our ${unit.first} #$id was ${if (fell.captured) "captured" else "lost in action"} ${describeWhere(civ, fell.where)}" +
+            // No unit number: a unit gone from the rolls is nothing the advisor can order, and the line may reach the ruler's letter
+            log(civ, if (disbandedWhy != null && !civ.isDefeated()) "Our ${unit.first} ${describeWhere(civ, unit.second)} was disbanded by the officials $disbandedWhy."
+                else if (fell != null) "Our ${unit.first} was ${if (fell.captured) "captured" else "lost in action"} ${describeWhere(civ, fell.where)}" +
                     (fell.enemy?.let { enemy -> ", ${if (fell.captured) "taken" else "killed"} by ${if (enemy.isBarbarian) "a barbarian" else enemy.civName + "'s"} ${fell.enemyUnit ?: "soldiers"}" } ?: "") + "."
                 // A realm that fell takes what was left of its host with it: no officials disbanded them (the Maya at T210, Run 20)
-                else if (civ.isDefeated()) "Our ${unit.first} #$id ${describeWhere(civ, unit.second)} was lost with the fall of ${civ.civName}."
+                else if (civ.isDefeated()) "Our ${unit.first} ${describeWhere(civ, unit.second)} was lost with the fall of ${civ.civName}."
                 else if (spent) "Our ${unit.first} ${describeWhere(civ, unit.second)} did its work and was used up, as such boats are: the fishing grounds it set up stay."
-                else if (great) "Our ${unit.first} #$id was spent $byWhom: its ability used ${describeWhere(civ, went?.second ?: unit.second)}."
-                else if (went != null) "Our ${unit.first} #$id ${describeWhere(civ, went.second)} ${went.first}${if (went.first.startsWith("was used up")) ", $byWhom" else ""}."
-                else if (civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.SelfDestructs) == true) "Our ${unit.first} #$id was spent on its strike, launched ${describeWhere(civ, unit.second)}."
+                else if (great) "Our ${unit.first} was spent $byWhom: its ability used ${describeWhere(civ, went?.second ?: unit.second)}."
+                else if (went != null) "Our ${unit.first} ${describeWhere(civ, went.second)} ${went.first}${if (went.first.startsWith("was used up")) ", $byWhom" else ""}."
+                else if (civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.SelfDestructs) == true) "Our ${unit.first} was spent on its strike, launched ${describeWhere(civ, unit.second)}."
                 // A part that reached the capital is not lost: it is aboard
                 else if (civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.SpaceshipPart) == true && civ.victoryManager.currentsSpaceshipParts[unit.first] > 0) "Our ${unit.first} was added to the ship in the capital."
-                else "Our ${unit.first} #$id ${describeWhere(civ, unit.second)} left service: disbanded by the officials to save its upkeep${needs?.let { " or to free its $it" } ?: ""}, or used up (a missionary spent).")
+                else "Our ${unit.first} ${describeWhere(civ, unit.second)} left service: disbanded by the officials to save its upkeep${needs?.let { " or to free its $it" } ?: ""}, or used up (a missionary spent).")
         }
         // Our own blows, which the engine tells only to the one struck: one line per target this turn - a city by name, a power's soldiers in the field together,
         // its ships at sea together (a blow on a barbarian Caravel once read "soldiers in the field")
@@ -1159,8 +1183,29 @@ object RulerHost {
                     "$whose ${harbour?.let { "in $it" } ?: "at sea"}"
                 } else "$theirs soldiers in the field") + " $times: " + listOfNotNull(
                     blows.filter { it.fell }.map { it.targetUnit!! }.takeIf { it.isNotEmpty() }?.let { "their ${it.joinToString(" and ")} fell" },
-                    blows.filter { !it.fell }.groupBy { it.targetUnit!! }.map { (name, hits) -> "$name at ${hits.last().health} health" }.takeIf { it.isNotEmpty() }?.let { "their ${it.joinToString(", ")}" }
+                    // the last blow on each unit still standing: one hit twice and then killed is a fall, not a fall and a survivor
+                    blows.filter { !it.fell && it.targetUnitId !in blows.filter { b -> b.fell }.map { b -> b.targetUnitId } }.groupBy { it.targetUnitId ?: it.targetUnit!! }.values
+                        .map { hits -> "${hits.last().targetUnit} at ${hits.last().health} health" }.takeIf { it.isNotEmpty() }?.let { "their ${it.joinToString(", ")}" }
                 ).joinToString("; ") + ".")
+        }
+        // The enemy's blows on us, folded the same way (the engine's notice of each is dropped above): one line per attacker and place - a city by name, our soldiers
+        // or ships where they stood - with what struck, how our walls and companies stand after, who of ours fell and who of theirs died in the attempt
+        for ((key, hits) in (blows.remove(civ.civName) ?: emptyList<RulerOverrides.Strike>()).groupBy { it.attacker.civName to (it.targetCity ?: it.targetTile?.let { RulerCampaigns.placeOf(civ, it, enemies) } ?: "") }) {
+            val (attacker, place) = key
+            val arms = hits.mapNotNull { it.attackerUnit }.distinct(); val guns = hits.mapNotNull { it.attackerCity }.distinct()
+            val owner = if (attacker == Constants.barbarians) "the barbarians'" else RulerCampaigns.possessive(attacker)
+            val list = { parts: List<String> -> if (parts.size == 1) parts[0] else parts.dropLast(1).joinToString(", ") + " and " + parts.last() }
+            // "Polynesia's Machine Gun and the guns of Tonga", "The guns of Polynesia's Tonga", "The barbarians' Brute"
+            val whose = (if (arms.isEmpty()) "the guns of $owner ${list(guns)}" else "$owner ${list(arms + guns.map { "the guns of $it" })}").replaceFirstChar { it.uppercase() }
+            val times = when (hits.size) { 1 -> "once"; 2 -> "twice"; else -> "${hits.size} times" }
+            val city = hits.first().targetCity
+            val died = hits.filter { it.attackerFell }.mapNotNull { it.attackerUnit }.takeIf { it.isNotEmpty() }?.let { "; their ${it.joinToString(" and ")} died in the attempt" } ?: ""
+            log(civ, if (city != null) "$whose struck $city $times: " + (if (hits.any { it.fell }) (if (attacker == Constants.barbarians) "the walls were overrun and the city raided" else "the walls were stormed and the city is lost") else "the walls at ${hits.last().health} of ${hits.last().maxHealth} health") + died + "."
+                else "$whose struck our ${if (hits.first().targetTile?.isWater == true) "ships" else "soldiers"} ${RulerCampaigns.atPlace(place)} $times: " + listOfNotNull(
+                    hits.filter { !it.fell && it.targetUnitId !in hits.filter { b -> b.fell }.map { b -> b.targetUnitId } }.groupBy { it.targetUnitId ?: it.targetUnit!! }.values
+                        .map { blows -> "our ${blows.last().targetUnit} at ${blows.last().health} health" }.takeIf { it.isNotEmpty() }?.joinToString(", "),
+                    hits.filter { it.fell }.map { it.targetUnit!! }.takeIf { it.isNotEmpty() }?.let { "our ${it.joinToString(" and ")} fell" }
+                ).joinToString("; ") + died + ".")
         }
         applyStandingOrders(civ) // a finished goal leaves the queue empty until the next goal's path is set - not idleness
         val researching = civ.tech.currentTechnologyName()
@@ -1187,7 +1232,7 @@ object RulerHost {
         }
         // Deals: say exactly what came into force and what ended
         val dealsNow = diplomacy.dealsInForce(civ)
-        for (deal in diplomacy.endingSoon(civ, 5) - diplomacy.endingSoon(civ, 4).toSet()) log(civ, "A deal ends in five turns, at turn ${turn + 5}: $deal. The same terms can be offered to them again only once it has ended; order renew and they are offered again that very turn, as our proposal.")
+        for (deal in diplomacy.endingSoon(civ, 5) - diplomacy.endingSoon(civ, 4).toSet()) log(civ, "A deal ends in five turns, in ${yearText(turn + 5)}: $deal. The same terms can be offered to them again only once it has ended; order renew and they are offered again that very turn, as our proposal.")
         val began = (dealsNow - before.deals).toList(); val ended = (before.deals - dealsNow).toList()
         // A deal that ends the turn its renewal begins was replaced, not lost: same partner, same goods, only the numbers differ
         val goodsOf = { deal: String -> deal.replace(Regex(" x\\d+"), "").replace(Regex("\\d+"), "#") }
@@ -1382,11 +1427,8 @@ object RulerHost {
         return "This game can be won only by " + (if (how.size == 1) how.single() else how.dropLast(1).joinToString("; ") + "; or " + how.last()) + "."
     }
 
-    private fun describeWhere(civ: Civilization, tile: Tile): String {
-        val nearest = civ.cities.minByOrNull { it.getCenterTile().aerialDistanceTo(tile) } ?: return "far from home"
-        val distance = nearest.getCenterTile().aerialDistanceTo(tile)
-        return if (distance == 0) "in ${nearest.name}" else "$distance tile${if (distance == 1) "" else "s"} from ${nearest.name}"
-    }
+    /** A place as a chancery line names it, with its preposition: "at the fields of Ecbatana", "in the country south of Persepolis" - never a count of tiles, which the ruler must not read */
+    private fun describeWhere(civ: Civilization, tile: Tile): String = RulerCampaigns.atPlaceOf(civ, tile)
 
     /** A city's place in the world as a painter needs it: "on the coast, among forests, grassland country" */
     private fun lieOfTheLand(city: com.unciv.logic.city.City): String {
@@ -1456,21 +1498,27 @@ object RulerHost {
         }
         for (war in before.wars - after.wars)
             if (war.all { it in after.alive }) addPublicEvent("${war.joinToString(" and ")} have made peace.")
+        val ended = HashSet<String>() // city-states whose end was told with their city's taking
         for ((city, owner) in after.cityOwners) {
             val previousOwner = before.cityOwners[city]
             if (previousOwner == null) {
                 if (owner in after.eras) addPublicEvent("$owner founded the city of $city.") // city-states founding themselves is not news
             }
             else if (previousOwner != owner) {
-                addPublicEvent("$owner captured $city from $previousOwner!")
-                // The engine tells only the loser; every other realm that knows both sides hears it as news of the world
                 val game = game()
                 val sides = listOf(owner, previousOwner).mapNotNull { name -> game.civilizations.firstOrNull { it.civName == name } }
+                // A city-state's fall is one event, not a capture "from Sydney", a capital's fall and a destruction (the Chronicler wrote conquests of Zurich from Zurich)
+                val cityState = sides.getOrNull(1)?.takeIf { it.isCityState && previousOwner !in after.alive }
+                if (cityState != null) ended += previousOwner
+                addPublicEvent(if (cityState != null) "$owner took $city, and the city-state of $previousOwner is no more." else "$owner captured $city from $previousOwner!")
+                // The engine tells only the loser; every other realm that knows both sides hears it as news of the world
                 if (sides.size == 2) for (name in orders.keys) {
                     if (name == owner) continue // the taker's own line says what it took
                     // The loser hears whose hand it was: the engine says only "An enemy Great War Infantry has captured" (Babylon blamed Greece for Budapest's taking)
                     if (name == previousOwner) { sides[1].takeIf { it.isAlive() }?.let { log(it, "$city${if (city in before.capitals) ", our capital," else ""} fell to $owner.") }; continue }
                     val listener = game.civilizations.firstOrNull { it.civName == name }?.takeIf { it.isAlive() } ?: continue
+                    // A city-state's end is news to every court that knew it, whoever took it (the engine's own word on it is dropped from the chancery)
+                    if (cityState != null) { if (listener.knows(cityState)) log(listener, "$city fell to $owner, and the city-state of $previousOwner is no more."); continue }
                     if (sides.all { listener.knows(it) })
                         log(listener, "$city${if (city in before.capitals) ", $previousOwner's capital," else ""} fell to $owner.")
                 }
@@ -1486,7 +1534,7 @@ object RulerHost {
                 val opened = people?.tech?.techsResearched?.firstOrNull { game().ruleset.technologies[it]?.era() == era }
                 addPublicEvent("$civ entered the $era" + (opened?.let { " with the learning of $it" } ?: "") + ".")
             }
-        for (civ in before.alive - after.alive) addPublicEvent("$civ has been destroyed.")
+        for (civ in before.alive - after.alive - ended) addPublicEvent("$civ has been destroyed.")
     }
 
     /** Log lines an advisor would want to see at once, not at the next scheduled look-in */
@@ -1498,7 +1546,7 @@ object RulerHost {
         "lost our alliance",
         // The alerts every realm gets (the Utopia Project begun or finished): the end of the game may be in sight
         "has started constructing", "has completed [^.]*!$",
-        "awaits orders", "The United Nations now stands", "our vote is not pledged", "(?<!We have )captured(?! a barbarian)", "has been destroyed", "has been stuck", "offers peace", "\\(an advised court\\) offers a deal", "demands that we", "proposes a Declaration of Friendship").map { Regex(it, RegexOption.IGNORE_CASE) }
+        "awaits orders", "The United Nations now stands", "our vote is not pledged", "(?<!We have )captured(?! a barbarian)", "has been destroyed", "is no more", "has been stuck", "offers peace", "\\(an advised court\\) offers a deal", "demands that we", "proposes a Declaration of Friendship").map { Regex(it, RegexOption.IGNORE_CASE) }
 
     private val warningsWoken = HashMap<String, HashSet<String>>()
     /** The world as the last advance left it (null before the first) */
@@ -2163,6 +2211,8 @@ object RulerHost {
         }
     }
 
+    private fun turnsAgo(turns: Int) = when (turns) { 0 -> "this turn"; 1 -> "last turn"; else -> "$turns turns ago" }
+
     private fun threats(civ: Civilization): List<String> {
         val threats = ArrayList<String>()
         val friendly = LinkedHashMap<String, ArrayList<String>>() // a friend's soldiers near our cities, by power: one line each, not one per soldier
@@ -2190,14 +2240,14 @@ object RulerHost {
                 else -> "at peace"
             }
             threats += "${unit.civ.civName} ${unit.name}${if (ship) " #${unit.id} (a ship, " else " ("}strength ${unit.baseUnit.strength.coerceAtLeast(unit.baseUnit.rangedStrength)}, $stance) at ${RulerUnits.where(civ, tile)}" +
-                (raid?.let { " - it attacked ${it.target} on turn ${it.turn}" } ?: "")
+                (raid?.let { " - it attacked ${it.target} ${turnsAgo(civ.gameInfo.turns - it.turn)}" } ?: "")
         }
         for ((power, near) in friendly) threats += "$power, a friend: ${near.size} soldier${if (near.size == 1) "" else "s"} near ${near.distinct().joinToString(" and ")} (friendly)"
         // A ship that struck at us and has sailed out of sight since: it may be back (Run 18: a Trireme raided Pyongyang six turns running, never listed)
         for ((id, raid) in raids) {
             val ship = civ.gameInfo.civilizations.firstOrNull { it.civName == raid.owner }?.units?.getUnitById(id) ?: continue
             if (ship.getTile() in civ.viewableTiles) continue
-            threats += "${raid.owner} ${ship.name} #$id (a ship) attacked ${raid.target} on turn ${raid.turn} from ${raid.from}, and is out of sight now"
+            threats += "${raid.owner} ${ship.name} #$id (a ship) attacked ${raid.target} ${turnsAgo(civ.gameInfo.turns - raid.turn)} from ${raid.from}, and is out of sight now"
         }
         // Aircraft of a power at war with us that can reach one of our cities from where we last saw them (in a city or on a carrier)
         val air = civ.viewableTiles.flatMap { tile -> tile.airUnits.filter { it.civ != civ && civ.isAtWarWith(it.civ) } }
@@ -2215,29 +2265,30 @@ object RulerHost {
         val ruleset = civ.gameInfo.ruleset
         treaty(civ, name)?.let { return it }
         fun <T> find(map: Map<String, T>) = map.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+        // Every kind's rulebook text in words: brackets struck, conditions in parentheses, the rulebook's own notes (the AI's weights, what is shown where) dropped
+        val words = { uniques: Collection<String> -> uniques.filterNot { RulerUnits.isRulebookNoise(it) }.map { RulerUnits.inWords(it) } }
         find(ruleset.buildings)?.let { b ->
             return mapOf("kind" to if (b.isWonder) "wonder" else if (b.isNationalWonder) "national wonder" else "building", "name" to b.name,
                 "cost" to b.cost, "maintenance" to b.maintenance, "requiresTech" to b.requiredTech, "requiresBuilding" to b.requiredBuilding,
                 "yields" to b.cloneStats().toString(), "happiness" to b.happiness.toInt(),
-                "effects" to b.uniques, "alreadyBuiltSomewhere" to (b.isWonder && civ.gameInfo.getCities().any { it.cityConstructions.isBuilt(b.name) }),
+                "effects" to words(b.uniques), "alreadyBuiltSomewhere" to (b.isWonder && civ.gameInfo.getCities().any { it.cityConstructions.isBuilt(b.name) }),
                 "weHaveTheTech" to (b.requiredTech == null || civ.tech.isResearched(b.requiredTech!!)))
         }
         find(ruleset.units)?.let { u ->
             return mapOf("kind" to "unit", "name" to u.name, "cost" to u.cost, "strength" to u.strength, "rangedStrength" to u.rangedStrength, "range" to u.range,
                 "movement" to u.movement, "requiresTech" to u.requiredTech, "requiresResource" to u.requiredResource, "upgradesTo" to u.upgradesTo,
-                "obsoleteWith" to u.obsoleteTech, "abilities" to u.uniques, "weHaveTheTech" to (u.requiredTech == null || civ.tech.isResearched(u.requiredTech!!)))
+                "obsoleteWith" to u.obsoleteTech, "abilities" to words(u.uniques), "weHaveTheTech" to (u.requiredTech == null || civ.tech.isResearched(u.requiredTech!!)))
         }
         find(ruleset.technologies)?.let { t ->
             return mapOf("kind" to "technology", "name" to t.name, "era" to t.era(), "researched" to civ.tech.isResearched(t.name),
                 "turnsFromHere" to civ.tech.getRequiredTechsToDestination(t).sumOf { civ.tech.turnsToTech(it.name).toIntOrNull() ?: 0 },
                 "prerequisites" to t.prerequisites.toList(),
                 "unlocks" to (ruleset.buildings.values.filter { it.requiredTech == t.name }.map { it.name } + ruleset.units.values.filter { it.requiredTech == t.name }.map { it.name }),
-                "effects" to t.uniques)
+                "effects" to words(t.uniques))
         }
         find(ruleset.beliefs)?.let { b -> return mapOf("kind" to "belief", "name" to b.name, "type" to b.type.name.lowercase(), "gives" to beliefInWords(b).substringAfter(": "),
             "heldBy" to civ.gameInfo.religions.values.filter { it.hasBelief(b.name) }.map { "${it.getReligionDisplayName()} (${it.foundingCiv.civName}'s)" }) }
-        find(ruleset.policies)?.let { p -> return mapOf("kind" to "policy", "name" to p.name, "branch" to p.branch.name, "effects" to p.uniques, "adopted" to civ.policies.isAdopted(p.name)) }
-        val words = { uniques: Collection<String> -> uniques.filterNot { RulerUnits.isRulebookNoise(it) }.map { RulerUnits.inWords(it) } }
+        find(ruleset.policies)?.let { p -> return mapOf("kind" to "policy", "name" to p.name, "branch" to p.branch.name, "effects" to words(p.uniques), "adopted" to civ.policies.isAdopted(p.name)) }
         val yields = { stats: com.unciv.models.stats.Stats -> RulerUnits.statsInWords(stats).ifEmpty { null } }
         find(ruleset.tileImprovements)?.let { i ->
             val great = i.hasUnique(com.unciv.models.ruleset.unique.UniqueType.GreatImprovement)

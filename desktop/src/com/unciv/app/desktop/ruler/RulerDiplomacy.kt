@@ -35,7 +35,7 @@ private val DURATION = Regex(" for \\d+ turns?\\b")
 /** A Research Agreement as a deal in force reads it, both sides alike: one wording for the loss of it */
 private val RESEARCH_PAID = Regex("we give Research Agreement \\((\\d+) gold from each side\\); they give Research Agreement \\(\\d+ gold from each side\\)")
 
-class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
+class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private val event: (String) -> Unit = {}) {
 
     private val hiddenOffers = setOf(TradeOfferType.City, TradeOfferType.Introduction, TradeOfferType.Technology)
 
@@ -534,6 +534,10 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         val line = "$city joined us by marriage into ${if (city == other.civName) "its" else "the ${other.civName}"} ruling family, for $cost gold: it is ours, held as a puppet (it builds and pays for itself, gives no orders). " +
             "Annexing it with a cities order makes it a city of our own, and adds $perCityCost to the culture cost of every policy; held as a puppet it adds none"
         log(civ, "By your order: $line.")
+        // The world's history hears of a marriage, not of a conquest or nothing; the other courts that know us likewise
+        event("$city joined ${civ.civName} by marriage into its ruling family.")
+        for (court in civ.gameInfo.civilizations) if (court != civ && court.civID in RulerOverrides.ruledCivs && court.isAlive() && court.knows(civ))
+            log(court, "$city joined ${civ.civName} by marriage into its ruling family.")
         return line
     }
     /** Cities that came by marriage this turn: the capture line does not call them taken */
