@@ -128,10 +128,12 @@ object RulerHost {
         RulerOverrides.worldVoteOf = { civ -> castWorldVote(civ) }
         RulerOverrides.promised = { civ -> diplomacy.promised(civ) }
         // The officials make demands of their own, and the chancery hears of each (a demand made of us waits on the desk instead - RulerDiplomacy.demands)
-        RulerOverrides.demandMade = { civ, other, demand -> log(civ, "The officials made a demand of ${other.civName}: \"${demand.demandText}\" Their answer comes on their turn; a demand is resented whatever the answer" +
+        RulerOverrides.demandMade = { civ, other, demand -> log(civ, "The officials made a demand of ${other.civName}: \"${demand.demandText}\" " +
+            (if (other.civID in RulerOverrides.ruledCivs) "${other.civName} is an advised court: its advisor answers at its next look-in" else "They answer on their turn") + "; a demand is resented whatever the answer" +
             (if (demand == com.unciv.logic.civilization.diplomacy.Demand.DoNotAttackUs) ", and if they refuse this one, they are at war with us" else "") + ".") }
         RulerOverrides.underOrders = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.underOrders(unit) }
         RulerOverrides.tradeAnswered = { request, receiver, outcome -> diplomacy.settle(request, receiver, outcome) }
+        RulerOverrides.nearWinner = { other -> diplomacy.nearVictory(other) != null }
         RulerOverrides.unitDisbanded = { civ, unit, why -> if (civ.civID in RulerOverrides.ruledCivs) disbandedFor.getOrPut(civ.civName) { HashMap() }[unit.id] = why }
         RulerOverrides.struck = { strike -> strikes.getOrPut(strike.attacker.civName) { ArrayList() } += strike }
         RulerOverrides.unitExpended = { civ, unit, why -> expended.getOrPut(civ.civName) { HashMap() }[unit.id] = Pair(why, unit.getTile()) }
@@ -419,7 +421,7 @@ object RulerHost {
         json.get("policyBranches")?.let { policyBranches = ArrayList(it.asStringArray().toList()) }
         json.get("neverBuild")?.let { neverBuild = ArrayList(it.asStringArray().toList()) }
         json.get("neverPropose")?.let { list ->
-            val kinds = listOf(Constants.openBorders, Constants.researchAgreement, Constants.defensivePact, "Declaration of Friendship", "luxuries", "calls to war", "all")
+            val kinds = listOf(Constants.openBorders, Constants.researchAgreement, Constants.defensivePact, "Declaration of Friendship", "luxuries", "calls to war", "demands", "all")
             neverPropose = ArrayList(list.asStringArray().map { given -> kinds.firstOrNull { it.equals(given.trim(), ignoreCase = true) || it.equals(given.trim().removeSuffix("s"), ignoreCase = true) }
                 ?: throw ApiError(400, "neverPropose takes ${kinds.joinToString()}; not '$given'") })
         }
@@ -726,15 +728,17 @@ object RulerHost {
                 else -> null
             }
             if (problem != null) throw ApiError(400, "Could not buy $item in ${city.name}: $problem")
+            val queueBefore = city.cityConstructions.constructionQueue.toList()
             if (!city.cityConstructions.purchaseConstruction(construction, -1, false)) throw ApiError(400, "Could not buy $item in ${city.name}: no room to place it")
+            val refill = refilled(city, queueBefore, item)
             val centre = city.getCenterTile()
             val bought = civ.units.getCivUnits().filter { it.name == item && it.getTile().aerialDistanceTo(centre) <= 1 }.maxByOrNull { it.id }
             // An aircraft or a missile waits inside the city, whoever holds its walls, and a ship in its waters; only a soldier can be left standing beside them
             val holder = centre.militaryUnit?.takeIf { bought != null && bought.isMilitary() && bought.baseUnit.isLandUnit && it != bought } // a ship is no garrison
             val note = (if (holder != null && bought != null) " ${item} #${bought.id} stands beside ${city.name}, which our ${holder.name} #${holder.id} still holds: order it to garrison ${city.name} to swap them, or the officials use it as they see fit." else "") +
                 (if (bought != null) " It acts on our next turn, after the powers ahead of us in the turn order have moved." else "")
-            log(civ, "By your order: bought $item in ${city.name} for $cost gold.$note")
-            "Bought $item in ${city.name} for $cost gold (${civ.gold} left).$note"
+            log(civ, "By your order: bought $item in ${city.name} for $cost gold.$note$refill")
+            "Bought $item in ${city.name} for $cost gold (${civ.gold} left).$note$refill"
         }
         // Re-arming by hand: named units, or "all" - each told apart, done or not and why
         json.get("rearm")?.let { list ->
@@ -815,6 +819,14 @@ object RulerHost {
     }
 
     /** What faith would buy this in this city, if faith can buy it here at all (the engine's own tests, an "Unbuildable" Missionary included); null if it cannot */
+    /** A purchase that leaves a queue empty: the engine has the officials fill it at once (CityConstructions.purchaseConstruction), before any snapshot sees it - so it is said here */
+    private fun refilled(city: City, before: List<String>, item: String): String {
+        val leftOfOurs = before.filter { it != item }
+        val now = city.cityConstructions.constructionQueue
+        if (leftOfOurs.isNotEmpty() || now.isEmpty()) return ""
+        return " The queue of ${city.name} was left empty, so the officials put ${now.joinToString()} in it."
+    }
+
     private fun faithPrice(city: City, construction: INonPerpetualConstruction): Int? = construction.getStatBuyCost(city, Stat.Faith)
         ?.takeIf { construction.canBePurchasedWithStat(city, Stat.Faith) && construction.isPurchasable(city.cityConstructions) }
 
@@ -833,10 +845,12 @@ object RulerHost {
             })
         }
         if (stored < cost) throw ApiError(400, "Could not buy $item in ${city.name}: it costs $cost faith, and we hold $stored")
+        val queueBefore = city.cityConstructions.constructionQueue.toList()
         if (!city.cityConstructions.isConstructionPurchaseAllowed(construction, Stat.Faith, cost) || !city.cityConstructions.purchaseConstruction(construction, -1, false, Stat.Faith))
             throw ApiError(400, "Could not buy $item in ${city.name} with faith: ${if (city.isInResistance()) "the city is in resistance" else if (city.isPuppet) "a puppet city buys nothing" else "no room to place it - a unit of its kind already stands in ${city.name}"}")
-        log(civ, "By your order: bought $item in ${city.name} for $cost faith.")
-        return "Bought $item in ${city.name} for $cost faith (${civ.religionManager.storedFaith} left)."
+        val refill = refilled(city, queueBefore, item)
+        log(civ, "By your order: bought $item in ${city.name} for $cost faith.$refill")
+        return "Bought $item in ${city.name} for $cost faith (${civ.religionManager.storedFaith} left).$refill"
     }
 
     /** Called before every turn so the automation finds research and policies already chosen the ruler's way */
@@ -1120,7 +1134,7 @@ object RulerHost {
         for ((what, items) in paid.groupBy { it.second }) log(civ, "The officials spent ${items.sumOf { it.first }} gold on ${what}.")
         officialsSpent[civ.civName] = paid.groupBy { it.second }.map { (what, items) -> "${items.sumOf { it.first }} gold on $what" }
         if (paid.isNotEmpty()) log(civ, "The treasury now holds ${civ.gold} gold.")
-        val unexplained = before.gold - civ.gold - paid.sumOf { it.first }
+        val unexplained = before.gold - civ.gold - paid.sumOf { it.first } - diplomacy.officialsDealGold.remove(civ.civName).let { it ?: 0 }
         // Worth a line when it is more than a turn's income (never for trifles under 10): forty gold is a fortune in one age and small change in another
         val income = civ.stats.statsForNextTurn.gold.toInt()
         if (unexplained > maxOf(10, income)) log(civ, "A further $unexplained gold left the treasury this turn without the officials' hand in it (upkeep, payments under our deals, or a deal struck).")
@@ -1539,7 +1553,7 @@ object RulerHost {
                             (civ.gameInfo.ruleset.units[part]?.requiredTech?.let { tech -> ", which ${if (count - parts[part] > 1) "need" else "needs"} $tech (${if (other.tech.isResearched(tech)) "known to them" else "not yet known to them"})" } ?: "") }
                         if (built == 0 && !apollo) null else "${other.civName}: ${if (apollo) "the Apollo Program stands, " else ""}$built of ${needed.values.sum()} parts" + (if (missing.isNotEmpty()) "; missing $missing" else "") }.toList(),
                     "apollo" to civ.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts),
-                    "note" to "Parts are units: queue them by name in any city once the Apollo Program stands${civ.gameInfo.ruleset.buildings["Apollo Program"]?.requiredTech?.takeUnless { civ.tech.isResearched(it) }?.let { " (a wonder that needs $it)" } ?: ""} and the techs are known (each needs Aluminum); a finished part walks to the capital and is added to the ship by the officials. They CANNOT be bought with gold - saving gold for them is wasted. The ship launches, and the game is won, when every part is added.") } },
+                    "note" to "Parts are units: queue them by name in any city once the Apollo Program stands${civ.gameInfo.ruleset.buildings["Apollo Program"]?.requiredTech?.takeUnless { civ.tech.isResearched(it) }?.let { " (a wonder that needs $it)" } ?: ""} and the techs are known (each needs Aluminum while it is built and on its way - the Aluminum is freed once the part is added to the ship); a finished part walks to the capital and is added to the ship by the officials. They CANNOT be bought with gold - saving gold for them is wasted. The ship launches, and the game is won, when every part is added.") } },
             "policies" to civ.policies.getAdoptedPolicies().toList(),
             "culture" to mapOf("stored" to civ.policies.storedCulture, "neededForNextPolicy" to civ.policies.getCultureNeededForNextPolicy(),
                 "turnsToNextPolicy" to next.culture.toInt().let { perTurn -> val short = civ.policies.getCultureNeededForNextPolicy() - civ.policies.storedCulture
@@ -1911,7 +1925,8 @@ object RulerHost {
                 source is com.unciv.models.ruleset.Policy && !civ.policies.isAdopted(source.name) -> "${source.name.removeSuffix(" Complete")} is not complete"
                 source is com.unciv.models.ruleset.tech.Era && civ.getEra().eraNumber < source.eraNumber -> "we are in the ${civ.getEra().name}"
                 !unique.conditionalsApply(civ.state) -> "we are in the ${civ.getEra().name}"
-                else -> null } }.distinct()
+                // Where it may be bought: "in all cities in which the majority religion is a major religion" - none of ours may be one (Run 22: Babylon and Greece held the faith and read no reason)
+                else -> unique.params.firstOrNull { it.startsWith("in ") && it != "in all cities" }?.let { where -> "it is bought only ${RulerUnits.inWords(where).replace("in all cities in which", "in a city in which").replace("in all cities", "in a city")}, and no city of ours is one now" } } }.distinct()
             "$person: $how ($price) - " + (if (now.isNotEmpty()) "open to us now, ${faithPrice(now.first(), unit)} faith in ${now.first().name}" else "not open to us now" + (lacking.takeIf { it.isNotEmpty() }?.let { ": " + it.joinToString(", ") } ?: ""))
         } + "a Great Person not named here cannot be bought with faith in this world"
     }
@@ -1928,9 +1943,11 @@ object RulerHost {
                 val needs = (ruleset.units[item]?.getResourceRequirementsPerTurn(city.state) ?: ruleset.buildings[item]?.getResourceRequirementsPerTurn(city.state))?.get(name) ?: 0
                 if (needs > 0) "$needs for ${city.name}'s $item" else null } }
             val have = net[name] ?: 0
-            val total = have + units + buildings
+            // What we give in deals is ours still, though out of our hands while the deal stands (the Inca read "6 in all" with 2 leased to Babylon, Run 22)
+            val traded = civ.diplomacy.values.sumOf { manager -> manager.trades.sumOf { trade -> trade.ourOffers.filter { it.name == name && it.type == com.unciv.logic.trade.TradeOfferType.Strategic_Resource }.sumOf { it.amount } } }
+            val total = have + units + buildings + traded
             if (total == 0 && queued.isEmpty()) null
-            else "$name $total in all: " + listOfNotNull(if (units > 0) "$units in use by our units" else null, if (buildings > 0) "$buildings by our buildings" else null,
+            else "$name $total in all: " + listOfNotNull(if (units > 0) "$units in use by our units" else null, if (buildings > 0) "$buildings by our buildings" else null, if (traded > 0) "$traded given in deals while they stand" else null,
                     if (queued.isNotEmpty()) "${queued.joinToString()} (queued)" else null).ifEmpty { listOf("none in use") }.joinToString(", ") +
                 ", ${(have - queued.sumOf { it.substringBefore(" ").toInt() }).let { if (it < 0) "${-it} short" else "$it spare" }}"
         }

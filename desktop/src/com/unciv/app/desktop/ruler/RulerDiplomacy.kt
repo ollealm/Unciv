@@ -187,6 +187,15 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
             withdrawDuplicates(receiver, request.trade.theirOffers.map { it.name }, request)
         }
         val ours = entryFor(civ, receiver, request)
+        // Made by the officials this very turn and answered before the turn ended: it never reached officialsPending (written after the turn) - it is theirs all the same
+        // (Run 23: an agreement with England, signed mid-siege, read as gold gone "without the officials' hand")
+        if (ours == null && entryFor(civ, receiver, request, officialsPending) == null && outcome == "accepted") {
+            val terms = request.trade.reverse().brief(civ.gameInfo)
+            val gold = request.trade.theirOffers.filter { it.name == Constants.researchAgreement || it.type == TradeOfferType.Gold }.sumOf { it.amount }
+            if (gold > 0) officialsDealGold[civ.civName] = (officialsDealGold[civ.civName] ?: 0) + gold
+            log(civ, "The officials proposed a deal to ${receiver.civName} ($terms), and it was accepted on their turn - the deal is in force${if (gold > 0) "; it took $gold gold from the treasury" else ""}.${nearVictoryNote(receiver)}")
+            return
+        }
         val entry = ours ?: entryFor(civ, receiver, request, officialsPending) ?: return
         if (ours != null) pending.remove(entry) else officialsPending.remove(entry)
         val answer = when (outcome) {
@@ -203,6 +212,9 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         }
         log(civ, "${if (ours != null) "Our proposal" else "The officials' proposal"} to ${receiver.civName} (${entry.third}) $answer.")
     }
+
+    /** Gold the officials' own deals took this turn, by realm: told with the deal, so the bookkeeping does not call it unexplained */
+    val officialsDealGold = HashMap<String, Int>()
 
     /** Called after each turn: a proposal whose request left the partner's desk with no word from the engine (war sweeps a desk clean, a fallen realm has none) is closed here, so nothing waits for ever */
     fun sweepLost(civ: Civilization) {
@@ -279,13 +291,15 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         // Keyed on the goods asked for; gold is a sweetener, not a good, so two offers that both carry gold are not the same offer
         val asked = trade.theirOffers.filterNot(::isGold).map { it.name }.toSet().ifEmpty { trade.theirOffers.map { it.name }.toSet() }
         val superseded = other.tradeRequests.filter { request -> request.requestingCiv == civ.civID && !isPeace(request) && request.trade.ourOffers.filterNot(::isGold).ifEmpty { request.trade.ourOffers }.any { it.name in asked } }
+        // Which of them were the ruler's own: an officials' offer that gives way to ours is not "your earlier offer" (Run 22, their agreement replaced by a renewal)
+        val oursSuperseded = superseded.filter { Triple(civ.civName, other.civName, it.trade.reverse().brief(game)) in pending }
         other.tradeRequests.removeAll(superseded.toSet())
         for (old in superseded) noteGone(other, civ, old.trade.brief(game), "was replaced by ${civ.civName} with a newer offer for the same goods")
         // a withdrawn offer cannot be "accepted" later - and only the withdrawn ones go, another offer to the same power for other goods still waits
         for (old in superseded) Triple(civ.civName, other.civName, old.trade.reverse().brief(game)).let { pending.remove(it); officialsPending.remove(it) }
         other.tradeRequests.add(TradeRequest(civ.civID, trade.reverse()))
         val summary = trade.brief(game)
-        if (superseded.isNotEmpty()) log(civ, "Our earlier offer to ${other.civName} (${superseded.joinToString("; ") { it.trade.reverse().brief(game) }}) was withdrawn in favour of the new one, which asks for the same goods.")
+        if (oursSuperseded.isNotEmpty()) log(civ, "Our earlier offer to ${other.civName} (${oursSuperseded.joinToString("; ") { it.trade.reverse().brief(game) }}) was withdrawn in favour of the new one, which asks for the same goods.")
         pending += Triple(civ.civName, other.civName, summary)
         log(civ, "We proposed a trade to ${other.civName}: $summary.")
         val balance = TradeEvaluation().getTradeAcceptability(trade.reverse(), other, civ, true)
@@ -388,7 +402,13 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         val entry = Triple(civ.civName, other.civName, "peace")
         if (entry !in pending) pending += entry // the replaced offer's entry carries on: one proposal of peace, however often it is repeated
         log(civ, "We proposed peace to ${other.civName}.")
-        return "Peace proposed to $name; " + if (advised) "$name is an advised court: their advisor answers at their next look-in." else "they answer on their turn and seem ${if (acceptable) "willing" else "unwilling"}."
+        // What the other side would take: their own reckoning of the treaty, in gold (TradeEvaluation.evaluatePeaceCostForThem) - a figure, not advice
+        val balance = TradeEvaluation().getTradeAcceptability(trade.reverse(), other, civ, true)
+        return "Peace proposed to $name; " + if (advised) "$name is an advised court: their advisor answers at their next look-in." else "they answer on their turn, and " + when {
+            acceptable -> "by their own reckoning they would accept it as it stands."
+            balance < -100_000 -> "by their own reckoning no price would buy peace from them now."
+            else -> "by their own reckoning they would make peace for about ${-balance} gold from us; our treasury holds ${civ.gold}."
+        }
     }
 
     fun proposeFriendship(civ: Civilization, name: String): String {

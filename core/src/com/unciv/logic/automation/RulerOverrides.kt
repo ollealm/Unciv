@@ -84,6 +84,18 @@ object RulerOverrides {
     /** Kinds of deal a ruled civ's officials may not propose on their own (a standing order of the ruler): "Open Borders", "Research Agreement",
      *  "Defensive Pact", "Declaration of Friendship", "luxuries", "calls to war" (asking another power to join a war of ours), or "all" */
     val noProposals = ConcurrentHashMap<String, Set<String>>()
+    /** Set by the host: does the near-victory note name this power now? A ruled realm's officials offer it no Research Agreement */
+    @Volatile var nearWinner: ((Civilization) -> Boolean)? = null
+
+    /** May a ruled realm's officials offer [other] a Research Agreement now: never past the ruler's gold reserve, never in a war of ours, never to a power
+     *  a step from victory (nine agreements fed Greece's science after its Apollo Program, Run 22). Unruled civs keep the engine's habit */
+    fun officialsMayOfferResearch(civ: Civilization, other: Civilization, cost: Int): Boolean {
+        if (civ.civID !in ruledCivs) return true
+        if (civ.gold - cost < (goldReserve[civ.civID] ?: 0)) return false
+        if (civ.getKnownCivs().any { it.isMajorCiv() && civ.isAtWarWith(it) }) return false
+        return nearWinner?.invoke(other) != true
+    }
+
     fun mayPropose(civ: com.unciv.logic.civilization.Civilization, kind: String) = noProposals[civ.civID]?.let { "all" in it || kind in it } != true
 
     /** Does [other]'s own offer of this kind of deal already wait on a ruled civ's desk for its advisor? Then its officials propose none of that kind

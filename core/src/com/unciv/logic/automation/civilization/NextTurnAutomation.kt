@@ -719,8 +719,8 @@ object NextTurnAutomation {
             // violation before promise
             else -> {
                 val threatLevel = Automation.threatAssessment(civInfo, offendingCiv)
-                if (threatLevel < ThreatLevel.High // don't piss them off for no reason please.
-                    || demand == Demand.DoNotAttackUs) {
+                if ((threatLevel < ThreatLevel.High // don't piss them off for no reason please.
+                    || demand == Demand.DoNotAttackUs) && com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, "demands")) { // a court may bar its officials' demands
                     offendingCiv.popupAlerts.add(PopupAlert(demand.demandAlert, civInfo.civID))
                     if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) com.unciv.logic.automation.RulerOverrides.demandMade?.invoke(civInfo, offendingCiv, demand)
                 }

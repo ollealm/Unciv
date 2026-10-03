@@ -267,6 +267,7 @@ object DiplomacyAutomation {
             // us (so we get attacked less), on top of the shared science, so there is no reason to decline.
             val tradeLogic = TradeLogic(civInfo, otherCiv)
             val cost = civInfo.diplomacyFunctions.getResearchAgreementCost(otherCiv)
+            if (!com.unciv.logic.automation.RulerOverrides.officialsMayOfferResearch(civInfo, otherCiv, cost)) continue // a ruled realm's reserve, its wars, and a near-winner
             val tradeOffer = TradeOffer(Constants.researchAgreement, TradeOfferType.Treaty, cost, civInfo.gameInfo.speed)
 
             tradeLogic.currentTrade.ourOffers.add(tradeOffer)
