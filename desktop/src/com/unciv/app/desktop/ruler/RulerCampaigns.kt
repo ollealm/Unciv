@@ -9,6 +9,7 @@ import kotlin.math.atan2
 import com.unciv.app.desktop.ruler.Prose.andList
 import com.unciv.app.desktop.ruler.Prose.article
 import com.unciv.app.desktop.ruler.Prose.pluralOf
+import com.unciv.logic.automation.RulerOverrides
 
 /**
  *  An age's movements as a history atlas draws them: not every unit's wiggle, but the few forces that went somewhere together -
@@ -99,14 +100,14 @@ object RulerCampaigns {
         val groups = ArrayList<MutableList<Member>>()
         for (m in movers.sortedByDescending { it.reach }) {
             val group = groups.firstOrNull { g -> g[0].sea == m.sea && g[0].start.aerialDistanceTo(m.start) <= 4 &&
-                (g[0].target.aerialDistanceTo(m.target) <= 3 || cityNear(game, g[0].target, 2)?.let { it == cityNear(game, m.target, 2) } == true) }
+                (g[0].target.aerialDistanceTo(m.target) <= 3 || cityNear(game, g[0].target, RulerOverrides.FIELDS)?.let { it == cityNear(game, m.target, RulerOverrides.FIELDS) } == true) }
             if (group != null) group += m else groups += mutableListOf(m)
         }
         val taken = trail.marks.filter { it.kind == "taken" && it.civ == owner && it.turn in from..to }.mapNotNull { game.tileMap.getIfTileExistsOrNull(it.x, it.y) }
         return groups.map { group ->
             // The force's way is the way its most typical member went
             val medoid = group.minBy { m -> group.sumOf { o -> m.start.aerialDistanceTo(o.start) + m.target.aerialDistanceTo(o.target) } }
-            val took = taken.firstOrNull { city -> group.any { it.target.aerialDistanceTo(city) <= 2 } }
+            val took = taken.firstOrNull { city -> group.any { it.target.aerialDistanceTo(city) <= RulerOverrides.FIELDS } }
             val outcome = when {
                 took != null -> Outcome.Took
                 group.count { it.fell } * 2 >= group.size -> Outcome.Broken
@@ -120,7 +121,7 @@ object RulerCampaigns {
             if (took != null && way.last() != took) way += took
             val route = broadWay(way)
             val homeward = if (outcome == Outcome.Back) broadWay(medoid.path.subList(medoid.goal, medoid.path.size)) else emptyList()
-            val city = took?.getCity() ?: cityNear(game, medoid.target, 2)
+            val city = took?.getCity() ?: cityNear(game, medoid.target, RulerOverrides.FIELDS)
             Campaign(owner, ours, group, outcome, city, took != null && city?.civ?.civName != owner, route, homeward)
         }.filter { c -> worthAnArrow(game, c, owner) }.sortedByDescending { weight(it) }
     }
@@ -130,7 +131,7 @@ object RulerCampaigns {
     private fun worthAnArrow(game: GameInfo, c: Campaign, owner: String): Boolean {
         if (c.reach < 3) return false
         val foes = game.civilizations.firstOrNull { it.civName == owner }?.let { enemiesOf(it) } ?: emptySet()
-        val onAFoe = game.getCities().any { it.civ.civName in foes && it.getCenterTile().aerialDistanceTo(c.route.last()) <= 3 }
+        val onAFoe = game.getCities().any { it.civ.civName in foes && it.getCenterTile().aerialDistanceTo(c.route.last()) <= RulerOverrides.NEAR }
         return when (c.outcome) {
             Outcome.Took -> true
             Outcome.Broken -> c.size >= 2 || c.reach >= 6 // one soldier lost a few tiles out is a skirmish, told among the losses
@@ -202,9 +203,9 @@ object RulerCampaigns {
         return when {
             // A ship's place is told in the sea's words: at a city's harbour, or in the waters off it - never its walls or its fields
             tile.isWater && distance <= 1 -> "the harbour of ${named(near, civ, mover)}"
-            tile.isWater && distance <= 2 -> "the waters off ${named(near, civ, mover)}"
+            tile.isWater && distance <= RulerOverrides.FIELDS -> "the waters off ${named(near, civ, mover)}"
             distance <= 1 && foes -> "the walls of ${named(near, civ, mover)}"
-            distance <= 2 -> "the fields of ${named(near, civ, mover)}"
+            distance <= RulerOverrides.FIELDS -> "the fields of ${named(near, civ, mover)}"
             // Beyond a city's fields, the country or the waters that way, and distant ones well beyond; never a count of tiles
             else -> "the ${if (distance > 5) "distant " else ""}${if (tile.isWater) "waters" else "country"} ${compassOf(HexMath.hex2WorldCoords(tile.position), HexMath.hex2WorldCoords(near.getCenterTile().position))} of ${named(near, civ, mover)}"
         }

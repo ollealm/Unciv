@@ -700,7 +700,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             .filter { it.isExplored(civ) && it.isLand && (civ.tech.unitsCanEmbark || it.getContinent() in home) && settleProblem(civ, it) == null }
         return candidates.associateWith { tile ->
             var score = 0f
-            for (near in tile.getTilesInDistance(2)) {
+            for (near in tile.getTilesInDistance(RulerOverrides.FIELDS)) {
                 if (!near.isExplored(civ)) continue
                 score += when (near.baseTerrain) { "Grassland" -> 2f; "Plains" -> 1.6f; "Coast" -> 1f; "Desert", "Tundra", "Snow", "Ocean", "Mountain" -> 0.2f; else -> 1f }
                 if (near.resource != null) score += 3f
@@ -715,7 +715,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     }
 
     private fun describeSite(civ: Civilization, tile: Tile, rank: Float): String {
-        val resources = tile.getTilesInDistance(2).mapNotNull { it.resource }.groupingBy { it }.eachCount()
+        val resources = tile.getTilesInDistance(RulerOverrides.FIELDS).mapNotNull { it.resource }.groupingBy { it }.eachCount()
             .entries.joinToString { if (it.value > 1) "${it.key} x${it.value}" else it.key }
         val features = listOfNotNull(
             tile.baseTerrain,

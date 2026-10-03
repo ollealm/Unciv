@@ -25,7 +25,8 @@ import com.unciv.app.desktop.ruler.Prose.plural
  *  says so, with the terms. Every offer made to an advised court waits for its ruler in the same way (answerOffers).
  */
 /** Turns the officials of both sides leave terms alone after a court refused them: the engine's own wait after a human player's refusal */
-private const val HOLD_OFF = 10
+/** The engine's own wait after its officials refuse a proposal of friendship (NextTurnAutomation): a court's refusal holds the proposer off as long */
+private const val FRIENDSHIP_REFUSED_WAITS = 10
 /** What proposeTrade says when the same offer of theirs waited on our desk and was accepted instead */
 private const val TAKEN_THEIRS = "their offer was taken"
 /** The war leave, said once: the host refuses every way of declaring war (the order, a deal that has us declare it, a refused demand not to attack) without it -
@@ -60,20 +61,21 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
     private fun loosely(text: String) = sansTurns(text).replace(Regex("\\s+"), " ").trim().lowercase()
     private fun isLuxury(game: GameInfo, name: String) = game.ruleset.tileResources[name]?.resourceType?.name == "Luxury"
 
-    /** A court's refusal (or a lapse) holds the officials of both sides off those terms for [HOLD_OFF] turns, as the engine holds them off a human
-     *  player's refusal. The engine's own declined flags ([TradeRequest.decline]) are set only on the proposer's side, and for five turns when the one
-     *  refusing counts as an AI - a ruled court does - so the refusing side's own officials offered the very deal their court had just refused, the next turn */
-    private fun holdOff(decliner: Civilization, request: TradeRequest) {
+    /** A court's refusal (or a lapse) holds the officials of both sides off those terms as long as the engine's own refusal holds the proposer's
+     *  (TradeRequest.decline sets its waits per kind, by the proposer's weights): the refusing court's officials are held off the same terms as long,
+     *  so they do not offer back what their court just refused. The turns held, 0 when the engine holds no kind of these terms */
+    private fun holdOff(decliner: Civilization, request: TradeRequest): Int {
         val proposer = decliner.gameInfo.getCivilization(request.requestingCiv)
-        val offers = request.trade.ourOffers + request.trade.theirOffers
-        val flags = listOfNotNull(
-            DiplomacyFlags.DeclinedLuxExchange.takeIf { offers.isNotEmpty() && offers.all { it.type == TradeOfferType.Luxury_Resource } },
-            DiplomacyFlags.DeclinedResearchAgreement.takeIf { offers.any { it.name == Constants.researchAgreement } },
-            DiplomacyFlags.DeclinedDefensivePact.takeIf { offers.any { it.name == Constants.defensivePact } },
-            DiplomacyFlags.DeclinedOpenBorders.takeIf { offers.any { it.name == Constants.openBorders } },
-            DiplomacyFlags.DeclinedEmbassy.takeIf { offers.any { it.name == Constants.acceptEmbassy } })
-        for (manager in listOfNotNull(proposer.getDiplomacyManager(decliner), decliner.getDiplomacyManager(proposer)))
-            for (flag in flags) if (manager.getFlag(flag) < HOLD_OFF) manager.setFlag(flag, HOLD_OFF)
+        val theirs = proposer.getDiplomacyManager(decliner) ?: return 0
+        val ours = decliner.getDiplomacyManager(proposer)
+        var held = 0
+        for (flag in listOf(DiplomacyFlags.DeclinedLuxExchange, DiplomacyFlags.DeclinedResearchAgreement, DiplomacyFlags.DeclinedDefensivePact,
+                DiplomacyFlags.DeclinedOpenBorders, DiplomacyFlags.DeclinedEmbassy)) {
+            val turns = theirs.getFlag(flag).takeIf { theirs.hasFlag(flag) } ?: continue
+            held = maxOf(held, turns)
+            if (ours != null && ours.getFlag(flag) < turns) ours.setFlag(flag, turns)
+        }
+        return held
     }
 
     /** What one side of a request can no longer give, named from [civ]'s side ("our Horses x1", "Greece's Copper x1"); the request holds the trade as [receiver] sees it */
@@ -486,7 +488,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
     private fun refuseFriendship(civ: Civilization, other: Civilization) {
         civ.popupAlerts.removeAll { it.type == AlertType.DeclarationOfFriendship && it.value == other.civID }
         // The engine's own answer for a refusal: the proposer's officials wait before they ask again
-        other.getDiplomacyManager(civ)?.let { if (it.getFlag(DiplomacyFlags.DeclinedDeclarationOfFriendship) < HOLD_OFF) it.setFlag(DiplomacyFlags.DeclinedDeclarationOfFriendship, HOLD_OFF) }
+        other.getDiplomacyManager(civ)?.let { if (it.getFlag(DiplomacyFlags.DeclinedDeclarationOfFriendship) < FRIENDSHIP_REFUSED_WAITS) it.setFlag(DiplomacyFlags.DeclinedDeclarationOfFriendship, FRIENDSHIP_REFUSED_WAITS) }
         other.addNotification("[${civ.civName}] has denied our Declaration of Friendship!", com.unciv.logic.civilization.NotificationCategory.Diplomacy, com.unciv.logic.civilization.NotificationIcon.Diplomacy, civ.civName)
     }
 
@@ -507,7 +509,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
             "refuse" -> {
                 refuseFriendship(civ, other)
                 log(civ, "By your order: we refused ${other.civName}'s Declaration of Friendship.")
-                "Refused ${other.civName}'s Declaration of Friendship. Their officials do not propose it again for $HOLD_OFF turns; you still may"
+                "Refused ${other.civName}'s Declaration of Friendship. Their officials do not propose it again for $FRIENDSHIP_REFUSED_WAITS turns; you still may"
             }
             else -> throw IllegalArgumentException("answer must be accept or refuse")
         }
@@ -802,11 +804,11 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
             }
             "refuse" -> {
                 civ.tradeRequests.remove(request); dealOfferedOn.forget(key)
-                request.decline(civ); holdOff(civ, request)
+                request.decline(civ); val held = holdOff(civ, request)
                 settle(request, civ, "declined")
                 other.addNotification("[${civ.civName}] has denied your trade request", com.unciv.logic.civilization.NotificationCategory.Trade, civ.civName, com.unciv.logic.civilization.NotificationIcon.Trade)
                 log(civ, "By your order: we refused ${other.civName}'s offer ($summary).")
-                "Refused ${other.civName}'s offer: $summary. Neither side's officials offer these terms again for $HOLD_OFF turns; you still may"
+                "Refused ${other.civName}'s offer: $summary. " + (if (held > 0) "Neither side's officials offer these terms again for $held turns" else "Their officials may offer them again when they choose") + "; you still may"
             }
             else -> throw IllegalArgumentException("answer must be accept or refuse")
         }
@@ -1089,13 +1091,14 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
     }
 
     /** The running account of all deals: what goes out and comes in each turn, and which deals are about to end */
-    fun ledger(civ: Civilization): Map<String, Any?> {
+    /** [soon]: the turns that make a deal "ending soon" - a look-in away */
+    fun ledger(civ: Civilization, soon: Int): Map<String, Any?> {
         val trades = civ.diplomacy.values.flatMap { manager -> manager.trades.map { manager.otherCivName to it } }
         fun goldPerTurn(offers: List<TradeOffer>) = offers.filter { it.type == TradeOfferType.Gold_Per_Turn }.sumOf { it.amount }
         return mapOf(
             "goldPerTurnWePay" to trades.sumOf { goldPerTurn(it.second.ourOffers) },
             "goldPerTurnWeReceive" to trades.sumOf { goldPerTurn(it.second.theirOffers) },
-            "endingSoon" to endingSoon(civ, 5).map { deal -> deal + if (renewals.any { it.civ == civ.civName && sansTurns(deal) == "${it.partner}: ${it.terms}" }) " - by your order, offered again the turn it ends"
+            "endingSoon" to endingSoon(civ, soon).map { deal -> deal + if (renewals.any { it.civ == civ.civName && sansTurns(deal) == "${it.partner}: ${it.terms}" }) " - by your order, offered again the turn it ends"
                 else " - order renew to have it offered again the turn it ends" },
             "renewOrdered" to renewals.filter { it.civ == civ.civName }.map { "${it.partner}: ${it.terms}" }.ifEmpty { null })
     }

@@ -20,6 +20,10 @@ import java.util.concurrent.ConcurrentHashMap
  *  Not serialized with the save - the host persists and re-applies them.
  */
 object RulerOverrides {
+    /** A city's fields: the ring of tiles about it that the chancery's words call its own ground - "the fields of Athens", a site's surroundings, home ground */
+    const val FIELDS = 2
+    /** "Near": the one distance the briefing means by it - the soldiers about an enemy city in the war estimate, the soldiers about ours in the threats */
+    const val NEAR = 3
     /** civID -> personality replacing the nation's ruleset personality for all AI decisions */
     val personalities = ConcurrentHashMap<String, Personality>()
 
@@ -145,7 +149,7 @@ object RulerOverrides {
         if (reach.isEmpty()) return null
         val kept = HashSet(dangerousTiles); kept += reach
         if (unit.getTile() in reach) {
-            val nearHome = unit.civ.cities.flatMap { it.getCenterTile().getTilesInDistance(2) }.toHashSet()
+            val nearHome = unit.civ.cities.flatMap { it.getCenterTile().getTilesInDistance(FIELDS) }.toHashSet()
             kept += unit.getTile().getTilesInDistance(3).filter { it !in nearHome }
         }
         return kept
