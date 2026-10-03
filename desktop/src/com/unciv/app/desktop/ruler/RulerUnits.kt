@@ -6,6 +6,7 @@ import com.unciv.logic.civilization.Civilization
 import com.unciv.logic.civilization.diplomacy.DiplomacyFlags
 import com.unciv.logic.map.HexMath
 import com.unciv.logic.map.mapunit.MapUnit
+import com.unciv.logic.map.mapunit.movement.UnitMovement
 import com.unciv.logic.map.tile.Tile
 import com.unciv.models.UnitActionType
 import com.unciv.models.UpgradeUnitAction
@@ -152,7 +153,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             // The city is held by one of ours: walk up beside it, the swap happens once we are adjacent
             if (unit.currentMovement <= 0f) return true
             val beside = target.neighbors.filter { canMarch(unit, it) }.minByOrNull { it.aerialDistanceTo(unit.getTile()) }
-            if (beside != null) { if (beside != unit.getTile()) unit.movement.headTowards(beside); return true }
+            // canMarch reckons with full movement; with less left the step may not open this turn - then it waits for the next
+            if (beside != null) { if (beside != unit.getTile()) try { unit.movement.headTowards(beside) } catch (_: UnitMovement.UnreachableDestinationException) {}; return true }
         }
         if (target != null && unit.getTile() != target) {
             // The escort and upgrade routines may have moved this soldier already this turn: no movement left is not "cannot reach"
@@ -174,7 +176,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             // sent where our Worker stands (China's waited three turns beside its own Worker and lost its order, Run 19). A held Great Person never gets here: it found another place above
             if (unit.isCivilian() && target.civilianUnit?.civ == civ && unit.getTile().aerialDistanceTo(target) == 1 && unit.movement.canUnitSwapTo(target)) {
                 unit.movement.swapMoveToTile(target)
-            } else unit.movement.headTowards(target)
+            } else try { unit.movement.headTowards(target) } catch (_: UnitMovement.UnreachableDestinationException) {} // not moved: counted as stuck below
             if (unit.getTile() != target) {
                 val spot = unit.getTile().position.toString()
                 order.turnsStuck = if (spot == order.lastSpot) order.turnsStuck + 1 else 0
@@ -354,6 +356,13 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             .sortedBy { it.aerialDistanceTo(unit.getTile()) }.take(8).firstOrNull { canMarch(unit, it) }
 
     /** An order dropped for good: a Great Person goes to the officials with it, or the hold at the top of [handle] would take it back next turn and the ruler would be asked again */
+    /** An order that could not be carried out at all - the engine refused a step of it: dropped, said in the chancery, and the officials take the unit */
+    fun dropAfterFailure(unit: MapUnit) {
+        val order = orders[unit.id] ?: return
+        log(unit.civ, "Our ${unit.name} #${unit.id} could not carry out its ${order.action} order${order.x?.let { " for ${where(unit.civ, unit.civ.gameInfo.tileMap[it, order.y!!])}" } ?: ""} from ${where(unit.civ, unit.getTile())}: the way would not open. The order is dropped and the officials take it back.")
+        drop(unit)
+    }
+
     private fun drop(unit: MapUnit) {
         orders.remove(unit.id)
         if (unit.isGreatPerson()) released += unit.id

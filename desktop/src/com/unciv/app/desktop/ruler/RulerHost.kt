@@ -114,7 +114,13 @@ object RulerHost {
         load()
         RulerOverrides.forbidden = { civ, construction -> civ.civID in RulerOverrides.ruledCivs && isForbidden(civ, construction) }
         RulerOverrides.spendingNoted = { civ, gold, what -> if (civ.civID in RulerOverrides.ruledCivs) spending.getOrPut(civ.civName) { ArrayList() } += Pair(gold, what) }
-        RulerOverrides.unitHandler = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.handle(unit) }
+        // Whatever goes wrong with one unit's order costs that order, never the turn: Run 20 stopped dead at T123 on an unreachable tile
+        RulerOverrides.unitHandler = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && try { units.handle(unit) } catch (e: Exception) {
+            System.err.println("Order of ${unit.civ.civName}'s ${unit.name} #${unit.id} failed: $e")
+            units.dropAfterFailure(unit)
+            false
+        } }
+        RulerOverrides.hasOrder = { unit -> unit.id in units.orders }
         units.researchRefill = { civ -> applyResearchGoals(civ) }
         RulerOverrides.rulersFirst = { civ -> units.rearmDue(civ) }
         RulerOverrides.worldVoteOf = { civ -> castWorldVote(civ) }

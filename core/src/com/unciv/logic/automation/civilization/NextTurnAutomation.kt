@@ -522,6 +522,8 @@ object NextTurnAutomation {
             .mapNotNull { it.militaryUnit }.filter {
                 it.civ == civInfo
                     && it.health >= 100
+                    // the ruler's own orders stand: a soldier on its way to garrison a city is not drafted away (Run 20: Spain's Swordsman, and a crash after)
+                    && !RulerOverrides.isUnderOrders(it)
                     // only draft a unit from the core of the empire, or it'll interfere with other anti-barb activities
                     && (it.currentTile.aerialDistanceTo(capitalTile) < tile.aerialDistanceTo(capitalTile))
                     && it.movement.canReach(tile) 

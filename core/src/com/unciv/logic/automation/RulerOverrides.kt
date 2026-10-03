@@ -116,6 +116,11 @@ object RulerOverrides {
         return purpose.isNotEmpty() && purpose.all { it.type == UniqueType.EnablesConstructionOfSpaceshipParts || it.type == UniqueType.SpaceshipPart || "Spaceship part" in it.params }
     }
 
+    /** Set by the host: is this unit of a ruled civ under the ruler's own order? Routines that draft units of their own (the settler escort) pass it by */
+    @Volatile var hasOrder: ((MapUnit) -> Boolean)? = null
+    @yairm210.purity.annotations.Readonly
+    fun isUnderOrders(unit: MapUnit) = unit.civ.civID in ruledCivs && hasOrder?.invoke(unit) == true
+
     /** Called with (civ, unit, why) when a ruled civ's automation disbands a unit for a reason of its own, before it goes */
     @Volatile var unitDisbanded: ((com.unciv.logic.civilization.Civilization, MapUnit, String) -> Unit)? = null
 
