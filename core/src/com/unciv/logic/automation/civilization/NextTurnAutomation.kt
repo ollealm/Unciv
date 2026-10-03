@@ -428,9 +428,9 @@ object NextTurnAutomation {
             }
         }
 
-        if (civInfo.cities.isNotEmpty()) automateSettlerEscorting(civInfo)
+        if (civInfo.cities.isNotEmpty()) RulerOverrides.guardedBlock(civInfo, "escorting our settlers") { automateSettlerEscorting(civInfo) }
 
-        for (city in citiesRequiringManualPlacement) automateCityConquer(civInfo, city)
+        for (city in citiesRequiringManualPlacement) RulerOverrides.guardedBlock(civInfo, "the assault on ${city.name}") { automateCityConquer(civInfo, city) }
 
         for (unit in sortedUnits) {
             // spaceship parts and settlers have already moved

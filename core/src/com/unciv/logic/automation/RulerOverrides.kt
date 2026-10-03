@@ -137,6 +137,17 @@ object RulerOverrides {
         }
     }
 
+    /** Called with (civ, what, why) when a block of a ruled civ's officials' work moving several units at once failed: the turn goes on without it */
+    @Volatile var blockFailed: ((Civilization, String, String) -> Unit)? = null
+    /** A block of the officials' work for a ruled civ ([what]: "escorting our settlers"): whatever goes wrong skips that block for the turn, never the turn itself */
+    fun guardedBlock(civ: Civilization, what: String, block: () -> Unit) {
+        if (civ.civID !in ruledCivs) return block()
+        try { block() } catch (ex: Exception) {
+            System.err.println("The officials could not finish $what for ${civ.civName}: $ex")
+            blockFailed?.invoke(civ, what, if (ex is com.unciv.logic.map.mapunit.movement.UnitMovement.UnreachableDestinationException) "a way they chose would not open" else "their routine failed")
+        }
+    }
+
     /** Called with (civ, unit, why) when a ruled civ's automation disbands a unit for a reason of its own, before it goes */
     @Volatile var unitDisbanded: ((com.unciv.logic.civilization.Civilization, MapUnit, String) -> Unit)? = null
 
