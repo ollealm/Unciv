@@ -217,10 +217,13 @@ object RulerHost {
                 Regex("#\\d+").containsMatchIn(text) && !asksForOrders.containsMatchIn(text) -> selfCheck("words", civ.civName, "a unit's number in prose: $text")
             }
         }
-        // A soldier the ruler put in place (hold, fortify, garrison) that stood on its spot when the turn began and stands elsewhere now
+        // A unit the ruler put in place (hold, fortify, garrison) that stood on its spot when the turn began, under the same order still, and stands
+        // elsewhere now. One on its way may move; so may one whose order changed within the turn (a held Great Person's shelter taken, a new hold)
         for ((id, order) in units.orders) {
             if (order.action !in setOf("hold", "fortify", "garrison")) continue
             val was = before.units[id]?.second ?: continue
+            val start = before.unitOrders[id] ?: continue
+            if (start != Triple(order.action, order.x, order.y)) continue
             if (order.x != null && (was.position.x.toInt() != order.x || was.position.y.toInt() != order.y)) continue // still on its way
             val now = civ.units.getUnitById(id)?.getTile() ?: continue
             if (now != was) selfCheck("orders", civ.civName, "${civ.units.getUnitById(id)?.name} #$id under a ${order.action} order moved from ${was.position} to ${now.position}")
@@ -411,23 +414,48 @@ object RulerHost {
         // Also into the dev GUI's save list (working dir is android/assets), so `gradlew desktop:run` can watch the world as spectator
         File("SaveFiles").mkdirs()
         File("SaveFiles/Ruler game").writeText(saveData)
-        writeAtomically(File(dataDir, "host.json"), Json.write(mapOf(
-            "orders" to orders.mapValues { it.value.toMap() },
-            "noWonders" to wonderless.toList(),
-            "publicEvents" to publicEvents,
-            "chancery" to chancery,
-            "unitOrders" to units.toMap(),
-            "unitState" to units.stateToMap(),
-            "worldVoteState" to mapOf("tallied" to voteTallied, "reminded" to voteReminded, "unHolder" to unHolder),
-            "diplomacy" to diplomacy.toMap(),
-            "warsDeclared" to warsDeclared.map { it.toString() },
-            "trail" to trail.toMap(),
-            "ages" to ages.toMap(),
-            "lockedCities" to RulerOverrides.lockedCities.toList(),
-            "focusedCities" to RulerOverrides.focusedCities.toList(),
-            "inPlay" to inPlaySeen.filterValues { it.isNotEmpty() }.mapValues { it.value.sorted() }
-        )))
+        writeAtomically(File(dataDir, "host.json"), Json.write(memories.filter { it.kept }.associate { it.name to it.save() }))
     }
+
+    /** A memory of the host's, declared once: [kept] in host.json under [name], or not (it lives a turn or less), and how it is forgotten, saved and
+     *  read back. A new game forgets every one, save and load go through every kept one: none can be left out of one of the three, as shipRaids and
+     *  warningsWoken were left out of the save (a restart re-woke every advisor for every warning, and forgot a raider - audit 2026-10-04) */
+    private class Memory(val name: String, val kept: Boolean, val clear: () -> Unit, val save: () -> Any? = { null }, val load: (JsonValue?) -> Unit = {})
+
+    /** Every memory of the host's, in the order load reads them */
+    private val memories: List<Memory> by lazy { listOf(
+        Memory("orders", true, { orders.clear() }, { orders.mapValues { it.value.toMap() } },
+            { json -> json?.forEach { entry -> orders[entry.name] = StandingOrders().apply { readFrom(entry) } } }),
+        Memory("noWonders", true, { wonderless.clear() }, { wonderless.toList() }, { json -> json?.asStringArray()?.let { wonderless += it } }),
+        Memory("publicEvents", true, { publicEvents.clear() }, { publicEvents },
+            { json -> json?.forEach { event -> publicEvents += mapOf("turn" to event.getInt("turn"), "year" to event.getString("year", ""), "text" to event.getString("text")) } }),
+        Memory("chancery", true, { chancery.clear() }, { chancery },
+            { json -> json?.forEach { civLog -> chancery[civLog.name] = ArrayList(civLog.map { mapOf("turn" to it.getInt("turn"), "text" to it.getString("text")) }) } }),
+        Memory("unitOrders", true, { units.reset() }, { units.toMap() }, { json -> units.load(json) }),
+        Memory("unitState", true, {}, { units.stateToMap() }, { json -> units.loadState(json) }), // older files have none: the clocks start afresh
+        Memory("worldVoteState", true, { voteTallied = -1; voteReminded.clear(); unHolder = null }, { mapOf("tallied" to voteTallied, "reminded" to voteReminded, "unHolder" to unHolder) },
+            { json -> json?.let { saved -> voteTallied = saved.getInt("tallied", -1); unHolder = saved.getString("unHolder", null); saved.get("reminded")?.forEach { voteReminded[it.name] = it.asInt() } }
+                // A save from before the vote was the ruler's: whoever holds the United Nations now is no news
+                ?: run { voteTallied = -1; unHolder = game().civilizations.firstOrNull { it.isMajorCiv() }?.victoryManager?.getUNBuildingAndOwnerNames()?.second?.let { game().getCivilization(it).civName } } }),
+        Memory("diplomacy", true, { diplomacy.reset() }, { diplomacy.toMap() }, { json -> diplomacy.load(json) }),
+        Memory("warsDeclared", true, { warsDeclared.clear() }, { warsDeclared.map { it.toString() } }, { json -> json?.asStringArray()?.forEach { warsDeclared += WarRecord.parse(it) } }),
+        Memory("trail", true, { trail.clear() }, { trail.toMap() }, { json -> trail.load(json) }),
+        Memory("ages", true, { ages.clear() }, { ages.toMap() }, { json -> ages.load(json) }),
+        Memory("lockedCities", true, { RulerOverrides.lockedCities.clear() }, { RulerOverrides.lockedCities.toList() }, { json -> json?.asStringArray()?.let { RulerOverrides.lockedCities += it } }),
+        Memory("focusedCities", true, { RulerOverrides.focusedCities.clear() }, { RulerOverrides.focusedCities.toList() }, { json -> json?.asStringArray()?.let { RulerOverrides.focusedCities += it } }),
+        Memory("inPlay", true, { inPlaySeen.clear() }, { inPlaySeen.filterValues { it.isNotEmpty() }.mapValues { it.value.sorted() } },
+            { json -> json?.forEach { civ -> inPlaySeen[civ.name] = civ.asStringArray().toHashSet() } }), // older files have none: latched afresh
+        Memory("warningsWoken", true, { warningsWoken.clear() }, { warningsWoken.mapValues { it.value.sorted() } },
+            { json -> json?.forEach { civ -> warningsWoken[civ.name] = civ.asStringArray().toHashSet() } }),
+        Memory("shipRaids", true, { shipRaids.clear() },
+            { shipRaids.mapValues { (_, raids) -> raids.mapKeys { it.key.toString() }.mapValues { (_, r) -> mapOf("turn" to r.turn, "owner" to r.owner, "target" to r.target, "from" to r.from) } } },
+            { json -> json?.forEach { civ -> shipRaids[civ.name] = HashMap(civ.associate { r -> r.name.toInt() to ShipRaid(r.getInt("turn"), r.getString("owner"), r.getString("target"), r.getString("from")) }) } }),
+        // What the orders set in the engine, read again from the orders at load
+        Memory("orders in the engine", false, { RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.faithReserve.clear(); RulerOverrides.officialsOrders.clear(); RulerOverrides.noWonders.clear() }),
+        // A turn's buckets, filled by the hooks and drained by the bookkeeping; and what the last turn left for the next briefing
+        Memory("turn buckets", false, { spending.clear(); losses.clear(); strikes.clear(); blows.clear(); expended.clear(); disbandedFor.clear(); destroyed.clear()
+            faithSpending.clear(); freeTechs.clear(); hostAdopted.clear(); notificationsSeen.clear(); officialsSpent.clear(); lastFaithSpent.clear(); worldAtLastAdvance = null })
+    ) }
 
     /** A copy of the world after every stretch of turns, so a test game can be wound back (the last dozen are kept) */
     private fun backup() {
@@ -455,12 +483,7 @@ object RulerHost {
     }
 
     /** Everything the host remembers about a game, forgotten in one place - so a new world starts clean whatever the last one left behind */
-    private fun resetHostState() {
-        orders.clear(); publicEvents.clear(); chancery.clear(); spending.clear(); warningsWoken.clear(); losses.clear(); warsDeclared.clear(); notificationsSeen.clear(); shipRaids.clear(); inPlaySeen.clear()
-        units.reset(); diplomacy.reset(); trail.clear(); ages.clear()
-        worldAtLastAdvance = null
-        RulerOverrides.lockedCities.clear(); RulerOverrides.focusedCities.clear(); RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.faithReserve.clear(); RulerOverrides.officialsOrders.clear(); RulerOverrides.noWonders.clear()
-    }
+    private fun resetHostState() { for (memory in memories) memory.clear() }
 
     /** Written to a sibling file and moved into place, so a crash mid-write never leaves a half file behind */
     private fun writeAtomically(file: File, text: String) {
@@ -477,36 +500,13 @@ object RulerHost {
         gameInfo = loaded
         UncivGame.Current.gameInfo = loaded
         val host = JsonReader().parse(hostFile.readText())
-        for (entry in host.get("orders")) orders[entry.name] = StandingOrders().apply { readFrom(entry) }
-        wonderless.clear(); host.get("noWonders")?.asStringArray()?.let { wonderless += it }
+        for (memory in memories) { memory.clear(); if (memory.kept) memory.load(host.get(memory.name)) }
         applyWonderless()
-        for (event in host.get("publicEvents"))
-            publicEvents += mapOf("turn" to event.getInt("turn"), "year" to event.getString("year", ""), "text" to event.getString("text"))
-        host.get("chancery")?.forEach { civLog ->
-            chancery[civLog.name] = ArrayList(civLog.map { mapOf("turn" to it.getInt("turn"), "text" to it.getString("text")) })
-        }
-        units.load(host.get("unitOrders"))
-        units.loadState(host.get("unitState")) // older files have none: the clocks start afresh
-        voteReminded.clear()
-        host.get("worldVoteState")?.let { saved ->
-            voteTallied = saved.getInt("tallied", -1); unHolder = saved.getString("unHolder", null)
-            saved.get("reminded")?.forEach { voteReminded[it.name] = it.asInt() } }
-            // A save from before the vote was the ruler's: whoever holds the United Nations now is no news
-            ?: run { voteTallied = -1; unHolder = loaded.civilizations.firstOrNull { it.isMajorCiv() }?.victoryManager?.getUNBuildingAndOwnerNames()?.second?.let { loaded.getCivilization(it).civName } }
-        diplomacy.load(host.get("diplomacy"))
-        warsDeclared.clear(); host.get("warsDeclared")?.asStringArray()?.forEach { warsDeclared += WarRecord.parse(it) }
         units.dropMistakenHolds(loaded, chancery.values)
         // A war declared by order before a restart is still news to the next advance: the round's start is the world before it, not the loaded world
         worldAtLastAdvance = WorldSnapshot(loaded).also { start -> start.wars.removeAll { war -> war.toList().let { (first, second) -> warsDeclared.any { it.covers(first, second) } } } }
-        trail.load(host.get("trail"))
-        ages.load(host.get("ages"))
         trail.record(loaded) // a save from before the trail was kept starts one here
         for ((name, standing) in orders) game().civilizations.firstOrNull { it.civName == name }?.let { RulerOverrides.postures[it.civID] = RulerOverrides.Posture(standing.warAim, standing.stance, standing.reserve) }
-        RulerOverrides.lockedCities.clear()
-        host.get("lockedCities")?.asStringArray()?.let { RulerOverrides.lockedCities += it }
-        RulerOverrides.focusedCities.clear()
-        host.get("focusedCities")?.asStringArray()?.let { RulerOverrides.focusedCities += it }
-        inPlaySeen.clear(); host.get("inPlay")?.forEach { civ -> inPlaySeen[civ.name] = civ.asStringArray().toHashSet() } // older files have none: latched afresh
         registerRuledCivs()
         println("Loaded game at turn ${loaded.turns}, ruled: ${orders.keys}")
     }
@@ -1134,6 +1134,8 @@ object RulerHost {
         val turnsLeft = RulerHost.dealTurnsLeft(civ)
         val faith = civ.religionManager.storedFaith
         val policies = civ.policies.getAdoptedPolicies().toSet()
+        /** The ruler's standing unit orders as the turn began: the action and its place, each unit by number */
+        val unitOrders = civ.units.getCivUnits().mapNotNull { unit -> RulerHost.units.orders[unit.id]?.let { unit.id to Triple(it.action, it.x, it.y) } }.toMap()
     }
 
     internal fun dealsOf(civ: Civilization) = diplomacy.dealsInForce(civ)
