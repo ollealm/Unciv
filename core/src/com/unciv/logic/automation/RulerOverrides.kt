@@ -124,6 +124,22 @@ object RulerOverrides {
     /** Called with (civ, unit, why) when a ruled civ's automation disbands a unit for a reason of its own, before it goes */
     @Volatile var unitDisbanded: ((com.unciv.logic.civilization.Civilization, MapUnit, String) -> Unit)? = null
 
+    /** Called with (civ, unit, why) when a ruled civ's unit goes by neither battle nor disbanding - used up by its own work ([MapUnit.consume]) or killed by the
+     *  ground it stood on - before it goes: the host otherwise could only guess at "disbanded or used up". [why] finishes "Our X #id <where> ..." */
+    @Volatile var unitExpended: ((Civilization, MapUnit, String) -> Unit)? = null
+    fun noteExpended(unit: MapUnit, why: String) { if (unit.civ.civID in ruledCivs) unitExpended?.invoke(unit.civ, unit, why) }
+
+    /** A blow struck by a ruled civ's unit or city: the engine tells only the defender of it. [targetCity] when the blow fell on a city (its walls' health after),
+     *  else [targetUnit], the unit struck; [fell] when the blow destroyed or captured it */
+    class Strike(val attacker: Civilization, val targetCivName: String, val targetCity: String?, val targetUnit: String?, val health: Int, val maxHealth: Int, val fell: Boolean)
+    @Volatile var struck: ((Strike) -> Unit)? = null
+    fun noteStrike(attacker: ICombatant, defender: ICombatant, fell: Boolean) {
+        val civ = attacker.getCivInfo()
+        if (civ.civID !in ruledCivs || civ == defender.getCivInfo()) return
+        struck?.invoke(Strike(civ, defender.getCivInfo().civName, if (defender.isCity()) defender.getName() else null, if (defender.isCity()) null else defender.getName(),
+            defender.getHealth().coerceAtLeast(0), defender.getMaxHealth(), fell))
+    }
+
     /** civIDs that may raise no world wonder at all (a game setting: e.g. only the rulers' realms compete for them) */
     val noWonders: MutableSet<String> = ConcurrentHashMap.newKeySet()
 

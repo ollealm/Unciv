@@ -35,7 +35,7 @@ private val DURATION = Regex(" for \\d+ turns?\\b")
 
 class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
 
-    private val hiddenOffers = setOf(TradeOfferType.City, TradeOfferType.Introduction, TradeOfferType.WarDeclaration, TradeOfferType.Technology)
+    private val hiddenOffers = setOf(TradeOfferType.City, TradeOfferType.Introduction, TradeOfferType.Technology)
 
     /** Our open proposals: (our civ, their civ, terms) - each settled by its own record when the engine reports its answer */
     val pending = ArrayList<Triple<String, String, String>>()
@@ -95,6 +95,12 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
             }
         }
     }
+
+    /** The words an offer goes by in an order and in the options: its name - or, for a call to war, which carries a civ's id for a name, the power named
+     *  ("declaration of war on Aztecs"; Japan's call on Songhai failed on the id alone, Run 21) */
+    private fun TradeOffer.word(game: GameInfo) = if (type == TradeOfferType.WarDeclaration) "declaration of war on ${game.civilizations.firstOrNull { it.civID == name }?.civName ?: name}" else name
+    /** An order's item against an offer: its name, or its words with or without the article the briefing's wording carries ("a declaration of war on Aztecs") */
+    private fun TradeOffer.isCalled(item: String, game: GameInfo) = name.equals(item, ignoreCase = true) || word(game).equals(item.trim().replace(Regex("^an? ", RegexOption.IGNORE_CASE), ""), ignoreCase = true)
 
     fun TradeOffer.brief(game: GameInfo): String = when (type) {
         // These three carry an id where every other offer carries its name
@@ -232,8 +238,9 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         fun add(list: JsonValue?, available: List<TradeOffer>, into: MutableList<TradeOffer>, side: String, owner: Civilization) {
             list?.forEach { entry ->
                 val item = entry.getString("item")
-                val offer = available.firstOrNull { it.name.equals(item, ignoreCase = true) && it.amount > 0 }
-                    ?: throw IllegalArgumentException(inForce(civ, other, item) ?: cannotPassOn(owner, item, side) ?: "$side cannot offer '$item' right now; tradeable: ${available.filter { it.amount > 0 && it.type !in hiddenOffers }.joinToString { it.name + " x" + it.amount }}")
+                val offer = available.firstOrNull { it.isCalled(item, game) && it.amount > 0 }
+                    ?: throw IllegalArgumentException(inForce(civ, other, item) ?: cannotPassOn(owner, item, side) ?: cannotCallToWar(civ, other, item, side)
+                        ?: "$side cannot offer '$item' right now; tradeable: ${available.filter { it.amount > 0 && it.type !in hiddenOffers }.joinToString { it.word(game) + if (it.type.numberType != TradeOfferType.TradeTypeNumberType.None) " x" + it.amount else "" }}")
                 val copy = offer.copy()
                 // A treaty runs a fixed length: an amount given for one (the duration, usually) is ignored
                 val wanted = if (offer.type.numberType == TradeOfferType.TradeTypeNumberType.None) offer.amount else if (entry.has("amount")) entry.getInt("amount") else if (offer.type.numberType == TradeOfferType.TradeTypeNumberType.Gold) throw IllegalArgumentException("'$item' needs an amount") else 1
@@ -285,6 +292,20 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         if (other.civID in RulerOverrides.ruledCivs)
             return (if (superseded.isNotEmpty()) "Your earlier pending offer for the same goods was withdrawn. " else "") + "Proposed to ${other.civName}: $summary. ${other.civName} is an advised court: their advisor decides at their next look-in, within a few turns, and may accept, refuse or send a counteroffer. (Their officials would reckon it worth $balance to them, but the choice is not theirs.)" + nearVictoryNote(other, trade.ourOffers + trade.theirOffers)
         return (if (superseded.isNotEmpty()) "Your earlier pending offer for the same goods was withdrawn. " else "") + "Proposed to ${other.civName}: $summary. They answer on their turn; by their own reckoning ${if (balance < -100_000) "they will not part with this at any price" else "this deal is worth $balance to them (they accept at 0 or more)"}, so they are ${if (acceptable) "likely to accept" else if (balance < -100_000) "certain to refuse" else "likely to refuse - sweeten it or ask for less"}." + nearVictoryNote(other, trade.ourOffers + trade.theirOffers)
+    }
+
+    /** A call to war on a power that cannot be made, in words: the power is unknown to one side, already at war with the one who would declare, or bound to them by a treaty
+     *  (TradeLogic lists a declaration only where the engine's canDeclareWar holds for both); null when the item is no call to war at all */
+    private fun cannotCallToWar(civ: Civilization, other: Civilization, item: String, side: String): String? {
+        val named = Regex("^(?:an? )?declaration of war on (.+)$", RegexOption.IGNORE_CASE).find(item.trim())?.groupValues?.get(1)?.trim() ?: return null
+        val declaring = if (side == "We") civ else other
+        val target = civ.gameInfo.civilizations.firstOrNull { it.civName.equals(named, ignoreCase = true) && it.isMajorCiv() } ?: return "$side cannot offer a declaration of war on $named: no great power of that name"
+        return "$side cannot offer a declaration of war on ${target.civName}: " + when {
+            target == civ || target == other -> "a power does not declare war on a party to the deal"
+            !civ.knows(target) || !other.knows(target) -> "both sides must have met them, and ${if (!civ.knows(target)) "we" else other.civName} ${if (!civ.knows(target)) "have" else "has"} not"
+            declaring.isAtWarWith(target) -> "${if (declaring == civ) "we are" else "they are"} at war with them already"
+            else -> "${if (declaring == civ) "we are" else "they are"} bound by a treaty with them (peace, friendship or a pact) that bars it for now"
+        }
     }
 
     /** A resource [owner] holds only by a deal or from a city-state: the game lets nobody pass such on (Civilization.getPerTurnResourcesWithOriginsForTrade), so the refusal says so */
@@ -417,7 +438,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
     }
 
     /** The ruler's answer to a proposal of friendship on the desk; each side's log hears it (the proposer's through the engine's notice) */
-    private fun answerFriendship(civ: Civilization, other: Civilization, answer: String): String {
+    private fun answerFriendship(civ: Civilization, other: Civilization, answer: String, byRenewal: Boolean = false): String {
         friendshipOfferedOn.remove("${civ.civName}<${other.civName}")
         return when (answer.lowercase().trim()) {
             "accept" -> {
@@ -426,7 +447,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
                 civ.getDiplomacyManager(other)!!.signDeclarationOfFriendship()
                 other.addNotification("We have signed a Declaration of Friendship with [${civ.civName}]!", com.unciv.logic.civilization.NotificationCategory.Diplomacy, com.unciv.logic.civilization.NotificationIcon.Diplomacy, civ.civName)
                 val turns = civ.getDiplomacyManager(other)!!.getFlag(DiplomacyFlags.DeclarationOfFriendship)
-                log(civ, "By your order: we accepted ${other.civName}'s Declaration of Friendship; it stands for $turns turns.")
+                log(civ, if (byRenewal) "By your order to renew it: the Declaration of Friendship with ${other.civName} lapsed, ${other.civName} had proposed it again, and we accepted theirs; it stands for $turns turns."
+                    else "By your order: we accepted ${other.civName}'s Declaration of Friendship; it stands for $turns turns.")
                 "Accepted ${other.civName}'s Declaration of Friendship: it stands for $turns turns"
             }
             "refuse" -> {
@@ -842,6 +864,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
                 continue
             }
             try {
+                // Their own proposal of it already waits on our desk: it is accepted, and that one line tells it (Denmark heard "accepted" and "proposed again" both, Run 21)
+                if (friendshipFrom(civ, other)) { answerFriendship(civ, other, "accept", byRenewal = true); continue }
                 proposeFriendship(civ, renewal.partner)
                 log(civ, "By your order: the Declaration of Friendship with ${renewal.partner} lapsed and was proposed again; they answer it as any proposal of friendship.")
             } catch (ex: IllegalArgumentException) {
@@ -1009,15 +1033,15 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
             "with" to civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() && !civ.isAtWarWith(it) }.map { other ->
                 val logic = TradeLogic(civ, other)
                 mapOf("civ" to other.civName,
-                    "weCanOffer" to logic.ourAvailableOffers.filter { it.type !in hiddenOffers && it.amount > 0 }.map { it.name + if (it.amount > 1) " x${it.amount}" else "" },
-                    "theyCanOffer" to logic.theirAvailableOffers.filter { it.type !in hiddenOffers && it.amount > 0 }.map { it.name + if (it.amount > 1) " x${it.amount}" else "" })
+                    "weCanOffer" to logic.ourAvailableOffers.filter { it.type !in hiddenOffers && it.amount > 0 }.map { it.word(civ.gameInfo) + if (it.amount > 1) " x${it.amount}" else "" },
+                    "theyCanOffer" to logic.theirAvailableOffers.filter { it.type !in hiddenOffers && it.amount > 0 }.map { it.word(civ.gameInfo) + if (it.amount > 1) " x${it.amount}" else "" })
             }.toList(),
             "cityStates" to civ.getKnownCivs().filter { it.isCityState && it.isAlive() }.map { state ->
                 mapOf("civ" to state.civName, "type" to state.cityStateType.name,
                     "influence" to state.getDiplomacyManager(civ)?.getInfluence()?.toInt(),
                     "influenceFor250Gold" to state.cityStateFunctions.influenceGainedByGift(civ, 250))
             }.toList(),
-            "note" to "Offers: luxury/strategic resource names, 'Gold' (amount), 'Gold per turn' (amount), '${Constants.openBorders}', '${Constants.researchAgreement}', '${Constants.defensivePact}', '${Constants.acceptEmbassy}'. A proposal to an unadvised power is answered by its officials on their turn; one to an advised court waits for that court's advisor, who answers at their next look-in. Nothing wakes you for the answer - watch the log."
+            "note" to "Offers: luxury/strategic resource names, 'Gold' (amount), 'Gold per turn' (amount), '${Constants.openBorders}', '${Constants.researchAgreement}', '${Constants.defensivePact}', '${Constants.acceptEmbassy}', 'declaration of war on <power>' (a call to war, where the lists carry it: in want, they declare it on accepting; in give, we do, and it needs the same leave as declareWar). A proposal to an unadvised power is answered by its officials on their turn; one to an advised court waits for that court's advisor, who answers at their next look-in. Nothing wakes you for the answer - watch the log."
         )
     }
 }

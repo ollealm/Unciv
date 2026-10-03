@@ -976,6 +976,8 @@ class MapUnit : IsPartOfGameInfoSerialization {
 
     /** Destroys the unit and gives stats if its a great person */
     fun consume() {
+        // A ruled civ's host hears that the unit was used up by its own work, missionary or Great Person, before it goes: the roll-call afterwards would only see it gone
+        com.unciv.logic.automation.RulerOverrides.noteExpended(this, "was used up: " + (if (hasUnique(UniqueType.CanSpreadReligion)) "its last spreading of the faith done" else "its work done"))
         civ.forEachTriggeredUnique(UniqueType.TriggerUponExpendingUnit, triggerFilter = { matchesFilter(it.params[0]) }) { unique ->
             UniqueTriggerActivation.triggerUnique(unique, this,
                 triggerNotificationText = "due to expending our [${this.name}]")

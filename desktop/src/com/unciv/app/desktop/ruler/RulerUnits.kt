@@ -39,11 +39,14 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     /** Units given away by order since the host last reckoned its losses: gone from our rolls, but neither lost nor disbanded */
     val given = HashSet<Int>()
 
+    /** Great People and missionaries used up by the ruler's own use order since the host last reckoned its losses: spent by order, not left to the officials */
+    val usedByOrder = HashSet<Int>()
+
     /** Units ordered re-armed that had spent their movement: re-armed at the start of our next turn, when they have it again (unit id -> the reserve then in force) */
     private val rearmNext = HashMap<Int, Int>()
 
     /** Forget everything of one game */
-    fun reset() { orders.clear(); released.clear(); given.clear(); rearmNext.clear(); landLeft.clear(); stillSince.clear() }
+    fun reset() { orders.clear(); released.clear(); given.clear(); usedByOrder.clear(); rearmNext.clear(); landLeft.clear(); stillSince.clear() }
 
     /** Orders for units that no longer exist (a soldier killed on the march; re-arming keeps a unit's number, so its order stays): forgotten, so a dead man never counts as "on the way" */
     fun forgetTheDead(game: com.unciv.logic.GameInfo) {
@@ -156,6 +159,13 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             // canMarch reckons with full movement; with less left the step may not open this turn - then it waits for the next
             if (beside != null) { if (beside != unit.getTile()) try { unit.movement.headTowards(beside) } catch (_: UnitMovement.UnreachableDestinationException) {}; return true }
         }
+        // A trade mission is carried out from any tile of the city-state's land (the engine's rule - UnitActionsGreatPerson), and its city itself no foreign
+        // unit may enter: standing on their land counts as arrived (six of six missions were dropped at the gate, Run 21)
+        if (target != null && unit.getTile() != target && tradeMissionLand(unit, order, target)) {
+            log(civ, "Our ${unit.name} arrived on ${target.getOwner()!!.civName}'s land at ${where(civ, unit.getTile())}.")
+            order.x = unit.getTile().position.x.toInt(); order.y = unit.getTile().position.y.toInt()
+            return carryOut(unit, order)
+        }
         if (target != null && unit.getTile() != target) {
             // The escort and upgrade routines may have moved this soldier already this turn: no movement left is not "cannot reach"
             if (unit.currentMovement <= 0f) return true
@@ -177,6 +187,11 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             if (unit.isCivilian() && target.civilianUnit?.civ == civ && unit.getTile().aerialDistanceTo(target) == 1 && unit.movement.canUnitSwapTo(target)) {
                 unit.movement.swapMoveToTile(target)
             } else try { unit.movement.headTowards(target) } catch (_: UnitMovement.UnreachableDestinationException) {} // not moved: counted as stuck below
+            if (tradeMissionLand(unit, order, target)) {
+                log(civ, "Our ${unit.name} arrived on ${target.getOwner()!!.civName}'s land at ${where(civ, unit.getTile())}.")
+                order.x = unit.getTile().position.x.toInt(); order.y = unit.getTile().position.y.toInt()
+                return carryOut(unit, order)
+            }
             if (unit.getTile() != target) {
                 val spot = unit.getTile().position.toString()
                 order.turnsStuck = if (spot == order.lastSpot) order.turnsStuck + 1 else 0
@@ -222,7 +237,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 // The first Great Scientist's boost finished the only technology the engine's queue held, and the second found no research under way (Run 19): the goals' next path is set before the boost
                 if (UnitActionType.HurryResearch in wanted && civ.tech.currentTechnologyName() == null) researchRefill(civ)
                 val used = wanted.firstOrNull { UnitActions.invokeUnitAction(unit, it) }
-                if (used != null) log(civ, "Our ${unit.name} used its ability (${used.name}) at ${where(civ, unit.getTile())}${if (used == UnitActionType.SpreadReligion) promiseBroken(civ, unit.getTile(), "religion").orEmpty() else ""}.")
+                if (used != null) { usedByOrder += unit.id; log(civ, "Our ${unit.name} used its ability (${used.name}) at ${where(civ, unit.getTile())}${if (used == UnitActionType.SpreadReligion) promiseBroken(civ, unit.getTile(), "religion").orEmpty() else ""}.") }
                 else {
                     order.turnsStuck += 1
                     if (order.turnsStuck == 1) log(civ, "Our ${unit.name} #${unit.id} could not use its ability at ${where(civ, unit.getTile())}${order.ability?.let { " ($it)" } ?: ""}: ${abilitiesHere(unit)}. Name one with the order and stand where it applies. It tries again for two more turns, then the order is dropped.")
@@ -454,7 +469,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         json.get("ability")?.takeUnless { it.isNull }?.asString()?.lowercase()?.trim()?.let { ability -> if (action == "use" && ABILITY_UNIQUES[ability]?.none { unit.hasUnique(it) } == true)
             throw IllegalArgumentException("${unit.name} #$unitId has no '$ability' to use; the ways it has: ${ABILITY_UNIQUES.filter { (_, uniques) -> uniques.any { unit.hasUnique(it) } }.keys.joinToString().ifEmpty { "none" }}") }
         if (action == "use") when (json.get("ability")?.takeUnless { it.isNull }?.asString()?.lowercase()?.trim()) {
-            "trade mission" -> if (!(target.isCityCenter() && target.getOwner()?.isCityState == true)) throw IllegalArgumentException("A trade mission needs a city-state's city as its target; ${where(civ, target)} is not one")
+            "trade mission" -> if (target.getOwner()?.isCityState != true) throw IllegalArgumentException("A trade mission needs a city-state's city, or a tile of its land, as its target; ${where(civ, target)} is neither")
             "hurry production" -> target.getCity()?.let { city -> when (val current = city.cityConstructions.getCurrentConstruction()) {
                 // A Great Engineer hurries a building or a wonder (UnitActionsGreatPerson), never a unit - spaceship parts are units - nor what the rules bar
                 !is com.unciv.models.ruleset.INonPerpetualConstruction -> throw IllegalArgumentException("${city.name} is building nothing that can be hurried right now (its queue is empty or set to Science/Gold); queue something first")
@@ -585,6 +600,14 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     /** The way there for a unit given a full turn's movement - orders are given between turns, when units have spent theirs, and Unciv finds no path for a spent unit */
     /** Could this unit, given a full turn's movement, walk to that tile at all? */
     fun canMarch(unit: MapUnit, target: Tile) = target == unit.getTile() || pathTo(unit, target).isNotEmpty()
+
+    /** Does this unit, sent on a trade mission to [target]'s city-state, stand on that city-state's land - where the engine lets the mission be made (the tile's owner,
+     *  a city-state not at war with us)? The order's words name the city; the mission needs only its land */
+    private fun tradeMissionLand(unit: MapUnit, order: Order, target: Tile): Boolean {
+        if (order.action != "use" || order.ability?.lowercase()?.trim() != "trade mission") return false
+        val state = target.getOwner()?.takeIf { it.isCityState } ?: return false
+        return unit.getTile().getOwner() == state && !state.isAtWarWith(unit.civ)
+    }
 
     private fun pathTo(unit: MapUnit, target: Tile): List<Tile> {
         val spent = unit.currentMovement

@@ -131,6 +131,8 @@ object RulerHost {
         RulerOverrides.underOrders = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.underOrders(unit) }
         RulerOverrides.tradeAnswered = { request, receiver, outcome -> diplomacy.settle(request, receiver, outcome) }
         RulerOverrides.unitDisbanded = { civ, unit, why -> if (civ.civID in RulerOverrides.ruledCivs) disbandedFor.getOrPut(civ.civName) { HashMap() }[unit.id] = why }
+        RulerOverrides.struck = { strike -> strikes.getOrPut(strike.attacker.civName) { ArrayList() } += strike }
+        RulerOverrides.unitExpended = { civ, unit, why -> expended.getOrPut(civ.civName) { HashMap() }[unit.id] = Pair(why, unit.getTile()) }
         RulerOverrides.unitLost = { loss ->
             // The chancery's losses and the trail's fallen marks are the ruled realms' own; an oddity of arms can be anyone's
             if (loss.civ.civID in RulerOverrides.ruledCivs) { losses.getOrPut(loss.civ.civName) { ArrayList() } += loss; trail.lostInBattle += loss.unit.id }
@@ -457,6 +459,22 @@ object RulerHost {
             return when { unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.FoundCity) -> ifRaised(PersonalityValue.Expansion); unit.isMilitary -> ifRaised(PersonalityValue.Military); else -> null }
         }
         val building = ruleset.buildings[item] ?: return null
+        if (building.isWonder) {
+            // The officials weigh a world wonder by its one great gift (ConstructionAutomation.getOnetimeUniqueBonuses), each gift under one weight; the little culture every
+            // wonder carries besides is no favour of yours (the Pentagon read "favoured by your Culture weight", Run 21). A gift under no weight: nothing is said
+            val has = { type: com.unciv.models.ruleset.unique.UniqueType -> building.hasUnique(type) }
+            return ifRaised(when {
+                has(com.unciv.models.ruleset.unique.UniqueType.OneTimeFreePolicy) || has(com.unciv.models.ruleset.unique.UniqueType.OneTimeAmountFreePolicies) || has(com.unciv.models.ruleset.unique.UniqueType.StatPercentBonusCities) -> PersonalityValue.Culture
+                has(com.unciv.models.ruleset.unique.UniqueType.OneTimeFreeTech) || has(com.unciv.models.ruleset.unique.UniqueType.OneTimeAmountFreeTechs) || has(com.unciv.models.ruleset.unique.UniqueType.OneTimeFreeGreatPerson) -> PersonalityValue.Science
+                has(com.unciv.models.ruleset.unique.UniqueType.OneTimeAmountFreeUnits) || has(com.unciv.models.ruleset.unique.UniqueType.OneTimeFreeUnit) -> PersonalityValue.Production
+                has(com.unciv.models.ruleset.unique.UniqueType.OneTimeEnterGoldenAge) || has(com.unciv.models.ruleset.unique.UniqueType.GoldenAgeLength) || has(com.unciv.models.ruleset.unique.UniqueType.OneTimeEnterGoldenAgeTurns) -> PersonalityValue.Expansion
+                has(com.unciv.models.ruleset.unique.UniqueType.OneTimeGainPopulation) || has(com.unciv.models.ruleset.unique.UniqueType.OneTimeGainPopulationRandomCity) -> PersonalityValue.Food
+                has(com.unciv.models.ruleset.unique.UniqueType.StatPercentFromTradeRoutes) -> PersonalityValue.Gold
+                has(com.unciv.models.ruleset.unique.UniqueType.EnemyUnitsSpendExtraMovement) -> PersonalityValue.DeclareWar
+                has(com.unciv.models.ruleset.unique.UniqueType.Strength) || has(com.unciv.models.ruleset.unique.UniqueType.UnitStartingExperience) || has(com.unciv.models.ruleset.unique.UniqueType.EnablesNuclearWeapons) -> PersonalityValue.Military
+                else -> return null
+            })
+        }
         val stats = building.getStats(city)
         val lean = Stat.entries.map { stat -> stat to stats[stat] * (when (stat) { Stat.Food -> 3f; Stat.Production, Stat.Gold -> 2f; else -> 1f }) * (weights[PersonalityValue[stat].name] ?: 5f) / 5f }
             .filter { it.second > 0f }.maxByOrNull { it.second }
@@ -869,6 +887,11 @@ object RulerHost {
     private val spending = java.util.concurrent.ConcurrentHashMap<String, MutableList<Pair<Int, String>>>()
     /** Units of each civ destroyed or captured in battle during the turn being played (the engine's word, see RulerOverrides.noteLoss) */
     private val losses = HashMap<String, MutableList<RulerOverrides.UnitLoss>>()
+    /** Blows each civ's own host struck during the turn being played, in order (RulerOverrides.noteStrike): the engine tells only the one struck, so the attacker's
+     *  chancery had nothing of its own fighting (three realms besieged Tenochtitlan without a line, Run 21). Told as one line per target */
+    private val strikes = HashMap<String, MutableList<RulerOverrides.Strike>>()
+    /** Units of each civ that went by their own work or by the ground they stood on during the turn being played, by unit number: why, and where they stood (RulerOverrides.noteExpended) */
+    private val expended = HashMap<String, HashMap<Int, Pair<String, Tile>>>()
     /** A ship that attacked one of our cities or units, as the attack's notice placed it: kept a few turns for the threats list */
     private class ShipRaid(val turn: Int, val owner: String, val target: String, val from: String)
     private val shipRaids = HashMap<String, HashMap<Int, ShipRaid>>()
@@ -997,15 +1020,31 @@ object RulerHost {
             val great = civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.GreatPerson) == true
             val disbandedWhy = disbandedFor[civ.civName]?.remove(id)
             val needs = civ.gameInfo.ruleset.units[unit.first]?.requiredResource
+            // The host knows whose hand spent a unit: the ruler's use order says so as it is carried out, anything else was the officials' once it was left to them
+            val byWhom = if (units.usedByOrder.remove(id)) "by your order" else "by the officials once it was left to them"
+            val went = expended[civ.civName]?.remove(id)
             log(civ, if (disbandedWhy != null) "Our ${unit.first} #$id ${describeWhere(civ, unit.second)} was disbanded by the officials $disbandedWhy."
                 else if (fell != null) "Our ${unit.first} #$id was ${if (fell.captured) "captured" else "lost in action"} ${describeWhere(civ, fell.where)}" +
                     (fell.enemy?.let { enemy -> ", ${if (fell.captured) "taken" else "killed"} by ${if (enemy.isBarbarian) "a barbarian" else enemy.civName + "'s"} ${fell.enemyUnit ?: "soldiers"}" } ?: "") + "."
                 else if (spent) "Our ${unit.first} ${describeWhere(civ, unit.second)} did its work and was used up, as such boats are: the fishing grounds it set up stay."
-                else if (great) "Our ${unit.first} #$id was spent: its ability used, by your order or by the officials once it was left to them."
+                else if (great) "Our ${unit.first} #$id was spent $byWhom: its ability used ${describeWhere(civ, went?.second ?: unit.second)}."
+                else if (went != null) "Our ${unit.first} #$id ${describeWhere(civ, went.second)} ${went.first}${if (went.first.startsWith("was used up")) ", $byWhom" else ""}."
                 else if (civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.SelfDestructs) == true) "Our ${unit.first} #$id was spent on its strike, launched ${describeWhere(civ, unit.second)}."
                 // A part that reached the capital is not lost: it is aboard
                 else if (civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.SpaceshipPart) == true && civ.victoryManager.currentsSpaceshipParts[unit.first] > 0) "Our ${unit.first} was added to the ship in the capital."
                 else "Our ${unit.first} #$id ${describeWhere(civ, unit.second)} left service: disbanded by the officials to save its upkeep${needs?.let { " or to free its $it" } ?: ""}, or used up (a missionary spent).")
+        }
+        // Our own blows, which the engine tells only to the one struck: one line per target this turn - a city by name, a power's soldiers in the field together
+        for ((_, blows) in (strikes.remove(civ.civName) ?: emptyList<RulerOverrides.Strike>()).groupBy { it.targetCity ?: it.targetCivName }) {
+            val whose = blows.first().targetCivName.let { if (it == Constants.barbarians) "the barbarians" else it }
+            val theirs = whose + if (whose.endsWith("s")) "'" else "'s" // the Aztecs' soldiers, Japan's
+            val times = when (blows.size) { 1 -> "once"; 2 -> "twice"; else -> "${blows.size} times" }
+            val city = blows.first().targetCity
+            log(civ, if (city != null) "Our host struck $city ($whose) $times: " + (if (blows.any { it.fell }) "the walls were stormed and the city is taken." else "the walls at ${blows.last().health} of ${blows.last().maxHealth} health.")
+                else "Our host struck $theirs soldiers in the field $times: " + listOfNotNull(
+                    blows.filter { it.fell }.map { it.targetUnit!! }.takeIf { it.isNotEmpty() }?.let { "their ${it.joinToString(" and ")} fell" },
+                    blows.filter { !it.fell }.groupBy { it.targetUnit!! }.map { (name, hits) -> "$name at ${hits.last().health} health" }.takeIf { it.isNotEmpty() }?.let { "their ${it.joinToString(", ")}" }
+                ).joinToString("; ") + ".")
         }
         applyStandingOrders(civ) // a finished goal leaves the queue empty until the next goal's path is set - not idleness
         val researching = civ.tech.currentTechnologyName()

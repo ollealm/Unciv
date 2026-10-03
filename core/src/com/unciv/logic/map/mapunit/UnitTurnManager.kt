@@ -119,6 +119,7 @@ class UnitTurnManager(val unit: MapUnit) {
         unit.takeDamage(tileDamage)
 
         if (unit.isDestroyed) {
+            com.unciv.logic.automation.RulerOverrides.noteExpended(unit, "was destroyed by the ground it stood on, which does $tileDamage damage a turn to a unit left there")
             unit.civ.addNotification(
                 "Our [${unit.name}] took [$tileDamage] tile damage and was destroyed",
                 unit.currentTile.position,

@@ -138,6 +138,8 @@ object Battle {
         // A ruled civ's fallen soldier is told to its host here, on either side of the fight; the notification below reaches the defender only
         if (attacker is MapUnitCombatant && attacker.isDefeated()) RulerOverrides.noteLoss(attacker.getCivInfo(), attacker.unit, attacker.getTile(), defender)
         if (defender is MapUnitCombatant && defender.isDefeated() && !defender.unit.isCivilian()) RulerOverrides.noteLoss(defender.getCivInfo(), defender.unit, attackedTile, attacker, captured = captureMilitaryUnitSuccess)
+        // ...and its own blows likewise: the notification below reaches the defender only. A city "defeated" by ranged fire still stands; melee takes it
+        RulerOverrides.noteStrike(attacker, defender, fell = captureMilitaryUnitSuccess || defender.isDefeated() && (!defender.isCity() || attacker.isMelee()))
 
         if (!captureMilitaryUnitSuccess) // capture creates a new unit, but `defender` still is the original, so this function would still show a kill message
             postBattleNotifications(attacker, defender, attackedTile, attacker.getTile(), damageDealt)
