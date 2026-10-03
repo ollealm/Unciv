@@ -1079,7 +1079,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
             val terms = describeOffer(request, game)
             peaceOfferedOn.item("${civ.civName}<${other.civName}", turn, announce,
                 fresh = { "${other.civName} offers $terms (just arrived, not yet entered in the log; order peace with ${other.civName} to accept)" },
-                arrive = { log(civ, "${other.civName} offers peace: $terms. The offer waits for your answer - order peace with ${other.civName} to accept it; left unanswered it is withdrawn in $DESK_WAITS turns.") },
+                arrive = { log(civ, "${other.civName} offers peace: $terms. The offer waits for your answer - order peace with ${other.civName} to accept it; left unanswered it is withdrawn in $DESK_WAITS turns, which is how a peace is refused.") },
                 lapse = {
                     civ.tradeRequests.remove(request); request.decline(civ)
                     settle(request, civ, "lapsed")
@@ -1135,7 +1135,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
                     "influence" to state.getDiplomacyManager(civ)?.getInfluence()?.toInt(),
                     "influenceFor250Gold" to state.cityStateFunctions.influenceGainedByGift(civ, 250))
             }.toList(),
-            "note" to "Offers: luxury/strategic resource names, 'Gold' (amount), 'Gold per turn' (amount), '${Constants.openBorders}', '${Constants.researchAgreement}', '${Constants.defensivePact}', '${Constants.acceptEmbassy}', 'declaration of war on <power>' (a call to war, where the lists carry it: in want, they declare it on accepting; in give, we do, and it needs the same leave as declareWar). A proposal to an unadvised power is answered by its officials on their turn; one to an advised court waits for that court's advisor, who answers at their next look-in. Nothing wakes you for the answer - watch the log."
+            "note" to "Offers: luxury/strategic resource names, 'Gold' (amount), 'Gold per turn' (amount), '${Constants.openBorders}', '${Constants.researchAgreement}', '${Constants.defensivePact}', '${Constants.acceptEmbassy}', 'declaration of war on <power>' (a call to war, where the lists carry it: in want, they declare it on accepting; in give, we do, and it needs the same leave as declareWar). A proposal to an unadvised power is answered by its officials on their turn; one to an advised court waits for that court's advisor, who answers at their next look-in. An answer does not send for you - watch the log - but an offer from an advised court does, a counteroffer among them."
         )
     }
 }
