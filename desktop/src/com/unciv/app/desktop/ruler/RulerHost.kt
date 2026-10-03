@@ -157,6 +157,7 @@ object RulerHost {
         }
 
         guardHooks()
+        if (faults.isNotEmpty()) { RulerOverrides.fault = { site, civ -> fault(site, civ?.civName) }; println("RULER_FAULT planted: $faults") }
 
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0)
         server.executor = Executors.newSingleThreadExecutor() // game state is not thread-safe
@@ -168,7 +169,63 @@ object RulerHost {
     /** Every hook the host lends the engine runs inside the engine's turn: one that throws would take the turn with it. Each is wrapped once, here, so a
      *  failure prints and gives the engine's own default (audit 2026-10-03) */
     private fun <T> hook(name: String, fallback: T, body: () -> T): T =
-        try { body() } catch (ex: Exception) { System.err.println("Host hook $name failed: $ex"); ex.printStackTrace(); fallback }
+        try { fault("hook"); body() } catch (ex: Exception) { System.err.println("Host hook $name failed: $ex"); ex.printStackTrace(); selfCheck("hook", null, "the $name hook failed ($ex); the engine had its default"); fallback }
+
+    /** Failures planted by the regression harness (RULER_FAULT=engine:Greece,order,...): each fires once at its site, then is gone, so one run shows the failure
+     *  and the recovery. Never set in play */
+    private val faults = (System.getenv("RULER_FAULT") ?: "").split(",").map { it.trim() }.filter { it.isNotEmpty() }.toMutableSet()
+    private fun fault(site: String, civ: String? = null) {
+        if (faults.isEmpty()) return
+        val hit = faults.firstOrNull { it == site || (civ != null && it == "$site:$civ") } ?: return
+        faults.remove(hit)
+        throw IllegalStateException("RULER_FAULT $hit")
+    }
+
+    /** The host's checks on its own work after every turn: printed to stderr and kept in selfcheck.log beside the save, never told to a court -
+     *  so a run's report can count what went wrong without an audit (brackets or coordinates in a line meant for prose, a soldier under orders that
+     *  moved, treasure gone without a cause, a briefing that fails or lacks its spine, a hook that fell back) */
+    private fun selfCheck(kind: String, civ: String?, detail: String) {
+        val turn = gameInfo?.turns ?: 0
+        System.err.println("SELFCHECK $kind${civ?.let { " $it" } ?: ""} T$turn: $detail")
+        try { File(dataDir, "selfcheck.log").appendText("T$turn\t$kind\t${civ ?: "-"}\t${detail.replace("\n", " ")}\n") } catch (_: Exception) {}
+    }
+
+    /** A line that asks the advisor to act on a unit keeps its number; any other prose line does not */
+    private val asksForOrders = Regex("awaits orders|give it a new site|Name one with the order|now our |could not use its ability")
+
+    private fun selfCheckTurn(civ: Civilization, before: CivSnapshot) {
+        if (civ.isDefeated()) return
+        val game = civ.gameInfo
+        for (entry in chanceryLog(civ, game.turns - 1, game.turns)) {
+            val text = entry["text"] as String
+            when {
+                Regex("[\\[\\]{}]").containsMatchIn(text) -> selfCheck("words", civ.civName, "brackets or braces: $text")
+                Regex("\\(-?\\d+,\\s?-?\\d+\\)").containsMatchIn(text) -> selfCheck("words", civ.civName, "coordinates: $text")
+                Regex("#\\d+").containsMatchIn(text) && !asksForOrders.containsMatchIn(text) -> selfCheck("words", civ.civName, "a unit's number in prose: $text")
+            }
+        }
+        // A soldier the ruler put in place (hold, fortify, garrison) that stood on its spot when the turn began and stands elsewhere now
+        for ((id, order) in units.orders) {
+            if (order.action !in setOf("hold", "fortify", "garrison")) continue
+            val was = before.units[id]?.second ?: continue
+            if (order.x != null && (was.position.x.toInt() != order.x || was.position.y.toInt() != order.y)) continue // still on its way
+            val now = civ.units.getUnitById(id)?.getTile() ?: continue
+            if (now != was) selfCheck("orders", civ.civName, "${civ.units.getUnitById(id)?.name} #$id under a ${order.action} order moved from ${was.position} to ${now.position}")
+        }
+        // Faith gone that no line accounts for (a Great Prophet born, a pantheon or religion founded take it by the engine's own hand)
+        val faithIncome = civ.stats.statsForNextTurn.faith.toInt()
+        val faithGone = before.faith + faithIncome - civ.religionManager.storedFaith - (lastFaithSpent.remove(civ.civName) ?: 0)
+        val faithTold = chanceryLog(civ, game.turns - 1, game.turns).any { val t = it["text"] as String; "Prophet" in t || "pantheon" in t || "religion" in t || "faith" in t }
+        if (faithGone > maxOf(20, faithIncome) && !faithTold) selfCheck("faith", civ.civName, "$faithGone faith left the store with no line saying why")
+        // The briefing must build, and carry its spine
+        try {
+            val brief = briefing(civ)
+            val missing = listOf("cities", "units", "warnings", "log", "knownCivs", "standingOrders", "religion", "culture").filter { brief[it] == null }
+            if (missing.isNotEmpty()) selfCheck("briefing", civ.civName, "missing ${missing.joinToString()}")
+        } catch (ex: Exception) { selfCheck("briefing", civ.civName, "the briefing failed: $ex") }
+    }
+    /** Faith the officials spent this turn, by realm, kept for the self-check after the chancery has told it */
+    private val lastFaithSpent = HashMap<String, Int>()
 
     private fun guardHooks() {
         RulerOverrides.forbidden?.let { f -> RulerOverrides.forbidden = { civ, construction -> hook("forbidden", false) { f(civ, construction) } } }
@@ -364,12 +421,13 @@ object RulerHost {
 
     /** For test games only: gold from outside the world, said plainly in the log so the advisor knows where it came from */
     private fun grant(civ: Civilization, json: JsonValue): Any? {
-        val gold = json.getInt("gold", 0)
-        if (gold <= 0) throw ApiError(400, "gold must be positive")
-        civ.addGold(gold)
-        log(civ, "The treasury received $gold gold from outside the world - a grant by the keepers of this test game, not the fruit of any deal. It is ours to spend.")
+        val gold = json.getInt("gold", 0); val faith = json.getInt("faith", 0); val freeTechs = json.getInt("freeTechs", 0)
+        if (gold < 0 || faith < 0 || freeTechs < 0 || gold + faith + freeTechs <= 0) throw ApiError(400, "grant takes gold, faith and freeTechs, each a positive number")
+        if (gold > 0) { civ.addGold(gold); log(civ, "The treasury received $gold gold from outside the world - a grant by the keepers of this test game, not the fruit of any deal. It is ours to spend.") }
+        if (faith > 0) { civ.religionManager.storedFaith += faith; log(civ, "The faithful received $faith faith from outside the world - a grant by the keepers of this test game.") }
+        if (freeTechs > 0) { civ.tech.freeTechs += freeTechs; log(civ, "The scholars were granted $freeTechs free technolog${if (freeTechs == 1) "y" else "ies"} by the keepers of this test game, to be taken in the next turn.") }
         save()
-        return mapOf("gold" to civ.gold)
+        return mapOf("gold" to civ.gold, "faith" to civ.religionManager.storedFaith, "freeTechs" to civ.tech.freeTechs)
     }
 
     /** Nations that may raise no world wonder in this game (a setup choice) */
@@ -698,7 +756,7 @@ object RulerHost {
         /** Each item stands alone: a bad one is reported under "failed" and the rest still go through */
         fun tryEach(list: JsonValue?, action: (JsonValue) -> String) {
             list?.forEach { entry ->
-                try { done += action(entry) }
+                try { fault("order"); done += action(entry) }
                 catch (ex: IllegalArgumentException) { failed += ex.message ?: "failed" }
                 catch (ex: ApiError) { failed += ex.message ?: "failed" }
                 // Anything else the engine throws costs that one item, said under failed, never the rest of the order (audit 2026-10-03)
@@ -1036,6 +1094,7 @@ object RulerHost {
         val happiness = civ.getHappiness()
         val deals = RulerHost.dealsOf(civ)
         val turnsLeft = RulerHost.dealTurnsLeft(civ)
+        val faith = civ.religionManager.storedFaith
         val policies = civ.policies.getAdoptedPolicies().toSet()
     }
 
@@ -1050,6 +1109,7 @@ object RulerHost {
     private val hostAdopted = HashMap<String, HashSet<String>>()
 
     private fun recordChancery(civ: Civilization, before: CivSnapshot) {
+        fault("chancery", civ.civName)
         // A policy adopted that the ruler's policy order did not name was the officials' choice; it is told (audit 2026-10-03: Representation taken unseen)
         val adoptedNow = civ.policies.getAdoptedPolicies().filterNot { com.unciv.models.ruleset.Policy.isBranchCompleteByName(it) }
         val theirs = adoptedNow.filter { it !in before.policies && it !in (hostAdopted.remove(civ.civName) ?: emptySet()) }
@@ -1270,14 +1330,14 @@ object RulerHost {
         }
         for ((what, items) in paid.groupBy { it.second }) log(civ, "The officials spent ${items.sumOf { it.first }} gold on ${what}.")
         officialsSpent[civ.civName] = paid.groupBy { it.second }.map { (what, items) -> "${items.sumOf { it.first }} gold on $what" }
-        faithSpending.remove(civ.civName)?.let { spent -> log(civ, "The officials spent ${spent.sumOf { it.first }} faith on ${spent.joinToString(" and ") { (if (it.second.first().lowercaseChar() in "aeiou") "an " else "a ") + it.second }}; ${civ.religionManager.storedFaith} faith is left" +
+        faithSpending.remove(civ.civName)?.also { lastFaithSpent[civ.civName] = it.sumOf { s -> s.first } }?.let { spent -> log(civ, "The officials spent ${spent.sumOf { it.first }} faith on ${spent.joinToString(" and ") { (if (it.second.first().lowercaseChar() in "aeiou") "an " else "a ") + it.second }}; ${civ.religionManager.storedFaith} faith is left" +
             (orders[civ.civName]?.faithReserve?.let { " (they leave $it untouched, by your reserve)" } ?: " (no faith reserve is set: they may spend it all)") + ".") }
         freeTechs.remove(civ.civName)?.forEach { (tech, goal) -> log(civ, if (goal != null) "A free technology: $tech, taken ${if (goal == tech) "as our research goal" else "on the way to $goal"}." else "A free technology: $tech, the officials' pick - no research goal named a step that could be taken.") }
         if (paid.isNotEmpty()) log(civ, "The treasury now holds ${civ.gold} gold.")
         val unexplained = before.gold - civ.gold - paid.sumOf { it.first } - diplomacy.officialsDealGold.remove(civ.civName).let { it ?: 0 } - paidByRenewals.coerceAtLeast(0)
         // Worth a line when it is more than a turn's income (never for trifles under 10): forty gold is a fortune in one age and small change in another
         val income = civ.stats.statsForNextTurn.gold.toInt()
-        if (unexplained > maxOf(10, income)) log(civ, "A further $unexplained gold left the treasury this turn without the officials' hand in it (upkeep, payments under our deals, or a deal struck).")
+        if (unexplained > maxOf(10, income)) { log(civ, "A further $unexplained gold left the treasury this turn without the officials' hand in it (upkeep, payments under our deals, or a deal struck)."); selfCheck("gold", civ.civName, "$unexplained gold left with no recorded cause") }
         if (before.happiness >= 0 && civ.getHappiness() < 0) log(civ, "The people have become unhappy (${civ.getHappiness()}).")
     }
 
@@ -1636,17 +1696,18 @@ object RulerHost {
             // The engine cannot pick up a turn it failed partway through (GameInfo.nextTurn moves currentPlayer only at the end), and a second try would play
             // the realms already moved twice: the world goes back to the last save, every court is told, and no turn is played until the host is restarted
             try { game.nextTurn() } catch (ex: Throwable) { failTurn(ex); throw ApiError(500, "The turn could not be played: $ex. The world was reloaded as it stood before it; restart the host before playing on.") }
-            guardedStep("the trail") { trail.record(game) }
+            guardedStep("the trail") { fault("trail"); trail.record(game) }
             val after = WorldSnapshot(game)
             settling = true
             try {
-                guardedStep("the world's events") { recordPublicEvents(before, after) }
+                guardedStep("the world's events") { fault("events"); recordPublicEvents(before, after) }
                 // One realm's bookkeeping going wrong costs that realm's account of the turn, never the others' or the save
                 for (civ in ruledCivs) guardedStep("the chancery of ${civ.civName}") {
                     try { recordChancery(civ, civSnapshots[civ]!!) }
                     catch (ex: Exception) { log(civ, "The chancery's account of this turn could not be finished (${ex.javaClass.simpleName}); some of what happened may be missing from it."); throw ex }
                 }
-                guardedStep("the world's vote") { noteWorldVote(game, ruledCivs) }
+                guardedStep("the world's vote") { fault("vote"); noteWorldVote(game, ruledCivs) }
+                for (civ in ruledCivs) guardedStep("the self-checks of ${civ.civName}") { selfCheckTurn(civ, civSnapshots[civ]!!) }
             } finally { settling = false }
             guardedStep("the roll of the dead") { units.forgetTheDead(game) }
 

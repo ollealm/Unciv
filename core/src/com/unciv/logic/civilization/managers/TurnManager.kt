@@ -374,6 +374,7 @@ class TurnManager(val civInfo: Civilization) {
     }
 
     fun automateTurn() {
+        if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) com.unciv.logic.automation.RulerOverrides.fault?.invoke("engine", civInfo) // a failure planted by a regression run, never in play
         // Defeated civs do nothing
         if (civInfo.isDefeated())
             return

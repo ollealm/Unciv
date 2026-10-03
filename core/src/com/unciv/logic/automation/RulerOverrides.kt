@@ -214,9 +214,12 @@ object RulerOverrides {
     /** Called with (civ, unit, why) when a ruled civ's unit could not be moved by the officials this turn: the turn goes on without it */
     @Volatile var unitNotMoved: ((Civilization, MapUnit, String) -> Unit)? = null
     /** A ruled civ's unit moved by [move]: whatever goes wrong costs that unit its turn, never the turn itself. Other civs keep the engine's habit */
+    /** Set by the host only when a regression run plants a failure (RULER_FAULT): throws once at the named site, for the given civ or any */
+    @Volatile var fault: ((String, Civilization?) -> Unit)? = null
+
     fun guarded(unit: MapUnit, move: () -> Unit) {
         if (unit.civ.civID !in ruledCivs) return move()
-        try { move() } catch (ex: Exception) {
+        try { fault?.invoke("move", unit.civ); move() } catch (ex: Exception) {
             System.err.println("The officials could not move ${unit.civ.civName}'s ${unit.name} #${unit.id}: $ex")
             unitNotMoved?.invoke(unit.civ, unit, if (ex is com.unciv.logic.map.mapunit.movement.UnitMovement.UnreachableDestinationException) "the way the officials chose for it would not open" else "the officials' routine failed on it")
         }
