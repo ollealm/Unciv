@@ -146,23 +146,38 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
 
     /** A power one step from a victory in play, as a fact: the last spaceship part to come, or every branch of policy a cultural victory asks done. Said beside
      *  a deal with it - an offer, a renewal, an officials' proposal - and never a block: in Run 18 three rivals fed the winner's research to the last turn */
-    fun nearVictory(other: Civilization): String? {
+    /** How far [other] stands on one road to victory in play: the steps it has taken of those the road asks, and the fact as the world can count it */
+    class VictoryStanding(val road: String, val have: Int, val need: Int, val fact: String)
+
+    /** Every road to victory in play, as [other] stands on it: the one source the near-victory note, the officials' research hold and the renewal hold read */
+    fun victoryStandings(other: Civilization): List<VictoryStanding> {
         val game = other.gameInfo
         val inPlay = game.gameParameters.victoryTypes
+        val standings = ArrayList<VictoryStanding>()
         if ("Scientific" in inPlay) game.ruleset.victories["Scientific"]?.requiredSpaceshipPartsAsCounter?.values?.sum()?.takeIf { it > 0 }?.let { total ->
             val have = other.victoryManager.currentsSpaceshipParts.values.sum()
-            if (have >= total - 1) return "${other.civName} has $have of $total parts of its spaceship" }
+            standings += VictoryStanding("Scientific", have, total, "${other.civName} has $have of $total parts of its spaceship") }
         if ("Diplomatic" in inPlay && other.victoryManager.getUNBuildingAndOwnerNames().second != null) {
             // What the world can count: the city-states allied to it, each a vote for it. A great power's vote is its own to cast (and a power may not vote for itself)
             val allies = game.civilizations.count { it.isCityState && it.isAlive() && it.allyCiv == other }
             val needed = votesNeeded(game)
-            if (allies >= needed - 1) return "${other.civName} holds $allies of the $needed votes needed for a diplomatic victory, in the city-states allied to it"
+            standings += VictoryStanding("Diplomatic", allies, needed, "${other.civName} holds $allies of the $needed votes needed for a diplomatic victory, in the city-states allied to it")
         }
-        if ("Cultural" in inPlay) game.ruleset.victories["Cultural"]?.milestoneObjects?.firstOrNull { it.type == com.unciv.models.ruleset.MilestoneType.CompletePolicyBranches }
-            ?.params?.firstOrNull()?.toIntOrNull()?.let { needed ->
-                if (other.policies.completedBranches.size >= needed) return "${other.civName} has completed the $needed branches of policy a cultural victory asks, and needs only the Utopia Project" }
-        return null
+        if ("Cultural" in inPlay) game.ruleset.victories["Cultural"]?.milestoneObjects?.let { milestones ->
+            milestones.firstOrNull { it.type == com.unciv.models.ruleset.MilestoneType.CompletePolicyBranches }?.params?.firstOrNull()?.toIntOrNull()?.let { needed ->
+                // The last step is the project the victory names: the branches and it are the steps, so a power with every branch complete is a step away
+                val last = milestones.firstOrNull { it.type == com.unciv.models.ruleset.MilestoneType.BuiltBuilding }?.params?.firstOrNull()
+                val done = other.policies.completedBranches.size.coerceAtMost(needed)
+                standings += VictoryStanding("Cultural", done, needed + (if (last == null) 0 else 1),
+                    if (done >= needed && last != null) "${other.civName} has completed the $needed branches of policy a cultural victory asks, and needs only the $last"
+                    else "${other.civName} has completed $done of the $needed branches of policy a cultural victory asks")
+            } }
+        return standings
     }
+
+    /** The near-victory fact: a power a step from victory on any road in play, one threshold for every road */
+    fun nearVictory(other: Civilization): String? = victoryStandings(other).firstOrNull { it.have >= it.need - 1 }?.fact
+
     /** The votes needed to be elected world leader, as VictoryManager reckons them (the original game's own sum on the votes there are) */
     fun votesNeeded(game: GameInfo): Int {
         // Counted as once the United Nations stands: its holder's second vote included

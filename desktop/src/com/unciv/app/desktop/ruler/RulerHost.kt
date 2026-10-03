@@ -2050,6 +2050,8 @@ object RulerHost {
             "ranged" to soldiers.count { it.baseUnit.isRanged() && !it.baseUnit.isProbablySiegeUnit() }, "ourAircraft" to aircraft, "ourWarships" to warships.size,
             "citiesWeHaveSeen" to cities,
             "citiesNeverSeen" to unseen,
+            // The same note the deals carry: a power a step from victory, a fact beside the walls and never a bar (one source, RulerDiplomacy.victoryStandings)
+            "aStepFromVictory" to civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.mapNotNull { diplomacy.nearVictory(it) }.toList().takeIf { it.isNotEmpty() },
             "whoElseWouldFight" to civ.getKnownCivs().filter { it.isMajorCiv() && !civ.isAtWarWith(it) }.associate { target -> target.civName to
                 (civ.gameInfo.civilizations.filter { ally -> ally != target && ally != civ && ally.isAlive() && ((ally.isMajorCiv() && ally.getDiplomacyManager(target)?.diplomaticStatus == com.unciv.logic.civilization.diplomacy.DiplomaticStatus.DefensivePact) || (ally.isCityState && ally.allyCiv == target)) }
                     .map { it.civName + (if (it.isCityState) " (city-state ally)" else " (defensive pact)") }) }.filterValues { it.isNotEmpty() },
