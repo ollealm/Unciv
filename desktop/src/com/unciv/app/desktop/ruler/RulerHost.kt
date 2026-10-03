@@ -321,8 +321,8 @@ object RulerHost {
                 .filter { it.isMajorCiv }.map { mapOf("name" to it.name, "leader" to it.leaderName) }
             "POST /new" -> newGame(json)
             "POST /advance" -> advance(json.getInt("turns", 10), json.getBoolean("wake", false))
-            "GET /briefing" -> briefing(civ(), query["since"]?.toIntOrNull())
-            "GET /options" -> options(civ(), query["audience"] == "1")
+            "GET /briefing" -> pruned(briefing(civ(), query["since"]?.toIntOrNull()))
+            "GET /options" -> pruned(options(civ(), query["audience"] == "1"))
             "GET /log" -> chanceryLog(civ(), query["sinceYear"]?.toIntOrNull()?.let { turnOfYear(it) } ?: since, query["until"]?.toIntOrNull() ?: Int.MAX_VALUE).let { lines ->
                 if (lines.size <= 150) lines else {
                     val shown = lines.takeLast(150)
@@ -429,7 +429,8 @@ object RulerHost {
             "trail" to trail.toMap(),
             "ages" to ages.toMap(),
             "lockedCities" to RulerOverrides.lockedCities.toList(),
-            "focusedCities" to RulerOverrides.focusedCities.toList()
+            "focusedCities" to RulerOverrides.focusedCities.toList(),
+            "inPlay" to inPlaySeen.filterValues { it.isNotEmpty() }.mapValues { it.value.sorted() }
         )))
     }
 
@@ -460,7 +461,7 @@ object RulerHost {
 
     /** Everything the host remembers about a game, forgotten in one place - so a new world starts clean whatever the last one left behind */
     private fun resetHostState() {
-        orders.clear(); publicEvents.clear(); chancery.clear(); spending.clear(); warningsWoken.clear(); losses.clear(); warsDeclared.clear(); notificationsSeen.clear(); shipRaids.clear()
+        orders.clear(); publicEvents.clear(); chancery.clear(); spending.clear(); warningsWoken.clear(); losses.clear(); warsDeclared.clear(); notificationsSeen.clear(); shipRaids.clear(); inPlaySeen.clear()
         units.reset(); diplomacy.reset(); trail.clear(); ages.clear()
         worldAtLastAdvance = null
         RulerOverrides.lockedCities.clear(); RulerOverrides.focusedCities.clear(); RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.faithReserve.clear(); RulerOverrides.noProposals.clear(); RulerOverrides.noGifts.clear(); RulerOverrides.rearming.clear(); RulerOverrides.noWonders.clear()
@@ -510,6 +511,7 @@ object RulerHost {
         host.get("lockedCities")?.asStringArray()?.let { RulerOverrides.lockedCities += it }
         RulerOverrides.focusedCities.clear()
         host.get("focusedCities")?.asStringArray()?.let { RulerOverrides.focusedCities += it }
+        inPlaySeen.clear(); host.get("inPlay")?.forEach { civ -> inPlaySeen[civ.name] = civ.asStringArray().toHashSet() } // older files have none: latched afresh
         registerRuledCivs()
         println("Loaded game at turn ${loaded.turns}, ruled: ${orders.keys}")
     }
@@ -1160,6 +1162,7 @@ object RulerHost {
         val notifications = onFile.filter { it !in seen } // an identity set: two notices with the same words on different turns are both news
         notificationsSeen[civ.civName] = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<com.unciv.logic.civilization.Notification, Boolean>()).apply { addAll(onFile) }
         diplomacy.sweepLost(civ)
+        latchSections(civ)
         // An alliance won and lost again within the turn (a tie in influence flipping back and forth) is churn, not news
         val flipped = notifications.filter { "We have allied with [" in it.text }.map { it.text.substringAfter("allied with [").substringBefore("]") }
             .filter { ally -> notifications.any { "lost our alliance" in it.text && "[$ally]" in it.text } }.toSet()
@@ -1465,20 +1468,22 @@ object RulerHost {
             "note" to "the officials' gifts and purchases are spent from the treasury, not from these figures")
     }
 
+    /** The wonder that brings the world's vote, if this world's rules have one */
+    private fun unitedNations(game: com.unciv.logic.GameInfo) =
+        game.ruleset.buildings.values.firstOrNull { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.OneTimeTriggerVoting, com.unciv.models.ruleset.unique.GameContext.IgnoreConditionals) }
+    /** Us and every great power we know: whose facts the victory sections weigh */
+    private fun powersWeKnow(civ: Civilization) = listOf(civ) + civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }
+
     private fun diplomaticFacts(civ: Civilization): Map<String, Any?>? {
         val game = civ.gameInfo
-        if ("Diplomatic" !in game.gameParameters.victoryTypes) return null
-        val un = game.ruleset.buildings.values.firstOrNull { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.OneTimeTriggerVoting, com.unciv.models.ruleset.unique.GameContext.IgnoreConditionals) } ?: return null
+        val un = unitedNations(game) ?: return null
         val holder = civ.victoryManager.getUNBuildingAndOwnerNames().second?.let { game.getCivilization(it) }
         val voters = game.civilizations.filter { !it.isBarbarian && !it.isSpectator() && !it.isDefeated() }
         val total = voters.size + 1
         // VictoryManager.votesNeededForDiplomaticVictory, the original game's own sum: counted on the votes there are once the United Nations stands
         val needed = diplomacy.votesNeeded(game)
         val every = civ.getTurnsBetweenDiplomaticVotes()
-        val powers = (listOf(civ) + civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }).toList()
-        // One line until the United Nations is within anyone's reach: the votes are nothing to weigh before a power we know can build it (compaction 2026-10-03)
-        if (holder == null && un.requiredTech != null && powers.none { it.tech.isResearched(un.requiredTech!!) })
-            return mapOf("unitedNations" to "not yet within anyone's reach: ${un.name} needs ${un.requiredTech}, which no power we know has learned; nobody votes until it stands")
+        val powers = powersWeKnow(civ)
         return mapOf(
             "unitedNations" to if (holder != null) "built by ${if (holder == civ) "us" else holder.civName}: the world votes for a leader every $every turns" + (civ.getTurnsTillNextDiplomaticVote()?.let { if (it == 0) "; the world votes this turn" else "; the next vote in $it turn${plural(it)}" } ?: "") +
                     // City-states cast for their ally as the vote's turn is played, after every great power has moved (NextTurnAutomation): what moves one must be done before
@@ -1510,13 +1515,21 @@ object RulerHost {
         val game = civ.gameInfo
         if ("Cultural" !in game.gameParameters.victoryTypes) return null
         val milestones = game.ruleset.victories["Cultural"]?.milestoneObjects ?: return null
-        val needed = milestones.firstOrNull { it.type == com.unciv.models.ruleset.MilestoneType.CompletePolicyBranches }?.params?.firstOrNull()?.toIntOrNull()
-        val last = milestones.firstOrNull { it.type == com.unciv.models.ruleset.MilestoneType.BuiltBuilding }?.params?.firstOrNull()?.let { game.ruleset.buildings[it] }
         return mapOf(
             // Our branches policy by policy are in the policies list; the branch nearest done and every power's count are what was used (compaction 2026-10-03)
             "ourNearestBranch" to ourBranches(civ).filter { it.second < it.third }.minByOrNull { it.third - it.second }?.let { (branch, done, total) -> "${branch.name}: ${total - done} more ${if (total - done == 1) "policy" else "policies"} complete it" },
-            "branchesCompleted" to (listOf(civ) + civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }).associate { (if (it == civ) "us" else it.civName) to it.policies.completedBranches.size },
-            "lastStep" to last?.takeIf { (listOf(civ) + civ.getKnownCivs().filter { k -> k.isMajorCiv() && k.isAlive() }).any { k -> k.policies.completedBranches.size >= (needed ?: 5) - 1 } }?.let { "${it.name}: a national wonder of ${it.getProductionCost(civ, null)} production that only a power with ${needed ?: "the"} branches complete may build${if (it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CannotBeHurried)) "; it cannot be hurried" else ""}. The power that finishes it wins" })
+            "branchesCompleted" to powersWeKnow(civ).associate { (if (it == civ) "us" else it.civName) to it.policies.completedBranches.size },
+            "lastStep" to told(civ, "victory.cultural.lastStep"))
+    }
+
+    /** The Cultural victory's last step - the project, and who may build it - and the branches of policy it asks */
+    private fun culturalLastStep(civ: Civilization): com.unciv.models.ruleset.Building? =
+        civ.gameInfo.ruleset.victories["Cultural"]?.milestoneObjects?.firstOrNull { it.type == com.unciv.models.ruleset.MilestoneType.BuiltBuilding }?.params?.firstOrNull()?.let { civ.gameInfo.ruleset.buildings[it] }
+    private fun culturalBranchesNeeded(civ: Civilization): Int? =
+        civ.gameInfo.ruleset.victories["Cultural"]?.milestoneObjects?.firstOrNull { it.type == com.unciv.models.ruleset.MilestoneType.CompletePolicyBranches }?.params?.firstOrNull()?.toIntOrNull()
+    private fun lastStepText(civ: Civilization): String? {
+        val needed = culturalBranchesNeeded(civ)
+        return culturalLastStep(civ)?.let { "${it.name}: a national wonder of ${it.getProductionCost(civ, null)} production that only a power with ${needed ?: "the"} branches complete may build${if (it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CannotBeHurried)) "; it cannot be hurried" else ""}. The power that finishes it wins" }
     }
 
     /** Each branch of policy we have opened: (branch, policies of it adopted, policies in it), the opening one counted */
@@ -1900,35 +1913,19 @@ object RulerHost {
                 arrayOf("warnings" to shown, "warningsAcknowledged" to acknowledged.map { firstClause(it) }.ifEmpty { null }) },
             // waysToWin names the victories; the note that told them again was never cited in a league (compaction 2026-10-03)
             "victory" to civ.gameInfo.civilizations.firstOrNull { it.victoryManager.hasWon() }.let { winner -> mapOf("winner" to winner?.civName, "victoryType" to winner?.victoryManager?.getVictoryTypeAchieved(),
-                "diplomatic" to diplomaticFacts(civ), "cultural" to culturalFacts(civ)) },
+                "diplomatic" to told(civ, "victory.diplomatic"), "cultural" to culturalFacts(civ)) },
             "researching" to civ.tech.currentTechnologyName(),
             "researchQueue" to civ.tech.techsToResearch,
             "techsResearched" to civ.tech.techsResearched.size,
             "techsKnown" to civ.tech.techsResearched.sorted().joinToString(", "),
-            "spaceship" to civ.gameInfo.ruleset.victories["Scientific"]?.let { victory -> victory.requiredSpaceshipPartsAsCounter.takeIf { it.isNotEmpty() && "Scientific" in civ.gameInfo.gameParameters.victoryTypes }?.let { needed ->
-                // One line until the Apollo Program stands anywhere we can see: the parts and the rivals' ships are nothing to weigh before then
-                val apolloAnywhere = (listOf(civ) + civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }).any { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts) }
-                if (!apolloAnywhere) return@let "No power we know has raised the Apollo Program, without which no spaceship part is built${civ.gameInfo.ruleset.buildings["Apollo Program"]?.requiredTech?.let { " (it needs $it${if (civ.tech.isResearched(it)) ", which we know" else ""})" } ?: ""}."
-                val have = civ.victoryManager.currentsSpaceshipParts
-                mapOf("parts" to needed.keys.associateWith { "${have[it]} of ${needed[it]}${civ.gameInfo.ruleset.units[it]?.requiredTech?.takeUnless { tech -> civ.tech.isResearched(tech) }?.let { tech -> " (needs $tech)" } ?: ""}" },
-                    "others" to civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.mapNotNull { other ->
-                        val parts = other.victoryManager.currentsSpaceshipParts
-                        val built = parts.values.sum()
-                        val apollo = other.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts)
-                        // What is still to come, and the learning each missing part waits on: the timing a rival can judge (facts, no reckoning of turns)
-                        val missing = needed.entries.filter { parts[it.key] < it.value }.joinToString { (part, count) -> (if (count - parts[part] > 1) "${count - parts[part]} $part" else part) +
-                            (civ.gameInfo.ruleset.units[part]?.requiredTech?.let { tech -> ", which ${if (count - parts[part] > 1) "need" else "needs"} $tech (${if (other.tech.isResearched(tech)) "known to them" else "not yet known to them"})" } ?: "") }
-                        if (built == 0 && !apollo) null else "${other.civName}: ${if (apollo) "the Apollo Program stands, " else ""}$built of ${needed.values.sum()} parts" + (if (missing.isNotEmpty()) "; missing $missing" else "") }.toList(),
-                    "apollo" to civ.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts),
-                    "note" to "Parts are units: queue them by name in any city once the Apollo Program stands${civ.gameInfo.ruleset.buildings["Apollo Program"]?.requiredTech?.takeUnless { civ.tech.isResearched(it) }?.let { " (a wonder that needs $it)" } ?: ""} and the techs are known (each needs Aluminum while it is built and on its way - the Aluminum is freed once the part is added to the ship); a finished part walks to the capital and is added to the ship by the officials. They CANNOT be bought with gold - saving gold for them is wasted. The ship launches, and the game is won, when every part is added.") } },
+            "spaceship" to told(civ, "spaceship"),
             "policies" to civ.policies.getAdoptedPolicies().toList(),
             "culture" to mapOf("stored" to civ.policies.storedCulture, "neededForNextPolicy" to civ.policies.getCultureNeededForNextPolicy(),
                 "turnsToNextPolicy" to next.culture.toInt().let { perTurn -> val short = civ.policies.getCultureNeededForNextPolicy() - civ.policies.storedCulture
                     if (short <= 0) "now" else if (perTurn <= 0) "never, at no culture a turn" else "about ${(short + perTurn - 1) / perTurn} at $perTurn culture a turn" },
                 "costOfEachCity" to "each non-puppet city beyond the first adds ${policyCostPerCity(civ)} to policy costs"),
             "militaryStrength" to civ.getStatForRanking(RankingType.Force),
-            "warEstimate" to (if (civ.isAtWar() || orders[civ.civName]?.warAim != null) warEstimate(civ)
-                else mapOf("note" to "At peace: the chancery's reckoning of every rival city against our engines is in get_options.warEstimate - read it before any talk of war.")),
+            "warEstimate" to told(civ, "warEstimate"),
             // Workers left to the officials are one count, not a line each: they are seldom ordered, and the lines cost every look-in
             "units" to civ.units.getCivUnits().toList().partition { it.isCivilian() && it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.BuildImprovements) && units.leftToOfficials(it) }.let { (workers, rest) ->
                 rest.map { units.describeUnit(civ, it) } + listOfNotNull(workers.size.takeIf { it > 0 }?.let { "$it worker${plural(it)} at work, automated" }) },
@@ -1958,7 +1955,7 @@ object RulerHost {
             },
             "threats" to threats(civ),
             "strategicResources" to strategicResources(civ),
-            "religion" to religion(civ),
+            "religion" to told(civ, "religion"),
             "knownCivs" to diplomacy.relations(civ),
             "log" to condensed(chanceryLog(civ, logSince ?: (turn - 12)).map { "T${it["turn"]}: ${it["text"]}" }),
             "peaceOffers" to diplomacy.peaceOffers(civ),
@@ -1968,6 +1965,99 @@ object RulerHost {
             "standingOrders" to orders[civ.civName]?.toMap(civ)
         )
     }
+
+    /** The spaceship parts this world's Scientific victory asks, when that victory is in play */
+    private fun spaceshipNeeded(civ: Civilization) = civ.gameInfo.ruleset.victories["Scientific"]?.requiredSpaceshipPartsAsCounter
+        ?.takeIf { it.isNotEmpty() && "Scientific" in civ.gameInfo.gameParameters.victoryTypes }
+
+    /** The spaceship before the Apollo Program stands anywhere we can see: one line, the gold guard in it */
+    private fun spaceshipLine(civ: Civilization): String =
+        "No power we know has raised the Apollo Program, without which no spaceship part is built${civ.gameInfo.ruleset.buildings["Apollo Program"]?.requiredTech?.let { " (it needs $it${if (civ.tech.isResearched(it)) ", which we know" else ""})" } ?: ""}. Parts cannot be bought with gold."
+
+    private fun spaceshipFacts(civ: Civilization): Map<String, Any?> {
+        val needed = spaceshipNeeded(civ)!!
+        val have = civ.victoryManager.currentsSpaceshipParts
+        return mapOf("parts" to needed.keys.associateWith { "${have[it]} of ${needed[it]}${civ.gameInfo.ruleset.units[it]?.requiredTech?.takeUnless { tech -> civ.tech.isResearched(tech) }?.let { tech -> " (needs $tech)" } ?: ""}" },
+            "others" to civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.mapNotNull { other ->
+                val parts = other.victoryManager.currentsSpaceshipParts
+                val built = parts.values.sum()
+                val apollo = other.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts)
+                // What is still to come, and the learning each missing part waits on: the timing a rival can judge (facts, no reckoning of turns)
+                val missing = needed.entries.filter { parts[it.key] < it.value }.joinToString { (part, count) -> (if (count - parts[part] > 1) "${count - parts[part]} $part" else part) +
+                    (civ.gameInfo.ruleset.units[part]?.requiredTech?.let { tech -> ", which ${if (count - parts[part] > 1) "need" else "needs"} $tech (${if (other.tech.isResearched(tech)) "known to them" else "not yet known to them"})" } ?: "") }
+                if (built == 0 && !apollo) null else "${other.civName}: ${if (apollo) "the Apollo Program stands, " else ""}$built of ${needed.values.sum()} parts" + (if (missing.isNotEmpty()) "; missing $missing" else "") }.toList(),
+            "apollo" to civ.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts),
+            "note" to "Parts are units: queue them by name in any city once the Apollo Program stands${civ.gameInfo.ruleset.buildings["Apollo Program"]?.requiredTech?.takeUnless { civ.tech.isResearched(it) }?.let { " (a wonder that needs $it)" } ?: ""} and the techs are known (each needs Aluminum while it is built and on its way - the Aluminum is freed once the part is added to the ship); a finished part walks to the capital and is added to the ship by the officials. They CANNOT be bought with gold - saving gold for them is wasted. The ship launches, and the game is won, when every part is added.")
+    }
+
+    /** Lists whose emptiness is itself the news - no warnings, nothing on the desk, an empty queue - kept when empty wherever they stand */
+    private val KEEP_EMPTY = setOf("warnings", "units", "cities", "log", "peaceOffers", "tradeOffers", "demands", "threats", "citySites", "knownCivs",
+        "strategicResources", "policies", "researchQueue", "buildQueue", "canDeclareWarOn", "researchableNow")
+
+    /** A reply without what says nothing: keys whose value is null, false, or an empty list or map (but [KEEP_EMPTY]), at every depth - 4-13% of a
+     *  briefing was such keys (shape audit, 2026-10-04). Absence reads as none, no or not yet */
+    private fun pruned(value: Any?): Any? = when (value) {
+        is Map<*, *> -> LinkedHashMap<Any?, Any?>().also { kept ->
+            for ((key, item) in value) {
+                val p = pruned(item)
+                val empty = (p is Collection<*> && p.isEmpty()) || (p is Map<*, *> && p.isEmpty())
+                if (p == null || p == false || (empty && key !in KEEP_EMPTY)) continue
+                kept[key] = p
+            } }
+        is Iterable<*> -> value.map { pruned(it) }
+        is Sequence<*> -> value.map { pruned(it) }.toList()
+        else -> value
+    }
+
+    /** A part of the briefing told in full once it matters to the realm, and as one line before - the line keeps the section's guard, so the fold never
+     *  loses it. [inPlay] reads only facts the realm itself knows. A [latch]ed section stays in full once it has mattered: the game's facts can fall back
+     *  (a prophet's birth takes the faith that opened religion) while what the court has weighed stays before it. [exists] false leaves the key out */
+    private class Section(val name: String, val latch: Boolean, val exists: (Civilization) -> Boolean, val inPlay: (Civilization) -> Boolean,
+                          val oneLine: (Civilization) -> Any?, val full: (Civilization) -> Any?)
+
+    private val sections: List<Section> by lazy { listOf(
+        Section("religion", latch = true, exists = { true },
+            inPlay = { it.religionManager.religion?.isMajorReligion() == true || it.religionManager.storedFaith >= 100 }, oneLine = ::religionLine, full = ::religionFull),
+        // The votes are nothing to weigh before a power we know can build the United Nations (compaction 2026-10-03)
+        Section("victory.diplomatic", latch = true, exists = { "Diplomatic" in it.gameInfo.gameParameters.victoryTypes && unitedNations(it.gameInfo) != null },
+            inPlay = { civ -> val un = unitedNations(civ.gameInfo)!!
+                civ.victoryManager.getUNBuildingAndOwnerNames().second != null || un.requiredTech == null || powersWeKnow(civ).any { it.tech.isResearched(un.requiredTech!!) } },
+            oneLine = { civ -> val un = unitedNations(civ.gameInfo)!!
+                mapOf("unitedNations" to "not yet within anyone's reach: ${un.name} needs ${un.requiredTech}, which no power we know has learned; nobody votes until it stands") },
+            full = ::diplomaticFacts),
+        // The last step once a power we know is a branch short of it
+        Section("victory.cultural.lastStep", latch = true, exists = { culturalLastStep(it) != null },
+            inPlay = { civ -> powersWeKnow(civ).any { it.policies.completedBranches.size >= (culturalBranchesNeeded(civ) ?: 5) - 1 } }, oneLine = { null }, full = ::lastStepText),
+        // The parts and the rivals' ships are nothing to weigh before the Apollo Program stands anywhere we can see
+        Section("spaceship", latch = true, exists = { spaceshipNeeded(it) != null },
+            inPlay = { civ -> powersWeKnow(civ).any { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts) } },
+            oneLine = ::spaceshipLine, full = ::spaceshipFacts),
+        // At peace the reckoning is in get_options; it is not latched, a war ends
+        Section("warEstimate", latch = false, exists = { true }, inPlay = { it.isAtWar() || orders[it.civName]?.warAim != null },
+            oneLine = { mapOf("note" to "At peace: the chancery's reckoning of every rival city against our engines is in get_options.warEstimate - read it before any talk of war.") },
+            full = ::warEstimate)
+    ) }
+
+    /** The latched sections that have mattered to each realm, by name: kept in host.json */
+    private val inPlaySeen = HashMap<String, MutableSet<String>>()
+
+    /** Is [section] in play for [civ] now - or, latched, has it ever been - marking it so */
+    private fun inPlay(civ: Civilization, section: Section): Boolean {
+        val seen = inPlaySeen.getOrPut(civ.civName) { HashSet() }
+        val on = (section.latch && section.name in seen) || section.inPlay(civ)
+        if (on && section.latch) seen += section.name
+        return on
+    }
+
+    /** A section as [civ] reads it now: absent, one line, or in full */
+    private fun told(civ: Civilization, name: String): Any? {
+        val section = sections.first { it.name == name }
+        if (!section.exists(civ)) return null
+        return if (inPlay(civ, section)) section.full(civ) else section.oneLine(civ)
+    }
+
+    /** At each turn's end: what came into play between look-ins is latched then (faith that reached 100 and was spent on a prophet before the court looked) */
+    private fun latchSections(civ: Civilization) { for (section in sections) if (section.latch && section.exists(civ)) inPlay(civ, section) }
 
     /** A soldier who would not hold a wall in this age: far behind our best arms, a scout, or a siege piece (which cannot defend itself) */
     private fun poorDefender(unit: com.unciv.logic.map.mapunit.MapUnit): Boolean =
@@ -1995,6 +2085,11 @@ object RulerHost {
         val cities = civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.flatMap { other -> other.cities.filter { it.getCenterTile().isExplored(civ) } }
             .map { city ->
                 val defence = com.unciv.logic.battle.CityCombatant(city).getCityStrength()
+                val acrossWater = city.getCenterTile().getContinent() !in ourLands
+                // Without a siege engine no wall breaks, and every city's reckoning said only that (10 KB of options for an engineless court): the city as we saw it
+                if (bestEngine == null) return@map mapOf("city" to city.name, "of" to city.civ.civName, "ourRelation" to relationTo(civ, city.civ), "defence" to defence, "health" to city.health,
+                    "walls" to city.cityConstructions.builtBuildings.any { "Walls" in it || "Castle" in it }, "garrison" to city.getCenterTile().militaryUnit?.name,
+                    "tilesFromOurNearestCity" to civ.cities.minOfOrNull { it.getCenterTile().aerialDistanceTo(city.getCenterTile()) }, "acrossTheSea" to acrossWater.takeIf { it })
                 // The combat sum runs away against walls near zero (150169392 for a city at 1 health): a volley takes at most what the walls can hold,
                 // and what it takes from them now at most what is left of them
                 val fullVolley = (bestEngine?.let { volley(it, city) } ?: 0).coerceIn(0, com.unciv.logic.battle.CityCombatant(city).getMaxHealth())
@@ -2031,7 +2126,7 @@ object RulerHost {
                     else -> "${approaches.size} land approaches, $heldApproaches held"
                 }
                 // A city on a landmass none of ours stands on: the sums below count soldiers who must first cross the water, and the straight line is no road
-                val acrossTheSea = if (city.getCenterTile().getContinent() in ourLands) null
+                val acrossTheSea = if (!acrossWater) null
                     else "across the sea from every city of ours: " + (if (!civ.tech.unitsCanEmbark) "our soldiers cannot yet embark, so none can reach it"
                         else "our soldiers embark and cross on their own, and at sea an embarked soldier cannot attack and defends poorly") +
                         "; " + (if (warships.isEmpty()) "we have no warships to escort them" else "we have ${warships.size} warship${plural(warships.size)} (${warships.groupingBy { it.name }.eachCount().entries.joinToString { "${it.value} ${it.key}" }}) to escort them") +
@@ -2067,12 +2162,13 @@ object RulerHost {
                     "defendersWithin3Tiles" to if (near.isEmpty()) null else defenders.size, "defendersStrength" to if (near.isEmpty()) null else defendersStrength, "antiAirWithin3Tiles" to if (near.isEmpty()) null else antiAir,
                     "cityShotAtOurBestFootSoldierTakes" to hitOnFoot, "approaches" to gate, "verdict" to verdict)
             // Enemies first, then the rest: an ally's capital once headed an at-war briefing as the softest walls (audit 2026-10-03)
-            }.sortedWith(compareBy({ it["ourRelation"] != "at war" }, { it["volleysToBreak"] as Int? ?: 999 }))
+            }.sortedWith(compareBy({ it["ourRelation"] != "at war" }, { it["volleysToBreak"] as Int? ?: 999 }, { it["tilesFromOurNearestCity"] as Int? ?: 999 }))
         val unseen = civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.associate { other -> other.civName to other.cities.count { !it.getCenterTile().isExplored(civ) } }.filterValues { it > 0 }
         return mapOf(
             "ourBestEngine" to bestEngine?.name, "ourBestFootSoldier" to bestFoot?.name, "siegeEngines" to siege.size, "footSoldiers" to (melee.size - inGarrison), "footSoldiersHoldingOurCities" to inGarrison.takeIf { it > 0 },
             "ranged" to soldiers.count { it.baseUnit.isRanged() && !it.baseUnit.isProbablySiegeUnit() }, "ourAircraft" to aircraft, "ourWarships" to warships.size,
             "citiesWeHaveSeen" to cities,
+            "withoutEngines" to (if (bestEngine == null) "We have no siege engines: no city's walls can be broken until we do, so each city is given as we last saw it - an engine of ours brings the full reckoning of each" else null),
             "citiesNeverSeen" to unseen,
             // The same note the deals carry: a power a step from victory, a fact beside the walls and never a bar (one source, RulerDiplomacy.victoryStandings)
             "aStepFromVictory" to civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.mapNotNull { diplomacy.nearVictory(it) }.toList().takeIf { it.isNotEmpty() },
@@ -2222,18 +2318,23 @@ object RulerHost {
         it.replace(Regex("\\[([^\\]]*)\\]"), "$1").replace(Regex("\\s*<([^>]*)>"), " ($1)") }
 
     /** Faith and religion, facts only: the officials run it (the Faith weight tilts them) unless a Great Prophet or Missionary is ordered to act */
-    private fun religion(civ: Civilization): Any {
+    /** Religion before a religion of ours or 100 faith in store: one line, the officials' spending of faith said in it. The full block was a fifth of the
+     *  briefing and cited by the realms with a religion (compaction 2026-10-03: 82 of 86 cites kept) */
+    private fun religionLine(civ: Civilization): String {
+        val manager = civ.religionManager
+        val pantheon = manager.religion?.getBeliefs(com.unciv.models.ruleset.BeliefType.Pantheon)?.toList().orEmpty()
+        return "faith ${manager.storedFaith} stored (+${civ.stats.statsForNextTurn.faith.toInt()} a turn); pantheon: " + (pantheon.joinToString { it.name }.ifEmpty { null }
+            ?: if (manager.canFoundOrExpandPantheon()) "none yet, and the faith for one is ours" else "none yet - ${manager.faithForPantheon()} faith founds one") +
+            ". The officials spend faith on their own above your faithReserve, each purchase told in the log"
+    }
+
+    private fun religionFull(civ: Civilization): Any {
         val manager = civ.religionManager
         val ours = manager.religion
         val pantheon = ours?.getBeliefs(com.unciv.models.ruleset.BeliefType.Pantheon)?.toList().orEmpty()
         val founded = ours?.takeIf { it.isMajorReligion() }
         fun named(religion: com.unciv.models.Religion) = if (religion == ours) (if (religion.isMajorReligion()) "our ${religion.getReligionDisplayName()}" else "our pantheon")
             else "${religion.getReligionDisplayName()} (${religion.foundingCiv.civName}'s)"
-        // Before a religion of ours and with little faith in store, one line: the full block was a fifth of the briefing and cited by the realms with a religion
-        // (compaction 2026-10-03: 82 of 86 cites kept)
-        if (founded == null && manager.storedFaith < 100)
-            return "faith ${manager.storedFaith} stored (+${civ.stats.statsForNextTurn.faith.toInt()} a turn); pantheon: " + (pantheon.joinToString { it.name }.ifEmpty { null }
-                ?: if (manager.canFoundOrExpandPantheon()) "none yet, and the faith for one is ours" else "none yet - ${manager.faithForPantheon()} faith founds one")
         // Cities that follow our faith or are drifting are named; the rest counted
         var quiet = 0
         val cities = civ.cities.mapNotNull { city ->
