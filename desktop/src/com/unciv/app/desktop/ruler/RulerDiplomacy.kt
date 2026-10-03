@@ -28,6 +28,9 @@ private const val PEACE_OFFER_WAITS = 8
 private const val HOLD_OFF = 10
 /** What proposeTrade says when the same offer of theirs waited on our desk and was accepted instead */
 private const val TAKEN_THEIRS = "their offer was taken"
+/** The war leave, said once: the host refuses every way of declaring war (the order, a deal that has us declare it, a refused demand not to attack, the generals'
+ *  DeclareWar weight) without it - a sovereign has it, an advisor only by the ruler's plain word (record_rulers_will) or at an audience */
+const val WAR_LEAVE = "war is the ruler's alone to declare, and they have not given leave to declare it on your own - bring the case for war to the ruler"
 /** A friendship is no trade, but it is offered, answered and renewed beside them under this name */
 private const val FRIENDSHIP = "Declaration of Friendship"
 /** A treaty's duration in a brief: it ticks down, so terms are compared without it */
@@ -248,7 +251,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
     private fun sameSwap(a: Trade, b: Trade) = goodsOf(a.ourOffers) == goodsOf(b.ourOffers) && goodsOf(a.theirOffers) == goodsOf(b.theirOffers)
 
     /** {with, give: [offers], want: [offers]}; an offer is {item, amount?} - see options.diplomacy for what can be traded */
-    fun proposeTrade(civ: Civilization, json: JsonValue): String {
+    fun proposeTrade(civ: Civilization, json: JsonValue, leave: Boolean = true): String {
         val other = civ.known(json.getString("with"))
         val game = civ.gameInfo
         if (other.isCityState) throw IllegalArgumentException("City-states do not trade; send them a gift instead")
@@ -274,6 +277,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
         if (listOf("give", "want").any { side -> json.get(side)?.any { it.getString("item").equals(Constants.defensivePact, ignoreCase = true) } == true })
             defensivePactLacks(civ, other)?.takeIf { inForce(civ, other, Constants.defensivePact) == null }?.let { throw IllegalArgumentException("A defensive pact with ${other.civName} cannot be made: $it") }
         add(json.get("give"), logic.ourAvailableOffers, trade.ourOffers, "We", civ)
+        if (!leave) trade.ourOffers.firstOrNull { it.type == TradeOfferType.WarDeclaration }?.let { throw IllegalArgumentException("A deal in which we give ${it.brief(game)} is a declaration of war, and $WAR_LEAVE. Asking them for one stays open") }
         add(json.get("want"), logic.theirAvailableOffers, trade.theirOffers, other.civName, other)
         if (trade.ourOffers.isEmpty() && trade.theirOffers.isEmpty()) throw IllegalArgumentException("An empty trade")
         if (!TradeEvaluation().isTradeValid(trade, civ, other)) throw IllegalArgumentException("That trade is not valid right now")
@@ -723,7 +727,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
      *  The ruler's answer to a deal on the desk: accept it as offered, or refuse it (a counter is a refusal followed by a proposal of our own).
      *  [terms] names which offer, as the briefing lists it, when one power has laid several.
      */
-    fun answerOffer(civ: Civilization, name: String, answer: String, terms: String? = null): String {
+    fun answerOffer(civ: Civilization, name: String, answer: String, terms: String? = null, leave: Boolean = false): String {
         val other = civ.known(name)
         val game = civ.gameInfo
         val waiting = civ.tradeRequests.filter { it.requestingCiv == other.civID && !isPeace(it) }
@@ -752,9 +756,9 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
         val key = "${civ.civName}<${other.civName}: $summary"
         return when (answer.lowercase().trim()) {
             "accept" -> {
-                // War is declared by the declareWar order alone, where the ruler's leave is checked; a deal that has us declare it would go round that
-                request.trade.ourOffers.firstOrNull { it.type == TradeOfferType.WarDeclaration }?.let {
-                    throw IllegalArgumentException("${other.civName}'s offer ($summary) would have us declare war on ${it.brief(game).substringAfter("war on ")}: war is declared only by the declareWar order, never by accepting a deal. Refuse this offer; if you mean to fight, declare the war yourself.") }
+                // A deal that has us declare war is a declaration by other means: it takes the same leave as the declareWar order, and with it may be accepted
+                if (!leave) request.trade.ourOffers.firstOrNull { it.type == TradeOfferType.WarDeclaration }?.let {
+                    throw IllegalArgumentException("${other.civName}'s offer ($summary) would have us declare war on ${it.brief(game).substringAfter("war on ")}: accepting it is a declaration of war, and $WAR_LEAVE") }
                 // Checked before anything is touched: an offer that cannot be honoured stays on the desk, to be refused or to lapse
                 if (!TradeEvaluation().isTradeValid(request.trade, civ, other)) {
                     val logic = TradeLogic(civ, other)
@@ -837,13 +841,16 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
 
     /** The ruler's answer to a power's demand(s): agree binds the promise; refuse is resented - and refusing "do not attack us" declares war on them.
      *  Returns what to tell, and the power we are now at war with when the refusal was a declaration */
-    fun answerDemand(civ: Civilization, name: String, answer: String): Pair<String, Civilization?> {
+    fun answerDemand(civ: Civilization, name: String, answer: String, leave: Boolean = true): Pair<String, Civilization?> {
         val from = civ.known(name)
         val waiting = demandsOnDesk(civ).filter { it.second == from }
         if (waiting.isEmpty()) throw IllegalArgumentException("No demand from $name is waiting")
         val agree = when (answer.lowercase().trim()) { "agree", "accept" -> true; "refuse" -> false; else -> throw IllegalArgumentException("answer must be agree or refuse") }
         val manager = civ.getDiplomacyManager(from)!!
         val wasAtWar = civ.isAtWarWith(from)
+        // Refusing a demand not to attack them is a declaration of war in the game's rules: the same leave as declareWar
+        if (!agree && !leave && !wasAtWar && waiting.any { it.first == Demand.DoNotAttackUs })
+            throw IllegalArgumentException("Refusing ${from.civName}'s demand not to attack them is a declaration of war, and $WAR_LEAVE. Agree, let it lapse (it lapses as agreed), or bring it to the ruler")
         val told = waiting.map { (demand, _) ->
             civ.popupAlerts.removeAll { it.type == demand.demandAlert && it.value == from.civID }
             demandOfferedOn.remove("${civ.civName}<${from.civName}: ${demand.name}")
@@ -1100,7 +1107,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
         .filter { it.value > 0 && civ.gameInfo.ruleset.tileResources[it.key]?.resourceType?.name == "Luxury" }
 
     /** What could be traded with each major civ, for the options */
-    fun tradeOptions(civ: Civilization): Map<String, Any?> {
+    fun tradeOptions(civ: Civilization, leave: Boolean = true): Map<String, Any?> {
         val resources = civ.getCivResourcesByName()
         return mapOf(
             "ourLuxuries" to luxuries(civ),
@@ -1109,7 +1116,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
             "with" to civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() && !civ.isAtWarWith(it) }.map { other ->
                 val logic = TradeLogic(civ, other)
                 mapOf("civ" to other.civName,
-                    "weCanOffer" to logic.ourAvailableOffers.filter { it.type !in hiddenOffers && it.amount > 0 }.map { it.word(civ.gameInfo) + if (it.amount > 1) " x${it.amount}" else "" },
+                    "weCanOffer" to logic.ourAvailableOffers.filter { it.type !in hiddenOffers && it.amount > 0 && (leave || it.type != TradeOfferType.WarDeclaration) }.map { it.word(civ.gameInfo) + if (it.amount > 1) " x${it.amount}" else "" },
                     "theyCanOffer" to logic.theirAvailableOffers.filter { it.type !in hiddenOffers && it.amount > 0 }.map { it.word(civ.gameInfo) + if (it.amount > 1) " x${it.amount}" else "" })
             }.toList(),
             "cityStates" to civ.getKnownCivs().filter { it.isCityState && it.isAlive() }.map { state ->

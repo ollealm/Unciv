@@ -68,6 +68,8 @@ object RulerHost {
         var goldReserve: Int? = null
         /** Faith the officials leave untouched; the ruler's own purchases with faith are not bound by it */
         var faithReserve: Int? = null
+        /** The war leave: a sovereign's, or an advisor's by the ruler's plain word. Every way of declaring war checks it here (audit 2026-10-04: it lived in the orchestrator, which parsed the host's words to guard it) */
+        var mayDeclareWar = false
         /** The officials may not give gold to city-states on their own */
         var noGifts = false
         /** When the officials re-arm units with gold on their own: always, war (only while at war with a major power), never */
@@ -85,6 +87,7 @@ object RulerHost {
         fun toMap(civ: Civilization? = null) = (if (civ == null) mapOf("acknowledged" to acknowledged) else emptyMap()) + mapOf(
             "goldReserve" to goldReserve,
             "faithReserve" to faithReserve,
+            "mayDeclareWar" to mayDeclareWar,
             "noGifts" to noGifts,
             "officialsRearm" to officialsRearm,
             "garrisonEveryCity" to garrisonEveryCity,
@@ -301,7 +304,7 @@ object RulerHost {
             "POST /new" -> newGame(json)
             "POST /advance" -> advance(json.getInt("turns", 10), json.getBoolean("wake", false))
             "GET /briefing" -> briefing(civ(), query["since"]?.toIntOrNull())
-            "GET /options" -> options(civ())
+            "GET /options" -> options(civ(), query["audience"] == "1")
             "GET /log" -> chanceryLog(civ(), query["sinceYear"]?.toIntOrNull()?.let { turnOfYear(it) } ?: since, query["until"]?.toIntOrNull() ?: Int.MAX_VALUE).let { lines ->
                 if (lines.size <= 150) lines else {
                     val shown = lines.takeLast(150)
@@ -531,6 +534,7 @@ object RulerHost {
         }
         json.get("goldReserve")?.let { goldReserve = if (it.isNull) null else it.asInt().coerceAtLeast(0) }
         json.get("faithReserve")?.let { faithReserve = if (it.isNull) null else it.asInt().coerceAtLeast(0) }
+        json.get("mayDeclareWar")?.takeUnless { it.isNull }?.let { mayDeclareWar = it.asBoolean() }
         json.get("noGifts")?.let { noGifts = it.asBoolean() }
         json.get("officialsRearm")?.takeUnless { it.isNull }?.asString()?.trim()?.lowercase()?.let { mode ->
             if (mode !in listOf("always", "war", "never")) throw ApiError(400, "officialsRearm takes always, war or never; not '$mode'")
@@ -665,7 +669,7 @@ object RulerHost {
     }
 
     /** Every field an order may carry: an order with none of them is no order (a model that wrapped its fields in "arguments" sent nothing) */
-    private val ORDER_FIELDS = listOf("personality", "research", "policyBranches", "neverBuild", "neverPropose", "goldReserve", "faithReserve", "noGifts", "officialsRearm", "garrisonEveryCity", "posture",
+    private val ORDER_FIELDS = listOf("personality", "research", "policyBranches", "neverBuild", "neverPropose", "goldReserve", "faithReserve", "mayDeclareWar", "withRulersWord", "noGifts", "officialsRearm", "garrisonEveryCity", "posture",
         "queue", "build", "purchase", "rearm", "cities", "units", "trade", "renew", "answerOffers", "answerDemands", "peace", "friendship", "gift", "declareWar", "cityFocus", "acknowledge", "worldVote", "marry", "denounce", "protect", "endProtection")
 
     private fun setOrders(civ: Civilization, json: JsonValue): Any? {
@@ -683,9 +687,15 @@ object RulerHost {
             json.remove("worldVote"); json.addChild("worldVote", JsonValue(power.civName))
         }
         val standing = orders.getOrPut(civ.civName) { StandingOrders() }
+        // The war leave for this order: standing (a sovereign's, or the ruler's plain word), or the ruler's own word at an audience (withRulersWord - this call only)
+        val standingLeave = json.get("mayDeclareWar")?.takeUnless { it.isNull }?.asBoolean() ?: standing.mayDeclareWar
+        val leave = standingLeave || json.getBoolean("withRulersWord", false)
         val alreadyKnown = ArrayList<String>()
         val rejected = ArrayList<String>()
         val taken = ArrayList<String>()
+        // The generals' DeclareWar weight starts wars on its own after the audience: it takes the standing leave, never the audience's
+        json.get("personality")?.get("DeclareWar")?.takeUnless { it.isNull }?.let { weight ->
+            if (weight.asFloat() > 0f && !standingLeave) { rejected += "DeclareWar above 0 lets the generals start wars on their own, and $WAR_LEAVE; the other weights were set"; json.get("personality").remove("DeclareWar") } }
         json.get("research")?.let { goals ->
             val ahead = ruleset.technologies.keys.filter { !reached(civ, it) }
             val kept = goals.asStringArray().map { goal -> if (goal in ruleset.technologies) goal else onlyMatch(goal, ruleset.technologies.keys)?.also { taken += "$goal -> $it" }
@@ -867,15 +877,15 @@ object RulerHost {
             "Bought $item in ${city.name} for $cost gold (${civ.gold} left).$note$refill"
         }
         // Answers before proposals: a counter is a refusal and a new offer in one order, and the new offer is refused as a mirror while the old one still waits
-        tryEach(json.get("answerOffers")) { diplomacy.answerOffer(civ, it.getString("power"), it.getString("answer"), it.getString("terms", null)) }
+        tryEach(json.get("answerOffers")) { diplomacy.answerOffer(civ, it.getString("power"), it.getString("answer"), it.getString("terms", null), leave) }
         tryEach(json.get("answerDemands")) { entry ->
-            val (told, warWith) = diplomacy.answerDemand(civ, entry.getString("power"), entry.getString("answer"))
+            val (told, warWith) = diplomacy.answerDemand(civ, entry.getString("power"), entry.getString("answer"), leave)
             if (warWith == null) told else {
                 // The refusal was a declaration: the war is ours, as if declared by order (the engine's declaration wrote the world's event and the council's record)
                 "$told - that refusal declared war on ${warWith.civName}. No peace can be made for ${civ.gameInfo.ruleset.modOptions.constants.minimumWarDuration} turns"
             }
         }
-        tryEach(json.get("trade")) { diplomacy.proposeTrade(civ, it) }
+        tryEach(json.get("trade")) { diplomacy.proposeTrade(civ, it, leave) }
         tryEach(json.get("renew")) { diplomacy.orderRenewal(civ, it.getString("power"), it.getString("terms", null)) }
         // A warning weighed and let stand: matched by its key (its first clause, counts and lists struck out) or by the start of its text, counts struck out
         // but a unit's #number kept whole - so "Great Prophet #378" is that prophet and no other
@@ -896,6 +906,7 @@ object RulerHost {
         // Declare war
         tryEach(json.get("declareWar")) { entry ->
             val targetName = entry.asString()
+            if (!leave) throw IllegalArgumentException("War on $targetName was not declared: $WAR_LEAVE")
             val target = civ.getKnownCivs().firstOrNull { it.civName == targetName } ?: throw ApiError(400, "We have not met $targetName")
             val diplomacy = civ.getDiplomacyManager(target)!!
             if (diplomacy.diplomaticStatus == DiplomaticStatus.War) throw ApiError(400, "Already at war with $targetName")
@@ -2452,7 +2463,9 @@ object RulerHost {
         }
     }
 
-    private fun options(civ: Civilization): Map<String, Any?> {
+    /** [audience]: asked at a ruler's audience, where the ruler's own word is the war leave - calls to war are among what we can offer then */
+    private fun options(civ: Civilization, audience: Boolean = false): Map<String, Any?> {
+        val leave = audience || orders[civ.civName]?.mayDeclareWar == true
         ensureStanding(civ)
         val ruleset = civ.gameInfo.ruleset
         return mapOf(
@@ -2477,7 +2490,7 @@ object RulerHost {
                     "Diplomacy" to "effort spent on city-states and friendships",
                     "Loyal" to "how much they honour friendships",
                     "DeclareWar" to "0 = never on their own; higher = they may start wars they think they can win")),
-            "diplomacy" to diplomacy.tradeOptions(civ),
+            "diplomacy" to diplomacy.tradeOptions(civ, leave),
             // What each city can build, with turns and its price in gold - and in faith where faith buys it (a Missionary is bought, never built)
             "buildable" to civ.cities.associate { city ->
                 city.name to (ruleset.buildings.values.asSequence() + ruleset.units.values.asSequence())
