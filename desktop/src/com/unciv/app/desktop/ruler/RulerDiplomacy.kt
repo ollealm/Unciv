@@ -104,15 +104,18 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
     /** An order's item against an offer: its name, or its words with or without the article the briefing's wording carries ("a declaration of war on Aztecs") */
     private fun TradeOffer.isCalled(item: String, game: GameInfo) = name.equals(item, ignoreCase = true) || word(game).equals(item.trim().replace(Regex("^an? ", RegexOption.IGNORE_CASE), ""), ignoreCase = true)
 
-    fun TradeOffer.brief(game: GameInfo): String = when (type) {
+    fun TradeOffer.brief(game: GameInfo, turns: Int = duration): String = when (type) {
         // These three carry an id where every other offer carries its name
         TradeOfferType.WarDeclaration -> "a declaration of war on ${game.civilizations.firstOrNull { it.civID == name }?.civName ?: name}"
         TradeOfferType.Introduction -> "an introduction to ${game.civilizations.firstOrNull { it.civID == name }?.civName ?: name}"
         TradeOfferType.City -> "the city of ${game.getCities().firstOrNull { it.id == name }?.name ?: name}"
-        else -> name + (if (type.numberType != TradeOfferType.TradeTypeNumberType.None) " x$amount" else if (name == Constants.researchAgreement && amount > 0) " ($amount gold from each side)" else "") + (if (duration > 0) " for $duration turn${if (duration == 1) "" else "s"}" else "")
+        else -> name + (if (type.numberType != TradeOfferType.TradeTypeNumberType.None) " x$amount" else if (name == Constants.researchAgreement && amount > 0) " ($amount gold from each side)" else "") + (if (duration > 0) " for $turns turn${if (turns == 1) "" else "s"}" else "")
     }
     /** Both sides named, so the direction of the gold is never misread. Every match of terms goes through this one wording */
-    fun Trade.brief(game: GameInfo) = "we give ${ourOffers.joinToString { it.brief(game) }.ifEmpty { "nothing" }}; they give ${theirOffers.joinToString { it.brief(game) }.ifEmpty { "nothing" }}"
+    // One deal, one length: each side's half ticks down on its own realm's turn, so between turns the halves differ by one ("for 7 turns; ... for 8 turns");
+    // the longer is the deal's
+    fun Trade.brief(game: GameInfo): String { val turns = (ourOffers + theirOffers).maxOfOrNull { it.duration } ?: 0
+        return "we give ${ourOffers.joinToString { it.brief(game, turns) }.ifEmpty { "nothing" }}; they give ${theirOffers.joinToString { it.brief(game, turns) }.ifEmpty { "nothing" }}" }
 
     /** Offers of ours out in the world, by partner and terms, so a new one the officials made can be told from the ruler's */
     private val oursOut = HashMap<String, Set<String>>()
@@ -199,6 +202,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
             return
         }
         val entry = ours ?: entryFor(civ, receiver, request, officialsPending) ?: return
+        val dealGold = if (ours == null && outcome == "accepted") request.trade.theirOffers.filter { it.name == Constants.researchAgreement || it.type == TradeOfferType.Gold }.sumOf { it.amount } else 0
+        if (dealGold > 0) officialsDealGold[civ.civName] = (officialsDealGold[civ.civName] ?: 0) + dealGold
         if (ours != null) pending.remove(entry) else officialsPending.remove(entry)
         val answer = when (outcome) {
             "accepted" -> "was accepted - the deal is in force"
@@ -212,7 +217,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
             "duplicate" -> "was withdrawn: what it asked for now comes to us by another deal, and a second supply of a luxury adds nothing"
             else -> "ended without a recorded answer"
         }
-        log(civ, "${if (ours != null) "Our proposal" else "The officials' proposal"} to ${receiver.civName} (${entry.third}) $answer.")
+        log(civ, "${if (ours != null) "Our proposal" else "The officials' proposal"} to ${receiver.civName} (${entry.third}) $answer${if (dealGold > 0) "; it took $dealGold gold from the treasury" else ""}.")
     }
 
     /** Gold the officials' own deals took this turn, by realm: told with the deal, so the bookkeeping does not call it unexplained */

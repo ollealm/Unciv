@@ -857,6 +857,8 @@ object RulerHost {
         // City focus: which yields the citizens work for
         tryEach(json.get("cityFocus")) { order ->
             val city = civ.city(order.getString("city"))
+            // A puppet works for gold, whatever is set: the engine resets it every turn (CityTurnManager) - refused rather than undone in silence
+            if (city.isPuppet) throw ApiError(400, "${city.name} is a puppet and works its tiles for gold until it is annexed (cities: annex)")
             val focus = com.unciv.logic.city.CityFocus.entries.firstOrNull { it.name.equals(order.getString("focus"), ignoreCase = true) || it.name.equals(order.getString("focus") + "Focus", ignoreCase = true) }
                 ?: throw ApiError(400, "Unknown focus; use ${com.unciv.logic.city.CityFocus.entries.joinToString { it.name }}")
             city.setCityFocus(focus)
@@ -934,6 +936,7 @@ object RulerHost {
     }
 
     private fun applyStandingOrders(civ: Civilization) {
+        if (civ.isDefeated()) return // a fallen realm adopts no policy and marches no garrison (the Iroquois adopted Aristocracy the turn they fell, Run 23)
         val standing = orders[civ.civName] ?: return
         val ruleset = civ.gameInfo.ruleset
         applyResearchGoals(civ)
@@ -1197,7 +1200,9 @@ object RulerHost {
             // A renewal says which terms now hold: the new ones beside the old, or the same terms running again
             replaced.takeIf { it.isNotEmpty() }?.let { old -> old.joinToString("; ") { ended -> renewedAs[ended]?.let { now -> "renewed, and these terms now hold - $now (in place of: ${ended.substringAfter(": ")})" } ?: "renewed on the same terms, which run again from now - $ended" } },
             lapsed.takeIf { it.isNotEmpty() }?.let { "ended with " + it.joinToString("; ") }).joinToString(". ") + ".")
+        val goldBeforeRenewals = civ.gold
         diplomacy.renewEnded(civ, lapsed, replaced) // the renewals ordered for deals that ended this turn go out now, as our own proposals
+        val paidByRenewals = goldBeforeRenewals - civ.gold // the ruler's own renewal paid it, by its own line: not "without the officials' hand"
         diplomacy.officialsDealings(civ)
         // The never-build list is applied where the officials choose; this catches what slipped past (an item already in the queue when it was banned)
         for (city in civ.cities) {
@@ -1214,7 +1219,7 @@ object RulerHost {
             (orders[civ.civName]?.faithReserve?.let { " (they leave $it untouched, by your reserve)" } ?: " (no faith reserve is set: they may spend it all)") + ".") }
         freeTechs.remove(civ.civName)?.forEach { (tech, goal) -> log(civ, if (goal != null) "A free technology: $tech, taken ${if (goal == tech) "as our research goal" else "on the way to $goal"}." else "A free technology: $tech, the officials' pick - no research goal named a step that could be taken.") }
         if (paid.isNotEmpty()) log(civ, "The treasury now holds ${civ.gold} gold.")
-        val unexplained = before.gold - civ.gold - paid.sumOf { it.first } - diplomacy.officialsDealGold.remove(civ.civName).let { it ?: 0 }
+        val unexplained = before.gold - civ.gold - paid.sumOf { it.first } - diplomacy.officialsDealGold.remove(civ.civName).let { it ?: 0 } - paidByRenewals.coerceAtLeast(0)
         // Worth a line when it is more than a turn's income (never for trifles under 10): forty gold is a fortune in one age and small change in another
         val income = civ.stats.statsForNextTurn.gold.toInt()
         if (unexplained > maxOf(10, income)) log(civ, "A further $unexplained gold left the treasury this turn without the officials' hand in it (upkeep, payments under our deals, or a deal struck).")
@@ -1595,7 +1600,8 @@ object RulerHost {
                 val standingNow = warningsNow.map(::normalised)
                 // An acknowledged warning is forgotten once it clears: if it returns, it shows in full again
                 orders[civ.civName]?.acknowledged?.retainAll(warningsNow.map(::ackKey).toSet())
-                val fresh = standingNow.filter { everSeen.add(it) }
+                // Deduplicated on the normalised key, sent in the warning's own words (the key reads "The people are unhappy (#)")
+                val fresh = warningsNow.filter { everSeen.add(normalised(it)) }
                     .filter { "no defender" in it || "unhappy" in it || "treasury" in it.lowercase() || "no military" in it }
                 if (news.isNotEmpty() || fresh.isNotEmpty()) wake[civ.civName] = news + fresh
             }
@@ -1697,7 +1703,21 @@ object RulerHost {
     //endregion
     //region Briefing
 
+    /** How we stand with a power, in a word the war estimate can sort by */
+    private fun relationTo(civ: Civilization, other: Civilization): String = when {
+        civ.isAtWarWith(other) -> "at war"
+        civ.getDiplomacyManager(other)?.diplomaticStatus == com.unciv.logic.civilization.diplomacy.DiplomaticStatus.DefensivePact -> "defensive pact"
+        civ.getDiplomacyManager(other)?.hasFlag(com.unciv.logic.civilization.diplomacy.DiplomacyFlags.DeclarationOfFriendship) == true -> "friend"
+        else -> "at peace"
+    }
+
+    /** A realm that has fallen has no briefing and no options: the orchestrator's "is no more" paths take it from here */
+    private fun ensureStanding(civ: Civilization) {
+        if (civ.isDefeated()) throw ApiError(410, "${civ.civName} is no more: it holds no city and no host")
+    }
+
     private fun briefing(civ: Civilization, logSince: Int? = null): Map<String, Any?> {
+        ensureStanding(civ)
         for (city in civ.cities) city.cityStats.update() // yields are cached per turn; stale ones showed food 0 and "0 turns left"
         val next = civ.stats.statsForNextTurn
         val turn = civ.gameInfo.turns
@@ -1712,7 +1732,6 @@ object RulerHost {
             "era" to civ.getEra().name,
             "wondersBarredFor" to wonderless.toList().ifEmpty { null },
             "waysToWin" to civ.gameInfo.gameParameters.victoryTypes.toList().ifEmpty { listOf("none - this world was made without victory conditions; nobody can build a spaceship or win a vote") },
-            "score" to civ.calculateTotalScore().toInt(),
             "gold" to civ.gold,
             "perTurn" to mapOf("gold" to next.gold.toInt(), "science" to next.science.toInt(), "culture" to next.culture.toInt()),
             "goldBreakdown" to goldBreakdown(civ),
@@ -1883,13 +1902,14 @@ object RulerHost {
                         (if (march.isNotEmpty()) "; $march" else "") + "; $beside" +
                         (if (melee.size - inGarrison == 0) "; and every foot soldier of ours holds a city, so none is free to walk in once the walls are down" else "")
                 }
-                mapOf("city" to city.name, "of" to city.civ.civName, "defence" to defence, "health" to city.health, "walls" to city.cityConstructions.builtBuildings.any { "Walls" in it || "Castle" in it },
+                mapOf("city" to city.name, "of" to city.civ.civName, "ourRelation" to relationTo(civ, city.civ), "defence" to defence, "health" to city.health, "walls" to city.cityConstructions.builtBuildings.any { "Walls" in it || "Castle" in it },
                     "garrison" to city.getCenterTile().militaryUnit?.name, "tilesFromOurNearestCity" to civ.cities.minOfOrNull { it.getCenterTile().aerialDistanceTo(city.getCenterTile()) },
                     "acrossTheSea" to (acrossTheSea != null).takeIf { it },
                     "oneVolleyOfOurBestEngineTakes" to perVolley, "volleysToBreak" to volleysToBreak, "healsPerTurn" to healing, "marchTurns" to marchTurns,
                     "defendersWithin3Tiles" to if (near.isEmpty()) null else defenders.size, "defendersStrength" to if (near.isEmpty()) null else defendersStrength, "antiAirWithin3Tiles" to if (near.isEmpty()) null else antiAir,
                     "cityShotAtOurBestFootSoldierTakes" to hitOnFoot, "approaches" to gate, "verdict" to verdict)
-            }.sortedBy { it["volleysToBreak"] as Int? ?: 999 }
+            // Enemies first, then the rest: an ally's capital once headed an at-war briefing as the softest walls (audit 2026-10-03)
+            }.sortedWith(compareBy({ it["ourRelation"] != "at war" }, { it["volleysToBreak"] as Int? ?: 999 }))
         val unseen = civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.associate { other -> other.civName to other.cities.count { !it.getCenterTile().isExplored(civ) } }.filterValues { it > 0 }
         return mapOf(
             "ourBestEngine" to bestEngine?.name, "ourBestFootSoldier" to bestFoot?.name, "siegeEngines" to siege.size, "footSoldiers" to (melee.size - inGarrison), "footSoldiersHoldingOurCities" to inGarrison.takeIf { it > 0 },
@@ -1941,7 +1961,8 @@ object RulerHost {
             val missed = units.garrisonMiss(civ, city.getCenterTile())?.let { "; $it" } ?: ""
             if (defender == null) warnings += "${city.name} has no defender in it$missed."
             else if (poorDefender(civ, defender))
-                warnings += "${city.name} is only held by ${if (defender.name.first().lowercaseChar() in "aeiou") "an" else "a"} ${defender.name} - weak for this age$missed."
+                warnings += "${city.name} is only held by ${if (defender.name.first().lowercaseChar() in "aeiou") "an" else "a"} ${defender.name} - weak for this age" +
+                    (if (orders[civ.civName]?.garrisonEveryCity == true && missed.isEmpty()) "; by your standing garrison order a stronger soldier of ours relieves it when one is free" else "") + "$missed."
         }
         for (unit in civ.units.getCivUnits()) if (unit.isGreatPerson() && units.orders[unit.id]?.action == "hold")
             warnings += "${unit.name} #${unit.id} ${describeWhere(civ, unit.getTile())} awaits orders."
@@ -2144,6 +2165,7 @@ object RulerHost {
 
     private fun threats(civ: Civilization): List<String> {
         val threats = ArrayList<String>()
+        val friendly = LinkedHashMap<String, ArrayList<String>>() // a friend's soldiers near our cities, by power: one line each, not one per soldier
         val tileMap = civ.gameInfo.tileMap
         for (camp in civ.gameInfo.barbarians.encampments) {
             if (camp.destroyed) continue
@@ -2154,7 +2176,8 @@ object RulerHost {
         val raids = shipRaids[civ.civName].orEmpty().filterValues { civ.gameInfo.turns - it.turn <= 5 }
         for (tile in civ.viewableTiles) {
             val unit = tile.militaryUnit ?: continue
-            if (unit.civ == civ || unit.civ.isCityState) continue
+            // A city-state's soldiers count only when it is at war with us (Budapest's never showed); a friend's are folded into a count below
+            if (unit.civ == civ || (unit.civ.isCityState && !civ.isAtWarWith(unit.civ))) continue
             // A ship counts within its own reach of a coastal city - a turn's sail and a shot - and four tiles otherwise
             val ship = unit.baseUnit.isWaterUnit
             val nearest = civ.cities.filter { !ship || it.isCoastal() }.minByOrNull { it.getCenterTile().aerialDistanceTo(tile) } ?: continue
@@ -2163,12 +2186,13 @@ object RulerHost {
             val stance = when {
                 unit.civ.isBarbarian -> "hostile"
                 civ.isAtWarWith(unit.civ) -> "AT WAR"
-                civ.getDiplomacyManager(unit.civ)?.hasFlag(com.unciv.logic.civilization.diplomacy.DiplomacyFlags.DeclarationOfFriendship) == true -> "friend, harmless"
+                civ.getDiplomacyManager(unit.civ)?.hasFlag(com.unciv.logic.civilization.diplomacy.DiplomacyFlags.DeclarationOfFriendship) == true -> { friendly.getOrPut(unit.civ.civName) { ArrayList() } += nearest.name; continue }
                 else -> "at peace"
             }
             threats += "${unit.civ.civName} ${unit.name}${if (ship) " #${unit.id} (a ship, " else " ("}strength ${unit.baseUnit.strength.coerceAtLeast(unit.baseUnit.rangedStrength)}, $stance) at ${RulerUnits.where(civ, tile)}" +
                 (raid?.let { " - it attacked ${it.target} on turn ${it.turn}" } ?: "")
         }
+        for ((power, near) in friendly) threats += "$power, a friend: ${near.size} soldier${if (near.size == 1) "" else "s"} near ${near.distinct().joinToString(" and ")} (friendly)"
         // A ship that struck at us and has sailed out of sight since: it may be back (Run 18: a Trireme raided Pyongyang six turns running, never listed)
         for ((id, raid) in raids) {
             val ship = civ.gameInfo.civilizations.firstOrNull { it.civName == raid.owner }?.units?.getUnitById(id) ?: continue
@@ -2292,6 +2316,7 @@ object RulerHost {
     }
 
     private fun options(civ: Civilization): Map<String, Any?> {
+        ensureStanding(civ)
         val ruleset = civ.gameInfo.ruleset
         return mapOf(
             "warEstimate" to warEstimate(civ),
