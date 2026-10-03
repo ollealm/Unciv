@@ -117,6 +117,25 @@ object RulerOverrides {
     /** Kinds of deal a ruled civ's officials may not propose on their own (a standing order of the ruler): "Open Borders", "Research Agreement",
      *  "Defensive Pact", "Declaration of Friendship", "luxuries", "calls to war" (asking another power to join a war of ours), or "all" */
     val noProposals = ConcurrentHashMap<String, Set<String>>()
+    /** civID -> faith the officials leave untouched (a ruler's standing order, as goldReserve is for gold) */
+    val faithReserve = ConcurrentHashMap<String, Int>()
+    /** Set by the host: told of every faith purchase the officials make for a ruled civ - (civ, faith, "Great Scientist in Persepolis") */
+    @Volatile var faithSpent: ((Civilization, Int, String) -> Unit)? = null
+    /** Set by the host: told of a free technology taken for a ruled civ - (civ, technology, the goal it was taken toward or null) */
+    @Volatile var freeTechTaken: ((Civilization, String, String?) -> Unit)? = null
+
+    /** The officials' faith purchase for any civ: a ruled civ's keeps above its faith reserve and off its never-build list, and is told to the host
+     *  (Persia's officials spent 1,600 faith in a turn with no line, audit 2026-10-03). Unruled civs buy as the engine always has */
+    fun officialsBuyWithFaith(city: com.unciv.logic.city.City, construction: com.unciv.models.ruleset.INonPerpetualConstruction): Boolean {
+        val civ = city.civ
+        val cost = construction.getStatBuyCost(city, com.unciv.models.stats.Stat.Faith) ?: return false
+        val ruled = civ.civID in ruledCivs
+        if (ruled && (civ.religionManager.storedFaith - cost < (faithReserve[civ.civID] ?: 0) || forbidden?.invoke(civ, construction) == true)) return false
+        val bought = city.cityConstructions.purchaseConstruction(construction, -1, true, com.unciv.models.stats.Stat.Faith)
+        if (bought && ruled) faithSpent?.invoke(civ, cost, "${construction.name} in ${city.name}")
+        return bought
+    }
+
     /** Set by the host: does the near-victory note name this power now? A ruled realm's officials offer it no Research Agreement */
     @Volatile var nearWinner: ((Civilization) -> Boolean)? = null
 

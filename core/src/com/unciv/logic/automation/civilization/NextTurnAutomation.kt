@@ -221,6 +221,7 @@ object NextTurnAutomation {
     }
 
     private fun protectCityStates(civInfo: Civilization) {
+        if (civInfo.civID in RulerOverrides.ruledCivs) return // a ruled realm pledges protection by the ruler's protect order only
         for (state in civInfo.getKnownCivs().filter { !it.isDefeated() && it.isCityState }) {
             if (state.cityStateFunctions.otherCivCanPledgeProtection(civInfo))
                 state.cityStateFunctions.addProtectorCiv(civInfo) 
@@ -229,6 +230,7 @@ object NextTurnAutomation {
     }
 
     private fun bullyCityStates(civInfo: Civilization) {
+        if (civInfo.civID in RulerOverrides.ruledCivs) return // tribute is never the officials' to demand for a ruled realm
         for (state in civInfo.getKnownCivs().filter { !it.isDefeated() && it.isCityState }.toList()) {
             val diplomacyManager = state.getDiplomacyManager(civInfo)!!
             if (!diplomacyManager.isRelationshipLevelLT(RelationshipLevel.Friend)) continue
@@ -255,7 +257,15 @@ object NextTurnAutomation {
         }
 
         val stateForConditionals = civInfo.state
+        // A ruled realm's free technology goes to the next step on the ruler's path (the host sets techsToResearch before every turn), not the officials' pick
+        if (civInfo.civID in RulerOverrides.ruledCivs) while (civInfo.tech.freeTechs > 0) {
+            val step = civInfo.tech.techsToResearch.firstOrNull { civInfo.tech.canBeResearched(it) } ?: break
+            val goal = civInfo.tech.techsToResearch.last() // the path's end, read before the step leaves it
+            civInfo.tech.getFreeTechnology(step)
+            RulerOverrides.freeTechTaken?.invoke(civInfo, step, goal)
+        }
         while (civInfo.tech.freeTechs > 0) {
+            val wasFree = civInfo.tech.freeTechs
             val costs = getGroupedResearchableTechs()
             if (costs.isEmpty()) return
             
@@ -265,6 +275,7 @@ object NextTurnAutomation {
             } ?: costs.last()
             val chosenTech = mostExpensiveTechs.randomWeighted(rng) { it.getWeightForAiDecision(stateForConditionals) }
             civInfo.tech.getFreeTechnology(chosenTech.name)
+            if (civInfo.civID in RulerOverrides.ruledCivs && civInfo.tech.freeTechs < wasFree) RulerOverrides.freeTechTaken?.invoke(civInfo, chosenTech.name, null)
         }
         if (civInfo.tech.techsToResearch.isEmpty()) {
             val costs = getGroupedResearchableTechs()

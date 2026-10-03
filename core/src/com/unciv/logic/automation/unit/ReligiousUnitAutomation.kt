@@ -15,8 +15,10 @@ import yairm210.purity.annotations.Readonly
 object ReligiousUnitAutomation {
 
     fun automateMissionary(unit: MapUnit) {
-        if (unit.religion != unit.civ.religionManager.religion?.name || unit.religion == null)
+        if (unit.religion != unit.civ.religionManager.religion?.name || unit.religion == null) {
+            if (unit.civ.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) com.unciv.logic.automation.RulerOverrides.unitDisbanded?.invoke(unit.civ, unit, "because it carried ${unit.religion?.let { "the faith of $it" } ?: "no faith"}, not ours, and could spread nothing of ours")
             return unit.disband()
+        }
 
         val ourCitiesWithoutReligion = unit.civ.cities.filter {
             it.religion.getMajorityReligion() != unit.civ.religionManager.religion
@@ -76,8 +78,10 @@ object ReligiousUnitAutomation {
     fun automateInquisitor(unit: MapUnit) {
         val civReligion = unit.civ.religionManager.religion
 
-        if (unit.religion != civReligion?.name || unit.religion == null)
+        if (unit.religion != civReligion?.name || unit.religion == null) {
+            if (unit.civ.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) com.unciv.logic.automation.RulerOverrides.unitDisbanded?.invoke(unit.civ, unit, "because it carried ${unit.religion?.let { "the faith of $it" } ?: "no faith"}, not ours")
             return unit.disband() // No need to keep a unit we can't use, as it only blocks religion spreads of religions other that its own
+        }
 
         val holyCity = unit.civ.religionManager.getHolyCity()
         val cityToConvert = determineBestInquisitorCityToConvert(unit) // Also returns null if the inquisitor can't convert cities

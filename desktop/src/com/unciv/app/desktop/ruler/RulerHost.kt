@@ -65,6 +65,8 @@ object RulerHost {
         var neverPropose = ArrayList<String>()
         /** Gold the officials must leave untouched; null = they spend as they see fit */
         var goldReserve: Int? = null
+        /** Faith the officials leave untouched; the ruler's own purchases with faith are not bound by it */
+        var faithReserve: Int? = null
         /** The officials may not give gold to city-states on their own */
         var noGifts = false
         /** When the officials re-arm units with gold on their own: always, war (only while at war with a major power), never */
@@ -81,6 +83,7 @@ object RulerHost {
         var acknowledged = ArrayList<String>()
         fun toMap(civ: Civilization? = null) = (if (civ == null) mapOf("acknowledged" to acknowledged) else emptyMap()) + mapOf(
             "goldReserve" to goldReserve,
+            "faithReserve" to faithReserve,
             "noGifts" to noGifts,
             "officialsRearm" to officialsRearm,
             "garrisonEveryCity" to garrisonEveryCity,
@@ -136,6 +139,8 @@ object RulerHost {
         RulerOverrides.underOrders = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.underOrders(unit) }
         RulerOverrides.tradeAnswered = { request, receiver, outcome -> diplomacy.settle(request, receiver, outcome) }
         RulerOverrides.nearWinner = { other -> diplomacy.nearVictory(other) != null }
+        RulerOverrides.faithSpent = { civ, faith, what -> faithSpending.getOrPut(civ.civName) { ArrayList() } += Pair(faith, what) }
+        RulerOverrides.freeTechTaken = { civ, tech, goal -> freeTechs.getOrPut(civ.civName) { ArrayList() } += Pair(tech, goal) }
         RulerOverrides.unitDisbanded = { civ, unit, why -> if (civ.civID in RulerOverrides.ruledCivs) disbandedFor.getOrPut(civ.civName) { HashMap() }[unit.id] = why }
         RulerOverrides.struck = { strike -> strikes.getOrPut(strike.attacker.civName) { ArrayList() } += strike }
         RulerOverrides.unitExpended = { civ, unit, why -> expended.getOrPut(civ.civName) { HashMap() }[unit.id] = Pair(why, unit.getTile()) }
@@ -176,6 +181,8 @@ object RulerHost {
         RulerOverrides.unitDisbanded?.let { f -> RulerOverrides.unitDisbanded = { civ, unit, why -> hook("unitDisbanded", Unit) { f(civ, unit, why) } } }
         RulerOverrides.struck?.let { f -> RulerOverrides.struck = { strike -> hook("struck", Unit) { f(strike) } } }
         RulerOverrides.unitExpended?.let { f -> RulerOverrides.unitExpended = { civ, unit, why -> hook("unitExpended", Unit) { f(civ, unit, why) } } }
+        RulerOverrides.faithSpent?.let { f -> RulerOverrides.faithSpent = { civ, faith, what -> hook("faithSpent", Unit) { f(civ, faith, what) } } }
+        RulerOverrides.freeTechTaken?.let { f -> RulerOverrides.freeTechTaken = { civ, tech, goal -> hook("freeTechTaken", Unit) { f(civ, tech, goal) } } }
         RulerOverrides.unitLost?.let { f -> RulerOverrides.unitLost = { loss -> hook("unitLost", Unit) { f(loss) } } }
         val refill = units.researchRefill; units.researchRefill = { civ -> hook("researchRefill", Unit) { refill(civ) } }
         val missed = units.garrisonMissed; units.garrisonMissed = { civ, tile -> hook("garrisonMissed", Unit) { missed(civ, tile) } }
@@ -370,7 +377,7 @@ object RulerHost {
         orders.clear(); publicEvents.clear(); chancery.clear(); spending.clear(); warningsWoken.clear(); losses.clear(); ownWars.clear(); notificationsSeen.clear(); shipRaids.clear()
         units.reset(); diplomacy.reset(); trail.clear(); ages.clear()
         worldAtLastAdvance = null
-        RulerOverrides.lockedCities.clear(); RulerOverrides.focusedCities.clear(); RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.noProposals.clear(); RulerOverrides.noGifts.clear(); RulerOverrides.rearming.clear(); RulerOverrides.noWonders.clear()
+        RulerOverrides.lockedCities.clear(); RulerOverrides.focusedCities.clear(); RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.faithReserve.clear(); RulerOverrides.noProposals.clear(); RulerOverrides.noGifts.clear(); RulerOverrides.rearming.clear(); RulerOverrides.noWonders.clear()
     }
 
     /** Written to a sibling file and moved into place, so a crash mid-write never leaves a half file behind */
@@ -452,11 +459,12 @@ object RulerHost {
         json.get("policyBranches")?.let { policyBranches = ArrayList(it.asStringArray().toList()) }
         json.get("neverBuild")?.let { neverBuild = ArrayList(it.asStringArray().toList()) }
         json.get("neverPropose")?.let { list ->
-            val kinds = listOf(Constants.openBorders, Constants.researchAgreement, Constants.defensivePact, "Declaration of Friendship", "luxuries", "calls to war", "demands", "all")
+            val kinds = listOf(Constants.openBorders, Constants.researchAgreement, Constants.defensivePact, "Declaration of Friendship", "luxuries", "calls to war", "demands", "Embassy", "all")
             neverPropose = ArrayList(list.asStringArray().map { given -> kinds.firstOrNull { it.equals(given.trim(), ignoreCase = true) || it.equals(given.trim().removeSuffix("s"), ignoreCase = true) }
                 ?: throw ApiError(400, "neverPropose takes ${kinds.joinToString()}; not '$given'") })
         }
         json.get("goldReserve")?.let { goldReserve = if (it.isNull) null else it.asInt().coerceAtLeast(0) }
+        json.get("faithReserve")?.let { faithReserve = if (it.isNull) null else it.asInt().coerceAtLeast(0) }
         json.get("noGifts")?.let { noGifts = it.asBoolean() }
         json.get("officialsRearm")?.takeUnless { it.isNull }?.asString()?.trim()?.lowercase()?.let { mode ->
             if (mode !in listOf("always", "war", "never")) throw ApiError(400, "officialsRearm takes always, war or never; not '$mode'")
@@ -478,6 +486,7 @@ object RulerHost {
         for ((name, value) in standing.personality) personality[PersonalityValue.valueOf(name)] = value
         RulerOverrides.personalities[civ.civID] = personality
         standing.goldReserve?.let { RulerOverrides.goldReserve[civ.civID] = it } ?: RulerOverrides.goldReserve.remove(civ.civID)
+        standing.faithReserve?.let { RulerOverrides.faithReserve[civ.civID] = it } ?: RulerOverrides.faithReserve.remove(civ.civID)
         if (standing.noGifts) RulerOverrides.noGifts += civ.civID else RulerOverrides.noGifts -= civ.civID
         RulerOverrides.rearming[civ.civID] = standing.officialsRearm
         if (standing.neverPropose.isNotEmpty()) RulerOverrides.noProposals[civ.civID] = standing.neverPropose.toSet() else RulerOverrides.noProposals.remove(civ.civID)
@@ -590,8 +599,8 @@ object RulerHost {
     }
 
     /** Every field an order may carry: an order with none of them is no order (a model that wrapped its fields in "arguments" sent nothing) */
-    private val ORDER_FIELDS = listOf("personality", "research", "policyBranches", "neverBuild", "neverPropose", "goldReserve", "noGifts", "officialsRearm", "garrisonEveryCity", "posture",
-        "queue", "build", "purchase", "rearm", "cities", "units", "trade", "renew", "answerOffers", "answerDemands", "peace", "friendship", "gift", "declareWar", "cityFocus", "acknowledge", "worldVote", "marry", "denounce")
+    private val ORDER_FIELDS = listOf("personality", "research", "policyBranches", "neverBuild", "neverPropose", "goldReserve", "faithReserve", "noGifts", "officialsRearm", "garrisonEveryCity", "posture",
+        "queue", "build", "purchase", "rearm", "cities", "units", "trade", "renew", "answerOffers", "answerDemands", "peace", "friendship", "gift", "declareWar", "cityFocus", "acknowledge", "worldVote", "marry", "denounce", "protect", "endProtection")
 
     private fun setOrders(civ: Civilization, json: JsonValue): Any? {
         val given = json.map { it.name }
@@ -659,7 +668,8 @@ object RulerHost {
         standing.readFrom(json)
         // An item put on the never-build list goes from every queue now, not after the turn (a Military Academy ordered off at T240 was finished at T241, Run 20)
         val struckNow = if (!json.has("neverBuild")) emptyList() else civ.cities.flatMap { city ->
-            city.cityConstructions.constructionQueue.toList().filter { name -> (ruleset.buildings[name] ?: ruleset.units[name])?.let { isForbidden(civ, it) } == true }.map { name ->
+            // The officials' own choices only: a queue the ruler set (a locked city) keeps what the ruler put in it, as the order's description says
+            (if (city.id in RulerOverrides.lockedCities) emptyList() else city.cityConstructions.constructionQueue.toList()).filter { name -> (ruleset.buildings[name] ?: ruleset.units[name])?.let { isForbidden(civ, it) } == true }.map { name ->
                 city.cityConstructions.constructionQueue.remove(name)
                 if (city.cityConstructions.constructionQueue.isEmpty()) city.cityConstructions.chooseNextConstruction()
                 "$name in ${city.name}" } }
@@ -744,6 +754,8 @@ object RulerHost {
         }
         tryEach(json.get("marry")) { entry -> diplomacy.marry(civ, entry.asString(), policyCostPerCity(civ)) }
         tryEach(json.get("denounce")) { entry -> diplomacy.denounce(civ, entry.asString()) }
+        tryEach(json.get("protect")) { entry -> diplomacy.protect(civ, entry.asString(), true) }
+        tryEach(json.get("endProtection")) { entry -> diplomacy.protect(civ, entry.asString(), false) }
         // Re-arming by hand: named units, or "all" - each told apart, done or not and why
         json.get("rearm")?.let { list ->
             val entries = list.asStringArray().map { it.trim() }
@@ -870,6 +882,14 @@ object RulerHost {
     /** The purchase order with faith: the stored faith pays, as the engine's own buy button would */
     private fun buyWithFaith(civ: Civilization, city: City, construction: INonPerpetualConstruction): String {
         val item = construction.name
+        // A religious unit takes the faith of the city it is born in (UnitManager): of another faith, the officials would disband it as not ours the next turn
+        val ours = civ.religionManager.religion
+        if (construction is com.unciv.models.ruleset.unit.BaseUnit && (construction.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CanSpreadReligion) || construction.hasUnique(com.unciv.models.ruleset.unique.UniqueType.PreventSpreadingReligion))
+            && !construction.hasUnique(com.unciv.models.ruleset.unique.UniqueType.TakeReligionOverBirthCity) && city.religion.getMajorityReligion() != ours) {
+            val better = civ.cities.filter { it.religion.getMajorityReligion() == ours && ours != null }.map { it.name }
+            throw ApiError(400, "Could not buy $item in ${city.name}: it would carry the faith of ${city.religion.getMajorityReligion()?.getReligionDisplayName() ?: "no religion"}, as its people do, not ours - and the officials disband such a one" +
+                (if (better.isNotEmpty()) "; buy it in a city that follows our faith: ${better.joinToString()}" else "; no city of ours follows our faith now"))
+        }
         val cost = faithPrice(city, construction)
         val stored = civ.religionManager.storedFaith
         if (cost == null) {
@@ -937,6 +957,7 @@ object RulerHost {
                 }
             } ?: break // nothing preferred is available - the automation picks
             civ.policies.adopt(policy)
+            hostAdopted.getOrPut(civ.civName) { HashSet() } += policy.name
             log(civ, "Adopted the policy ${policy.name}.")
         }
     }
@@ -985,12 +1006,25 @@ object RulerHost {
         val happiness = civ.getHappiness()
         val deals = RulerHost.dealsOf(civ)
         val turnsLeft = RulerHost.dealTurnsLeft(civ)
+        val policies = civ.policies.getAdoptedPolicies().toSet()
     }
 
     internal fun dealsOf(civ: Civilization) = diplomacy.dealsInForce(civ)
     internal fun dealTurnsLeft(civ: Civilization) = diplomacy.dealTurnsLeft(civ)
 
+    /** Faith the officials spent this turn, by realm: (faith, "what in where") - told with the turn's bookkeeping */
+    private val faithSpending = HashMap<String, ArrayList<Pair<Int, String>>>()
+    /** Free technologies taken this turn, by realm: (technology, the goal it was taken toward, or null for the officials' own pick) */
+    private val freeTechs = HashMap<String, ArrayList<Pair<String, String?>>>()
+    /** Policies the host adopted by the ruler's policy order, by realm: the rest of what was adopted is the officials' */
+    private val hostAdopted = HashMap<String, HashSet<String>>()
+
     private fun recordChancery(civ: Civilization, before: CivSnapshot) {
+        // A policy adopted that the ruler's policy order did not name was the officials' choice; it is told (audit 2026-10-03: Representation taken unseen)
+        val adoptedNow = civ.policies.getAdoptedPolicies().filterNot { com.unciv.models.ruleset.Policy.isBranchCompleteByName(it) }
+        val theirs = adoptedNow.filter { it !in before.policies && it !in (hostAdopted.remove(civ.civName) ?: emptySet()) }
+        if (theirs.isNotEmpty()) log(civ, "The officials adopted the polic${if (theirs.size == 1) "y" else "ies"} ${theirs.joinToString(" and ")}" +
+            (if (orders[civ.civName]?.policyBranches.isNullOrEmpty()) " - your policy order names no branch" else " - nothing your policy order names could be adopted") + ".")
         val turn = civ.gameInfo.turns
         units.noteStanding(civ)
         // The game's own notifications first - they cover research, buildings, combat, diplomacy. The turn's entry in the log holds what was
@@ -1170,6 +1204,9 @@ object RulerHost {
         }
         for ((what, items) in paid.groupBy { it.second }) log(civ, "The officials spent ${items.sumOf { it.first }} gold on ${what}.")
         officialsSpent[civ.civName] = paid.groupBy { it.second }.map { (what, items) -> "${items.sumOf { it.first }} gold on $what" }
+        faithSpending.remove(civ.civName)?.let { spent -> log(civ, "The officials spent ${spent.sumOf { it.first }} faith on ${spent.joinToString(" and ") { (if (it.second.first().lowercaseChar() in "aeiou") "an " else "a ") + it.second }}; ${civ.religionManager.storedFaith} faith is left" +
+            (orders[civ.civName]?.faithReserve?.let { " (they leave $it untouched, by your reserve)" } ?: " (no faith reserve is set: they may spend it all)") + ".") }
+        freeTechs.remove(civ.civName)?.forEach { (tech, goal) -> log(civ, if (goal != null) "A free technology: $tech, taken ${if (goal == tech) "as our research goal" else "on the way to $goal"}." else "A free technology: $tech, the officials' pick - no research goal named a step that could be taken.") }
         if (paid.isNotEmpty()) log(civ, "The treasury now holds ${civ.gold} gold.")
         val unexplained = before.gold - civ.gold - paid.sumOf { it.first } - diplomacy.officialsDealGold.remove(civ.civName).let { it ?: 0 }
         // Worth a line when it is more than a turn's income (never for trifles under 10): forty gold is a fortune in one age and small change in another
@@ -1542,6 +1579,8 @@ object RulerHost {
         ex.printStackTrace()
         val failedAt = game().turns
         brokenTurn = "${ex.javaClass.simpleName} at turn $failedAt"
+        // Then the host leaves, once the answer is on its way: start.sh's keep loop starts it afresh from the save on disk, and the orchestrator retries
+        Thread { Thread.sleep(2000); System.err.println("Exiting after a failed turn ($brokenTurn); the keep loop restarts the host from the last save."); kotlin.system.exitProcess(3) }.apply { isDaemon = true }.start()
         resetHostState()
         load()
         for (name in orders.keys) game().civilizations.firstOrNull { it.civName == name }?.let { civ ->

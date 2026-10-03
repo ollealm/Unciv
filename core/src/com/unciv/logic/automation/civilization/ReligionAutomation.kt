@@ -84,7 +84,7 @@ object ReligionAutomation {
                 .filter { (it.getStatBuyCost(city, Stat.Faith) ?: return@filter false) <= civInfo.religionManager.storedFaith }
                 .minByOrNull { it.getStatBuyCost(city, Stat.Faith)!! }
                 ?: continue
-            city.cityConstructions.purchaseConstruction(buildingToBePurchased, -1, true, Stat.Faith)
+            com.unciv.logic.automation.RulerOverrides.officialsBuyWithFaith(city, buildingToBePurchased) // a ruled civ: its faith reserve, its never-build list, and a line
             return
         }
     }
@@ -131,7 +131,7 @@ object ReligionAutomation {
             else -> validCitiesToBuy.first()
         }
 
-        cityToBuyMissionary.cityConstructions.purchaseConstruction(missionaryConstruction, -1, true, Stat.Faith)
+        com.unciv.logic.automation.RulerOverrides.officialsBuyWithFaith(cityToBuyMissionary, missionaryConstruction) // a ruled civ: its faith reserve, its never-build list, and a line
         return
     }
 
@@ -146,7 +146,7 @@ object ReligionAutomation {
             .filter { (greatProphetUnit.getStatBuyCost(it, Stat.Faith) ?: return@filter false) <= civInfo.religionManager.storedFaith }
             .minByOrNull { greatProphetUnit.getStatBuyCost(it, Stat.Faith)!! }
             ?: return
-        cityToBuyGreatProphet.cityConstructions.purchaseConstruction(greatProphetUnit, -1, true, Stat.Faith)
+        com.unciv.logic.automation.RulerOverrides.officialsBuyWithFaith(cityToBuyGreatProphet, greatProphetUnit) // a ruled civ: its faith reserve, its never-build list, and a line
     }
 
     private fun buyInquisitorNear(civInfo: Civilization, city: City) {
@@ -177,7 +177,7 @@ object ReligionAutomation {
         val cityToBuy = validCitiesToBuy
             .minByOrNull { it.getCenterTile().aerialDistanceTo(city.getCenterTile()) } ?: return
 
-        cityToBuy.cityConstructions.purchaseConstruction(inquisitorConstruction, -1, true, Stat.Faith)
+        com.unciv.logic.automation.RulerOverrides.officialsBuyWithFaith(cityToBuy, inquisitorConstruction) // a ruled civ: its faith reserve, its never-build list, and a line
     }
 
     private fun buyGreatPerson(civInfo: Civilization) {
@@ -200,7 +200,7 @@ object ReligionAutomation {
 
         val cityToBuy = validCitiesToBuy.first()
 
-        cityToBuy.cityConstructions.purchaseConstruction(greatPersonConstruction, -1, true, Stat.Faith)
+        com.unciv.logic.automation.RulerOverrides.officialsBuyWithFaith(cityToBuy, greatPersonConstruction) // a ruled civ: its faith reserve, its never-build list, and a line
     }
 
     // endregion

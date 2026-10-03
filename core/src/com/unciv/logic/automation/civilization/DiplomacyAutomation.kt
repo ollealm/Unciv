@@ -132,10 +132,12 @@ object DiplomacyAutomation {
      */
     internal fun offerToEstablishEmbassy(civInfo: Civilization) {
         if (civInfo.getCapital() == null) return
+        if (!com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, "Embassy")) return // a ruler's standing order, "all" included
         val civsThatWeCanEstablishEmbassyWith = civInfo.getKnownCivs().filter {
             civInfo.diplomacyFunctions.canEstablishEmbassyWith(it)
             && !civInfo.getDiplomacyManager(it)!!.hasFlag(DiplomacyFlags.DeclinedEmbassy)
             && !areWeOfferingTrade(civInfo, it, Constants.acceptEmbassy)
+            && !com.unciv.logic.automation.RulerOverrides.crossesWaitingOffer(civInfo, it, Constants.acceptEmbassy)
         }.sortedByDescending { it.getDiplomacyManager(civInfo)!!.relationshipLevel() }
 
         for (otherCiv in civsThatWeCanEstablishEmbassyWith) {
@@ -157,7 +159,7 @@ object DiplomacyAutomation {
                     val ourGpt = civInfo.stats.statsForNextTurn.gold.toInt()
                     if (embassyGptValue in 1..ourGpt)
                         tradeLogic.currentTrade.ourOffers.add(TradeOffer(Constants.goldPerTurn, TradeOfferType.Gold_Per_Turn, embassyGptValue, civInfo.gameInfo.speed))
-                    else if (civInfo.gold >= embassyValue && ourGpt >= 0)
+                    else if (civInfo.gold >= embassyValue + (com.unciv.logic.automation.RulerOverrides.goldReserve[civInfo.civID] ?: 0) && ourGpt >= 0) // a ruled realm's reserve stays
                         tradeLogic.currentTrade.ourOffers.add(TradeOffer(Constants.flatGold, TradeOfferType.Gold, embassyValue, civInfo.gameInfo.speed))
                     // else let them make counter offer
                 }

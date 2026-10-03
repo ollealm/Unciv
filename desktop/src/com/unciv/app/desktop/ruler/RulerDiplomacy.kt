@@ -532,6 +532,29 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
     /** Cities that came by marriage this turn: the capture line does not call them taken */
     val married = HashSet<String>()
 
+    /** {protect / endProtection: city-state}: our pledge to protect it, given or withdrawn by the ruler's word - never the officials' for a ruled realm */
+    fun protect(civ: Civilization, name: String, pledge: Boolean): String {
+        val other = civ.getKnownCivs().firstOrNull { it.isCityState && it.isAlive() && it.civName.equals(name.trim(), ignoreCase = true) }
+            ?: throw IllegalArgumentException("${if (pledge) "protect" else "endProtection"} takes a city-state we know: ${civ.getKnownCivs().filter { it.isCityState && it.isAlive() }.joinToString { it.civName }}; not '$name'")
+        val theirs = other.getDiplomacyManager(civ)!!
+        if (pledge) {
+            if (!other.cityStateFunctions.otherCivCanPledgeProtection(civ)) throw IllegalArgumentException("We cannot pledge to protect ${other.civName} now: " + when {
+                theirs.diplomaticStatus == DiplomaticStatus.Protector -> "we protect it already"
+                theirs.hasFlag(DiplomacyFlags.RecentlyWithdrewProtection) -> "we withdrew our pledge lately; not for ${theirs.getFlag(DiplomacyFlags.RecentlyWithdrewProtection)} more turns"
+                civ.isAtWarWith(other) -> "we are at war with it"
+                theirs.getInfluence() < 0 -> "its regard for us is below nothing"
+                else -> "the rules do not allow it" })
+            other.cityStateFunctions.addProtectorCiv(civ)
+            log(civ, "By your order: we pledged to protect ${other.civName}. Its regard for us rests higher, others find it harder to take tribute from it, and we think the worse of any power that bullies, attacks or destroys it; the pledge cannot be withdrawn for 10 turns.")
+            return "Pledged to protect ${other.civName}; it cannot be withdrawn for 10 turns"
+        }
+        if (!other.cityStateFunctions.otherCivCanWithdrawProtection(civ)) throw IllegalArgumentException("We cannot withdraw our pledge to ${other.civName} now: " +
+            (if (theirs.diplomaticStatus != DiplomaticStatus.Protector) "we have not pledged it" else "it was given lately; not for ${theirs.getFlag(DiplomacyFlags.RecentlyPledgedProtection)} more turns"))
+        other.cityStateFunctions.removeProtectorCiv(civ)
+        log(civ, "By your order: we withdrew our pledge to protect ${other.civName}; it cannot be given again for 20 turns.")
+        return "Withdrew our pledge to protect ${other.civName}; it cannot be given again for 20 turns"
+    }
+
     /** {denounce: power}: a public denouncement, for 30 turns - never the officials' choice for a ruled realm */
     fun denounce(civ: Civilization, name: String): String {
         val other = civ.getKnownCivs().firstOrNull { it.isMajorCiv() && it.isAlive() && it.civName.equals(name.trim(), ignoreCase = true) }
@@ -564,7 +587,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
                 // What a gift of ours would add now (the city-state screen's own sum), and how much our standing falls each turn
                 entry["ourGiftWouldAdd"] = listOf(250, 500, 1000).filter { civ.gold >= it }.associate { "$it gold" to other.cityStateFunctions.influenceGainedByGift(civ, it) }.ifEmpty { null }
                 entry["ourInfluenceFallsPerTurn"] = theirs?.getCityStateInfluenceDegrade()?.takeIf { it > 0f }?.let { (it * 10).toInt() / 10f }
-                entry["protectedByUs"] = ours.diplomaticStatus == DiplomaticStatus.Protector
+                // The pledge is kept on the city-state's side (CityStateFunctions.addProtectorCiv): ours toward it never says so
+                entry["protectedByUs"] = theirs?.diplomaticStatus == DiplomaticStatus.Protector
                 // Where our people may marry into a city-state's ruling family (Austria's ability): open or not, and why
                 if (civ.hasUnique(UniqueType.CityStateCanBeBoughtForGold)) entry["marriage"] = marriageState(civ, other)
             } else {
