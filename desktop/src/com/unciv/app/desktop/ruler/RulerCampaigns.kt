@@ -199,6 +199,9 @@ object RulerCampaigns {
         val distance = near.getCenterTile().aerialDistanceTo(tile)
         val foes = if (mover == civ.civName) near.civ.civName in enemies else near.civ == civ
         return when {
+            // A ship's place is told in the sea's words: at a city's harbour, or in the waters off it - never its walls or its fields
+            tile.isWater && distance <= 1 -> "the harbour of ${named(near, civ, mover)}"
+            tile.isWater && distance <= 2 -> "the waters off ${named(near, civ, mover)}"
             distance <= 1 && foes -> "the walls of ${named(near, civ, mover)}"
             distance <= 2 -> "the fields of ${named(near, civ, mover)}"
             // Beyond a city's fields, the country or the waters that way, and distant ones well beyond; never a count of tiles
