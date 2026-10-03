@@ -9,6 +9,7 @@ import com.unciv.logic.civilization.Civilization
 import com.unciv.logic.civilization.PopupAlert
 import com.unciv.logic.civilization.diplomacy.Demand
 import com.unciv.logic.civilization.diplomacy.DiplomacyFlags
+import com.unciv.models.ruleset.unique.UniqueType
 import com.unciv.logic.civilization.diplomacy.DiplomaticStatus
 import com.unciv.logic.trade.Trade
 import com.unciv.logic.trade.TradeEvaluation
@@ -449,6 +450,52 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         return "Gave $gold gold to $name: +$influence influence, now $now" + (other.allyCiv?.let { ally -> "; their ally is ${ally.civName}" } ?: "")
     }
 
+    /** A marriage into a city-state's ruling family, as the rules stand now: open with its price, or what stands in the way */
+    fun marriageState(civ: Civilization, other: Civilization): String {
+        val cost = other.cityStateFunctions.getDiplomaticMarriageCost()
+        if (other.cityStateFunctions.canBeMarriedBy(civ)) return "open: $cost gold - the marry order brings ${other.civName} under us, held as a puppet"
+        return "not open: " + listOfNotNull(
+            if (other.getDiplomacyManager(civ)?.isRelationshipLevelEQ(com.unciv.logic.civilization.diplomacy.RelationshipLevel.Ally) != true) "we must be its ally" else null,
+            civ.getDiplomacyManager(other)?.takeIf { it.hasFlag(DiplomacyFlags.MarriageCooldown) }?.let { cooldown -> "not for ${cooldown.getFlag(DiplomacyFlags.MarriageCooldown)} more turn${if (cooldown.getFlag(DiplomacyFlags.MarriageCooldown) == 1) "" else "s"}" },
+            if (civ.gold < cost) "it costs $cost gold, and we have ${civ.gold}" else null).joinToString(", ").ifEmpty { "the rules do not allow it now" }
+    }
+
+    /** {marry: city-state}: our people marry into its ruling family, for gold - the city-state's city becomes ours, a puppet. Never the officials' choice */
+    fun marry(civ: Civilization, name: String, perCityCost: String): String {
+        val other = civ.getKnownCivs().firstOrNull { it.isCityState && it.isAlive() && it.civName.equals(name.trim(), ignoreCase = true) }
+            ?: throw IllegalArgumentException("marry takes a city-state we know: ${civ.getKnownCivs().filter { it.isCityState && it.isAlive() }.joinToString { it.civName }}; not '$name'")
+        if (!civ.hasUnique(UniqueType.CityStateCanBeBoughtForGold)) throw IllegalArgumentException("Our people cannot marry into a city-state's ruling family: the rules give that only to a people with the ability")
+        if (!other.cityStateFunctions.canBeMarriedBy(civ)) throw IllegalArgumentException("A marriage with ${other.civName} is ${marriageState(civ, other)}")
+        val cost = other.cityStateFunctions.getDiplomaticMarriageCost()
+        val city = other.getCapital()!!.name
+        other.cityStateFunctions.diplomaticMarriage(civ)
+        // The engine ends the city-state as if it fell ("has been destroyed!", which wakes every court); the world is told of the marriage in its own line
+        for (anyone in civ.gameInfo.civilizations) anyone.notifications.removeAll { it.text == "The City-State of [${other.civName}] has been destroyed!" }
+        civ.notifications.removeAll { it.text.startsWith("We have married into the ruling family of [${other.civName}]") } // ours below says more
+        married += city
+        val line = "$city joined us by marriage into ${if (city == other.civName) "its" else "the ${other.civName}"} ruling family, for $cost gold: it is ours, held as a puppet (it builds and pays for itself, gives no orders). " +
+            "Annexing it with a cities order makes it a city of our own, and adds $perCityCost to the culture cost of every policy; held as a puppet it adds none"
+        log(civ, "By your order: $line.")
+        return line
+    }
+    /** Cities that came by marriage this turn: the capture line does not call them taken */
+    val married = HashSet<String>()
+
+    /** {denounce: power}: a public denouncement, for 30 turns - never the officials' choice for a ruled realm */
+    fun denounce(civ: Civilization, name: String): String {
+        val other = civ.getKnownCivs().firstOrNull { it.isMajorCiv() && it.isAlive() && it.civName.equals(name.trim(), ignoreCase = true) }
+            ?: throw IllegalArgumentException("denounce takes a great power we know: ${civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.joinToString { it.civName }}; not '$name'")
+        val manager = civ.getDiplomacyManager(other)!!
+        when {
+            civ.isAtWarWith(other) -> throw IllegalArgumentException("We are at war with ${other.civName}: there is nothing left to denounce")
+            manager.hasFlag(DiplomacyFlags.Denunciation) -> throw IllegalArgumentException("We denounced ${other.civName} already; it stands ${manager.getFlag(DiplomacyFlags.Denunciation)} more turns")
+            manager.hasFlag(DiplomacyFlags.DeclarationOfFriendship) -> throw IllegalArgumentException("We have a Declaration of Friendship with ${other.civName}: a friend cannot be denounced while it stands")
+        }
+        manager.denounce()
+        log(civ, "By your order: we denounced ${other.civName} before the world, for 30 turns. They think the worse of us for it, and the embassies between us are closed; the powers that hate them think better of us, and their friends worse.")
+        return "Denounced ${other.civName} for 30 turns: their regard for us falls, the embassies between us close, and the other powers judge us by how they stand with ${other.civName}"
+    }
+
     /** Standing relations for the briefing */
     fun relations(civ: Civilization): List<Map<String, Any?>> =
         civ.getKnownCivs().filter { !it.isBarbarian && !it.isSpectator() && it.isAlive() }.map { other ->
@@ -467,6 +514,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
                 entry["ourGiftWouldAdd"] = listOf(250, 500, 1000).filter { civ.gold >= it }.associate { "$it gold" to other.cityStateFunctions.influenceGainedByGift(civ, it) }.ifEmpty { null }
                 entry["ourInfluenceFallsPerTurn"] = theirs?.getCityStateInfluenceDegrade()?.takeIf { it > 0f }?.let { (it * 10).toInt() / 10f }
                 entry["protectedByUs"] = ours.diplomaticStatus == DiplomaticStatus.Protector
+                // Where our people may marry into a city-state's ruling family (Austria's ability): open or not, and why
+                if (civ.hasUnique(UniqueType.CityStateCanBeBoughtForGold)) entry["marriage"] = marriageState(civ, other)
             } else {
                 entry["cities"] = other.cities.size
                 entry["militaryStrength"] = other.getStatForRanking(com.unciv.ui.screens.victoryscreen.RankingType.Force)
@@ -477,6 +526,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
                 entry["friendship"] = if (ours.hasFlag(DiplomacyFlags.DeclarationOfFriendship)) "in force, ${ours.getFlag(DiplomacyFlags.DeclarationOfFriendship)} turns left" +
                     (if (renewals.any { it.civ == civ.civName && it.partner == other.civName && it.friendship }) " - by your order, proposed again the turn it lapses" else "") else false
                 entry["openBordersForUs"] = theirs?.hasOpenBorders ?: false
+                entry["denounced"] = listOfNotNull(ours.takeIf { it.hasFlag(DiplomacyFlags.Denunciation) }?.let { "we denounced them (${it.getFlag(DiplomacyFlags.Denunciation)} turns left)" },
+                    theirs?.takeIf { it.hasFlag(DiplomacyFlags.Denunciation) }?.let { "they denounced us (${it.getFlag(DiplomacyFlags.Denunciation)} turns left)" }).joinToString("; ").ifEmpty { null }
                 entry["theirGrievances"] = theirs?.diplomaticModifiers?.filter { it.value < 0 }?.keys?.map { key ->
                     val grievance = com.unciv.logic.civilization.diplomacy.DiplomaticModifiers.safeValueOf(key)
                     (grievance?.text?.removeSuffix("!")?.removeSuffix(".") ?: key) + when (grievance) {
@@ -842,6 +893,16 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
             addChild("with", JsonValue(renewal.partner))
             for ((side, offers) in listOf("give" to renewal.give, "want" to renewal.want)) addChild(side, JsonValue(JsonValue.ValueType.array).also { array ->
                 for ((item, amount) in offers) array.addChild(JsonValue(JsonValue.ValueType.`object`).apply { addChild("item", JsonValue(item)); addChild("amount", JsonValue(amount.toLong())) }) })
+        }
+        // A power a step from victory whose own offer of the same waits on our desk: the standing order does not take it on its own (Japan's renewal
+        // took the Aztecs' Silver at T295, Run 21) - the offer waits for the advisor, with the note beside it
+        val partner = civ.gameInfo.civilizations.firstOrNull { it.civName == renewal.partner }
+        val near = partner?.let { nearVictory(it) }
+        if (partner != null && near != null && civ.tradeRequests.any { request -> request.requestingCiv == partner.civID && !isPeace(request)
+                && (request.trade.ourOffers + request.trade.theirOffers).map { it.name }.toSet() == (renewal.give + renewal.want).map { it.first }.toSet() }) {
+            renewals.remove(renewal)
+            log(civ, "The ${renewal.goods} deal with ${renewal.partner} ended. ${renewal.partner} has offered it again, and the standing order to renew did not take that offer, because $near: it waits on your desk - accept or refuse it with answerOffers.")
+            return
         }
         try {
             val told = proposeTrade(civ, json)

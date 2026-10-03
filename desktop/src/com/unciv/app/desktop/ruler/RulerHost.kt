@@ -538,7 +538,7 @@ object RulerHost {
 
     /** Every field an order may carry: an order with none of them is no order (a model that wrapped its fields in "arguments" sent nothing) */
     private val ORDER_FIELDS = listOf("personality", "research", "policyBranches", "neverBuild", "neverPropose", "goldReserve", "noGifts", "officialsRearm", "garrisonEveryCity", "posture",
-        "queue", "build", "purchase", "rearm", "cities", "units", "trade", "renew", "answerOffers", "answerDemands", "peace", "friendship", "gift", "declareWar", "cityFocus", "acknowledge", "worldVote")
+        "queue", "build", "purchase", "rearm", "cities", "units", "trade", "renew", "answerOffers", "answerDemands", "peace", "friendship", "gift", "declareWar", "cityFocus", "acknowledge", "worldVote", "marry", "denounce")
 
     private fun setOrders(civ: Civilization, json: JsonValue): Any? {
         val given = json.map { it.name }
@@ -678,6 +678,8 @@ object RulerHost {
                 else -> throw ApiError(400, "Unknown city action $action; use annex, raze or spare")
             }
         }
+        tryEach(json.get("marry")) { entry -> diplomacy.marry(civ, entry.asString(), policyCostPerCity(civ)) }
+        tryEach(json.get("denounce")) { entry -> diplomacy.denounce(civ, entry.asString()) }
         tryEach(json.get("purchase")) { order ->
             val city = civ.city(order.getString("city"))
             val item = order.getString("item")
@@ -974,7 +976,7 @@ object RulerHost {
                     && notifications.none { "has been built in [${other.name}]" in it.text && "[$item]" in it.text } })
                 log(civ, "The officials queued $item in ${city.name}" + (favouredBy(civ, city, item)?.let { ", favoured by your $it weight" } ?: "") + ".")
         }
-        for (city in civ.cities) if (city.name !in before.queues) {
+        for (city in civ.cities) if (city.name !in before.queues && !diplomacy.married.remove(city.name)) {
             // A city new to our rolls was founded only if nobody held it before us: retaking our own is "back", and the buildings it came with were not built this turn
             val from = city.previousOwner.takeIf { it.isNotEmpty() && it != civ.civID }?.let { civ.gameInfo.getCivilization(it).civName }
             val standing = takenWith[city.name].orEmpty()
@@ -1177,6 +1179,13 @@ object RulerHost {
             "cityStatesWeHaveNotMet" to game.civilizations.count { it.isCityState && it.isAlive() && !civ.knows(it) }.takeIf { it > 0 }?.let { "$it - each votes for its own ally, which we cannot see" })
     }
 
+    /** What one more city of our own adds to every policy's culture cost: the map's size sets it, and some policies cut it (PolicyManager.getPolicyCultureCost) */
+    private fun policyCostPerCity(civ: Civilization): String {
+        var modifier = civ.gameInfo.tileMap.mapParameters.mapSize.getPredefinedOrNextSmaller().policyCostPerCityModifier
+        civ.getMatchingUniques(com.unciv.models.ruleset.unique.UniqueType.LessPolicyCostFromCities).forEach { modifier *= 1 - it.params[0].toFloat() / 100 }
+        return "${kotlin.math.round(modifier * 1000) / 10}%".replace(".0%", "%")
+    }
+
     /** A cultural victory in facts, when one is in play: the branches of policy each power we know has completed against those needed, and the last step */
     private fun culturalFacts(civ: Civilization): Map<String, Any?>? {
         val game = civ.gameInfo
@@ -1186,9 +1195,17 @@ object RulerHost {
         val last = milestones.firstOrNull { it.type == com.unciv.models.ruleset.MilestoneType.BuiltBuilding }?.params?.firstOrNull()?.let { game.ruleset.buildings[it] }
         return mapOf(
             "branchesNeeded" to needed,
+            // Our own branches, policy by policy (the opening policy counts): rivals' are not ours to see beyond the branches they complete
+            "ourBranches" to ourBranches(civ).map { (branch, done, total) -> "${branch.name} $done of $total" + if (done == total) " (complete)" else "" }.ifEmpty { null },
+            "ourNearestBranch" to ourBranches(civ).filter { it.second < it.third }.minByOrNull { it.third - it.second }?.let { (branch, done, total) -> "${branch.name}: ${total - done} more ${if (total - done == 1) "policy" else "policies"} complete it" },
             "branchesCompleted" to (listOf(civ) + civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }).associate { (if (it == civ) "us" else it.civName) to it.policies.completedBranches.size },
             "lastStep" to last?.let { "${it.name}: a national wonder of ${it.getProductionCost(civ, null)} production that only a power with ${needed ?: "the"} branches complete may build${if (it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CannotBeHurried)) "; it cannot be hurried" else ""}. The power that finishes it wins" })
     }
+
+    /** Each branch of policy we have opened: (branch, policies of it adopted, policies in it), the opening one counted */
+    private fun ourBranches(civ: Civilization) = civ.gameInfo.ruleset.policyBranches.values.filter { civ.policies.isAdopted(it.name) }.map { branch ->
+        val members = branch.policies.filter { it.policyBranchType == com.unciv.models.ruleset.Policy.PolicyBranchType.Member }
+        Triple(branch, 1 + members.count { civ.policies.isAdopted(it.name) }, 1 + members.size) }
 
     /** The ways this game can be won, as its own settings have them - a game may have been set to fewer than all */
     private fun victoriesInPlay(civ: Civilization): String {
@@ -1312,7 +1329,9 @@ object RulerHost {
     // Not answers to our own proposals: acting on one sends another, and the advisor would be woken by his own echo every turn.
     // Not "demands": that is a city asking for a luxury, not a neighbour asking for tribute.
     // Not our own order's echo ("By your order: we declared war"), and not a barbarian camp cleared ("We have captured a barbarian encampment").
-    private val wakeWorthy = listOf("dropped .* because", "(?<!By your order: we )declared war", "joined .* in the war against us", "denounced", "lost in action",
+    private val wakeWorthy = listOf("dropped .* because", "(?<!By your order: we )declared war", "joined .* in the war against us", "has denounced us", "lost in action",
+        // The alerts every realm gets (the Utopia Project begun or finished): the end of the game may be in sight
+        "has started constructing", "has completed [^.]*!$",
         "awaits orders", "The United Nations now stands", "our vote is not pledged", "(?<!We have )captured(?! a barbarian)", "has been destroyed", "has been stuck", "offers peace", "\\(an advised court\\) offers a deal", "demands that we", "proposes a Declaration of Friendship").map { Regex(it, RegexOption.IGNORE_CASE) }
 
     private val warningsWoken = HashMap<String, HashSet<String>>()
@@ -1457,7 +1476,10 @@ object RulerHost {
                     "apollo" to civ.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts),
                     "note" to "Parts are units: queue them by name in any city once the Apollo Program stands${civ.gameInfo.ruleset.buildings["Apollo Program"]?.requiredTech?.takeUnless { civ.tech.isResearched(it) }?.let { " (a wonder that needs $it)" } ?: ""} and the techs are known (each needs Aluminum); a finished part walks to the capital and is added to the ship by the officials. They CANNOT be bought with gold - saving gold for them is wasted. The ship launches, and the game is won, when every part is added.") } },
             "policies" to civ.policies.getAdoptedPolicies().toList(),
-            "culture" to mapOf("stored" to civ.policies.storedCulture, "neededForNextPolicy" to civ.policies.getCultureNeededForNextPolicy()),
+            "culture" to mapOf("stored" to civ.policies.storedCulture, "neededForNextPolicy" to civ.policies.getCultureNeededForNextPolicy(),
+                "turnsToNextPolicy" to next.culture.toInt().let { perTurn -> val short = civ.policies.getCultureNeededForNextPolicy() - civ.policies.storedCulture
+                    if (short <= 0) "now" else if (perTurn <= 0) "never, at no culture a turn" else "about ${(short + perTurn - 1) / perTurn} at $perTurn culture a turn" },
+                "costOfEachCity" to civ.cities.count { !it.isPuppet }.let { own -> "each city of ours beyond the first that is not a puppet adds ${policyCostPerCity(civ)} to the culture cost of every policy; we have $own such cities. A puppet adds nothing until it is annexed" }),
             "militaryStrength" to civ.getStatForRanking(RankingType.Force),
             "warEstimate" to (if (civ.isAtWar() || orders[civ.civName]?.warAim != null) warEstimate(civ)
                 else mapOf("note" to "At peace: the chancery's reckoning of every rival city against our engines is in get_options.warEstimate - read it before any talk of war.")),
@@ -1765,11 +1787,38 @@ object RulerHost {
             "faithBuys" to "In this world faith buys: Missionaries and Inquisitors, in a city whose people follow a founded religion; the religious buildings a belief of the city's religion allows (Cathedral, Mosque, Pagoda, Monastery); " +
                 "soldiers of the ages before the Industrial, where the city's religion holds the Holy Warriors belief; and from the Industrial era on, Great Prophets (in a city following a founded religion, dearer with each bought) and the Great Person of each completed Commerce, Rationalism, Freedom, Autocracy or Order branch (1,000 faith, dearer each time). " +
                 "Before the Industrial era a Great Prophet comes only as stored faith grows. get_options.buildable gives each city's price in faith; the purchase order with with: faith buys.",
+            "greatPeopleForFaith" to greatPeopleForFaith(civ),
             "faithBuysNow" to civ.cities.flatMap { city -> (civ.gameInfo.ruleset.buildings.values + civ.gameInfo.ruleset.units.values).mapNotNull { item -> faithPrice(city, item)?.let { item.name to (it to city.name) } } }
                 .groupBy({ it.first }, { it.second }).map { (item, offers) -> "$item: ${offers.minOf { it.first }} faith (${offers.filter { it.first == offers.minOf { o -> o.first } }.joinToString { it.second }})" }
                 .ifEmpty { listOf("nothing faith can buy now (the note below says what it buys, and when)") },
             "note" to "The officials spend faith by their own rule, and much of it stays unspent: until our religion is founded and enhanced they keep it for a Great Prophet (which faith can buy only from the Industrial era); after that, missionaries and an inquisitor to win back cities of ours that follow another faith, and a few missionaries abroad; once no religion is left to found in the world, a Great Person or a religious building where one can be bought. " +
                 "They choose beliefs on their own; the Faith weight tilts how much faith they make. Founding, enhancing and spreading are done by a Great Prophet or Missionary of ours, with the use order (ability religion) in the right city; the purchase order with with: faith spends the rest as you choose.")
+    }
+
+    /** Each Great Person faith can buy in this world, from the rules themselves: what opens it (a branch completed, an era), the price, and whether it is open
+     *  to us now - so nobody hoards faith for one that cannot come (four realms waited on a Commerce Great Person in Run 21) */
+    private fun greatPeopleForFaith(civ: Civilization): List<String> {
+        val ruleset = civ.gameInfo.ruleset
+        val buying = setOf(com.unciv.models.ruleset.unique.UniqueType.BuyUnitsIncreasingCost, com.unciv.models.ruleset.unique.UniqueType.BuyUnitsForAmountStat, com.unciv.models.ruleset.unique.UniqueType.BuyUnitsWithStat)
+        val sources: List<com.unciv.models.ruleset.unique.IHasUniques> = ruleset.policies.values + ruleset.eras.values + ruleset.beliefs.values
+        val ways = sources.flatMap { source -> source.uniqueObjects.filter { it.type in buying && "Faith" in it.params && ruleset.units[it.params[0]]?.isGreatPerson == true }.map { source to it } }
+        if (ways.isEmpty()) return listOf("no Great Person can be bought with faith in this world")
+        return ways.groupBy { it.second.params[0] }.map { (person, opened) ->
+            val unit = ruleset.units[person]!!
+            val price = opened.first().second.let { u -> if (u.type == com.unciv.models.ruleset.unique.UniqueType.BuyUnitsWithStat) "its faith price" else "${u.params[1]} faith" + if (u.type == com.unciv.models.ruleset.unique.UniqueType.BuyUnitsIncreasingCost) ", dearer each time" else "" }
+            val eras = opened.mapNotNull { (source, _) -> source as? com.unciv.models.ruleset.tech.Era }
+            val how = (opened.filter { it.first !is com.unciv.models.ruleset.tech.Era }.map { (source, unique) -> "with " + (if (source is com.unciv.models.ruleset.Policy) source.name.replace(" Complete", " complete") else "the ${source.name} belief") +
+                    unique.modifiers.joinToString("") { ", " + RulerUnits.inWords(it.text) } } +
+                listOfNotNull(eras.minByOrNull { it.eraNumber }?.let { "from the ${it.name} on" })).joinToString("; or ")
+            val now = civ.cities.filter { city -> faithPrice(city, unit) != null }
+            // What we lack, said plainly: the branch not yet complete, or the era not yet reached
+            val lacking = opened.mapNotNull { (source, unique) -> when {
+                source is com.unciv.models.ruleset.Policy && !civ.policies.isAdopted(source.name) -> "${source.name.removeSuffix(" Complete")} is not complete"
+                source is com.unciv.models.ruleset.tech.Era && civ.getEra().eraNumber < source.eraNumber -> "we are in the ${civ.getEra().name}"
+                !unique.conditionalsApply(civ.state) -> "we are in the ${civ.getEra().name}"
+                else -> null } }.distinct()
+            "$person: $how ($price) - " + (if (now.isNotEmpty()) "open to us now, ${faithPrice(now.first(), unit)} faith in ${now.first().name}" else "not open to us now" + (lacking.takeIf { it.isNotEmpty() }?.let { ": " + it.joinToString(", ") } ?: ""))
+        } + "a Great Person not named here cannot be bought with faith in this world"
     }
 
     /** Each strategic resource we hold or use: how many in all, how many our units take, how many the queued items will need, what is spare */

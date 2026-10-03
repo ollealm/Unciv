@@ -77,7 +77,8 @@ object UseGoldAutomation {
         val knownCityStates = civ.getKnownCivs().filter { it.isCityState && MotivationToAttackAutomation.hasAtLeastMotivationToAttack(civ, it, 0f) <= 0 }.toList()
 
         // canBeMarriedBy checks actual cost, but it can't be below 500*speedmodifier, and the later check is expensive
-        if (civ.gold >= 330 && civ.getHappiness() > 0 && civ.hasUnique(UniqueType.CityStateCanBeBoughtForGold)) {
+        // A marriage is the ruler's to make (the marry order): Austria's officials took four city-states in Run 21, each raising the cost of every policy
+        if (civ.gold >= 330 && civ.getHappiness() > 0 && civ.hasUnique(UniqueType.CityStateCanBeBoughtForGold) && civ.civID !in com.unciv.logic.automation.RulerOverrides.ruledCivs) {
             for (cityState in knownCityStates.toList() ) {  // Materialize sequence as diplomaticMarriage may kill a CS
                 if (cityState.cityStateFunctions.canBeMarriedBy(civ))
                     cityState.cityStateFunctions.diplomaticMarriage(civ)

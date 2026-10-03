@@ -56,7 +56,7 @@ object NextTurnAutomation {
                 ReligionAutomation.spendFaithOnReligion(civInfo)
             }
 
-            DiplomacyAutomation.denounce(civInfo)
+            if (civInfo.civID !in com.unciv.logic.automation.RulerOverrides.ruledCivs) DiplomacyAutomation.denounce(civInfo) // a ruler's denouncement is the ruler's to make
             DiplomacyAutomation.offerToEstablishEmbassy(civInfo)
             DiplomacyAutomation.offerOpenBorders(civInfo)
             DiplomacyAutomation.offerResearchAgreement(civInfo)
@@ -586,7 +586,7 @@ object NextTurnAutomation {
         val civHasSignificantlyWeakerMilitaryThanEnemies =
                 ownMilitaryStrength < sumOfEnemiesMilitaryStrength * 0.66f
         for (city in civInfo.cities) {
-            if (shouldAnnexCity(civInfo, city)) city.annexCity()
+            if (civInfo.civID !in com.unciv.logic.automation.RulerOverrides.ruledCivs && shouldAnnexCity(civInfo, city)) city.annexCity() // a ruled realm annexes only by the cities order
 
             // Don't pull a city off a spaceship part it's already building for the military push (only if actually attacked)
             val onSpaceshipPart = city.cityConstructions.getCurrentConstruction().name in civInfo.gameInfo.spaceResources
