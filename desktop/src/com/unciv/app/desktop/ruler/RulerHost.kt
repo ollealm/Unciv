@@ -145,11 +145,40 @@ object RulerHost {
             ages.noteLoss(loss, game().turns + 1)
         }
 
+        guardHooks()
+
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0)
         server.executor = Executors.newSingleThreadExecutor() // game state is not thread-safe
         server.createContext("/") { exchange -> handle(exchange) }
         server.start()
         println("RulerHost listening on http://127.0.0.1:$port, data in $dataDir")
+    }
+
+    /** Every hook the host lends the engine runs inside the engine's turn: one that throws would take the turn with it. Each is wrapped once, here, so a
+     *  failure prints and gives the engine's own default (audit 2026-10-03) */
+    private fun <T> hook(name: String, fallback: T, body: () -> T): T =
+        try { body() } catch (ex: Exception) { System.err.println("Host hook $name failed: $ex"); ex.printStackTrace(); fallback }
+
+    private fun guardHooks() {
+        RulerOverrides.forbidden?.let { f -> RulerOverrides.forbidden = { civ, construction -> hook("forbidden", false) { f(civ, construction) } } }
+        RulerOverrides.spendingNoted?.let { f -> RulerOverrides.spendingNoted = { civ, gold, what -> hook("spendingNoted", Unit) { f(civ, gold, what) } } }
+        RulerOverrides.unitHandler?.let { f -> RulerOverrides.unitHandler = { unit -> hook("unitHandler", false) { f(unit) } } }
+        RulerOverrides.hasOrder?.let { f -> RulerOverrides.hasOrder = { unit -> hook("hasOrder", false) { f(unit) } } }
+        RulerOverrides.blockFailed?.let { f -> RulerOverrides.blockFailed = { civ, what, why -> hook("blockFailed", Unit) { f(civ, what, why) } } }
+        RulerOverrides.unitNotMoved?.let { f -> RulerOverrides.unitNotMoved = { civ, unit, why -> hook("unitNotMoved", Unit) { f(civ, unit, why) } } }
+        RulerOverrides.rulersFirst?.let { f -> RulerOverrides.rulersFirst = { civ -> hook("rulersFirst", Unit) { f(civ) } } }
+        RulerOverrides.worldVoteOf?.let { f -> RulerOverrides.worldVoteOf = { civ -> hook<String?>("worldVoteOf", null) { f(civ) } } }
+        RulerOverrides.promised?.let { f -> RulerOverrides.promised = { civ -> hook("promised", emptyMap()) { f(civ) } } }
+        RulerOverrides.demandMade?.let { f -> RulerOverrides.demandMade = { civ, other, demand -> hook("demandMade", Unit) { f(civ, other, demand) } } }
+        RulerOverrides.underOrders?.let { f -> RulerOverrides.underOrders = { unit -> hook("underOrders", false) { f(unit) } } }
+        RulerOverrides.tradeAnswered?.let { f -> RulerOverrides.tradeAnswered = { request, receiver, outcome -> hook("tradeAnswered", Unit) { f(request, receiver, outcome) } } }
+        RulerOverrides.nearWinner?.let { f -> RulerOverrides.nearWinner = { other -> hook("nearWinner", false) { f(other) } } }
+        RulerOverrides.unitDisbanded?.let { f -> RulerOverrides.unitDisbanded = { civ, unit, why -> hook("unitDisbanded", Unit) { f(civ, unit, why) } } }
+        RulerOverrides.struck?.let { f -> RulerOverrides.struck = { strike -> hook("struck", Unit) { f(strike) } } }
+        RulerOverrides.unitExpended?.let { f -> RulerOverrides.unitExpended = { civ, unit, why -> hook("unitExpended", Unit) { f(civ, unit, why) } } }
+        RulerOverrides.unitLost?.let { f -> RulerOverrides.unitLost = { loss -> hook("unitLost", Unit) { f(loss) } } }
+        val refill = units.researchRefill; units.researchRefill = { civ -> hook("researchRefill", Unit) { refill(civ) } }
+        val missed = units.garrisonMissed; units.garrisonMissed = { civ, tile -> hook("garrisonMissed", Unit) { missed(civ, tile) } }
     }
 
     //region HTTP
@@ -654,8 +683,12 @@ object RulerHost {
                 try { done += action(entry) }
                 catch (ex: IllegalArgumentException) { failed += ex.message ?: "failed" }
                 catch (ex: ApiError) { failed += ex.message ?: "failed" }
+                // Anything else the engine throws costs that one item, said under failed, never the rest of the order (audit 2026-10-03)
+                catch (ex: Exception) { ex.printStackTrace(); failed += "This part of the order could not be carried out (${ex.javaClass.simpleName}: ${ex.message}); the rest went on" }
             }
         }
+        // Whatever happens below, the standing orders are applied and the realm saved: an order half carried out is still on disk as it stands
+        try {
 
         // Replace a city's whole build queue; the officials then leave it alone until it runs out
         tryEach(json.get("queue")) { order ->
@@ -813,8 +846,10 @@ object RulerHost {
             city.reassignAllPopulation()
             "${city.name} now works its tiles for ${focus.name}"
         }
-        applyStandingOrders(civ)
-        save()
+        } finally {
+            applyStandingOrders(civ)
+            save()
+        }
         return mapOf("orders" to standing.toMap(civ), "done" to done, "failed" to failed,
             "researchQueue" to civ.tech.techsToResearch, "researchNote" to "researchQueue is the scholars' path to the first goal; every goal stands under orders.research and is taken up in turn",
             "gold" to civ.gold)
@@ -1424,6 +1459,7 @@ object RulerHost {
     @Volatile private var settling = false
 
     private fun advance(turns: Int, wakeOnEvents: Boolean = false): Any? {
+        brokenTurn?.let { throw ApiError(503, "A turn could not be played ($it); the world was reloaded as it stood before it. Restart the host before playing on.") }
         val game = game()
         if (game.majorCivs().any { it.victoryManager.hasWon() }) throw ApiError(409, "The game is over")
         val startTurn = game.turns
@@ -1440,16 +1476,22 @@ object RulerHost {
             val before = WorldSnapshot(game)
             val civSnapshots = ruledCivs.associateWith { diplomacy.noteRequests(it); CivSnapshot(it) }
             for (civ in ruledCivs) applyStandingOrders(civ)
-            game.nextTurn()
-            trail.record(game)
+            // The engine cannot pick up a turn it failed partway through (GameInfo.nextTurn moves currentPlayer only at the end), and a second try would play
+            // the realms already moved twice: the world goes back to the last save, every court is told, and no turn is played until the host is restarted
+            try { game.nextTurn() } catch (ex: Throwable) { failTurn(ex); throw ApiError(500, "The turn could not be played: $ex. The world was reloaded as it stood before it; restart the host before playing on.") }
+            guardedStep("the trail") { trail.record(game) }
             val after = WorldSnapshot(game)
             settling = true
             try {
-                recordPublicEvents(before, after)
-                for (civ in ruledCivs) recordChancery(civ, civSnapshots[civ]!!)
-                noteWorldVote(game, ruledCivs)
+                guardedStep("the world's events") { recordPublicEvents(before, after) }
+                // One realm's bookkeeping going wrong costs that realm's account of the turn, never the others' or the save
+                for (civ in ruledCivs) guardedStep("the chancery of ${civ.civName}") {
+                    try { recordChancery(civ, civSnapshots[civ]!!) }
+                    catch (ex: Exception) { log(civ, "The chancery's account of this turn could not be finished (${ex.javaClass.simpleName}); some of what happened may be missing from it."); throw ex }
+                }
+                guardedStep("the world's vote") { noteWorldVote(game, ruledCivs) }
             } finally { settling = false }
-            units.forgetTheDead(game)
+            guardedStep("the roll of the dead") { units.forgetTheDead(game) }
 
             for (civ in ruledCivs) {
                 val news = chanceryLog(civ, game.turns - 1).map { it["text"] as String }.filter { line -> wakeWorthy.any { it.containsMatchIn(line) } }
@@ -1472,6 +1514,7 @@ object RulerHost {
                 try { addPublicEvent("$stopReason.") } finally { settling = false }
             }
             declaredBy = council?.declaredBy
+            save() // every turn on disk as soon as it is played: a turn that fails later goes back to this one, not to the start of the advance
             if (stopReason != null || (wakeOnEvents && wake.isNotEmpty())) break
         }
         worldAtLastAdvance = WorldSnapshot(game)
@@ -1489,6 +1532,26 @@ object RulerHost {
             "publicEvents" to publicEvents.filter { (it["turn"] as Int) > startTurn },
             "rankings" to rankings()
         )
+    }
+
+    /** Set when a turn could not be played: the world was reloaded from the last save, and nothing more is played until the host is restarted */
+    private var brokenTurn: String? = null
+
+    /** A turn the engine failed partway through: back to the last save on disk, each court told, the host stopped from playing on */
+    private fun failTurn(ex: Throwable) {
+        ex.printStackTrace()
+        val failedAt = game().turns
+        brokenTurn = "${ex.javaClass.simpleName} at turn $failedAt"
+        resetHostState()
+        load()
+        for (name in orders.keys) game().civilizations.firstOrNull { it.civName == name }?.let { civ ->
+            log(civ, "The turn could not be played (${ex.javaClass.simpleName}: ${ex.message}); the world stands as it was before it, and the host waits to be restarted.") }
+        save()
+    }
+
+    /** One step of the bookkeeping after a turn: a failure is printed and skipped, and the rest - the save above all - goes on */
+    private fun guardedStep(what: String, step: () -> Unit) {
+        try { step() } catch (ex: Exception) { System.err.println("Bookkeeping step failed ($what): $ex"); ex.printStackTrace() }
     }
 
     /** Something a ruler must hear about right away, ending the round early */
