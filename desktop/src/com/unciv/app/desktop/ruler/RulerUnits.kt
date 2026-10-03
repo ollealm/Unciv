@@ -13,8 +13,10 @@ import com.unciv.models.UpgradeUnitAction
 import com.unciv.models.ruleset.unique.UniqueType
 import com.unciv.ui.screens.worldscreen.unit.actions.UnitActions
 import com.unciv.ui.screens.worldscreen.unit.actions.UnitActionsUpgrade
-import kotlin.math.atan2
 import kotlin.math.roundToInt
+import com.unciv.app.desktop.ruler.Prose.article
+import com.unciv.app.desktop.ruler.Prose.plural
+import com.unciv.logic.automation.RulerOverrides
 
 /**
  *  A ruler's direct orders to single units. While a unit has an order the automation leaves it alone;
@@ -169,7 +171,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             return true
         }
         // A garrison order does not turn a stronger soldier out of the city for a weaker one: the order is dropped, the stronger stays
-        if (target != null && unit.getTile() != target && order.action == "garrison") target.militaryUnit?.takeIf { it.civ == civ && strengthOf(it) > strengthOf(unit) }?.let { holder ->
+        if (target != null && unit.getTile() != target && order.action == "garrison") target.militaryUnit?.takeIf { it.civ == civ && RulerOverrides.might(it) > RulerOverrides.might(unit) }?.let { holder ->
             log(civ, "Our ${unit.name} was to garrison ${target.getCity()?.name}, but our ${holder.name} holding it is the stronger, so it stays and the order is dropped.")
             drop(unit)
             return false
@@ -209,9 +211,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             }
             val way = pathTo(unit, target)
             if (way.isEmpty()) {
-                log(civ, "Our ${unit.name} cannot reach ${RulerCampaigns.placeOf(civ, target)}; the order is dropped and the officials take it back.")
-                noteGarrisonFailure(unit, order, target)
-                drop(unit)
+                dropped(unit, "Our ${unit.name} cannot reach ${RulerCampaigns.placeOf(civ, target)}")
                 return false
             }
             // A civilian whose target holds one of our own civilians changes places with it: a Great Person on its way to use itself, or a Settler held or
@@ -237,10 +237,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                         if (order.turnsStuck == 3) log(civ, "Our ${unit.name} waits beside ${RulerCampaigns.placeOf(civ, target)}: our ${blocker.name} holds it and cannot change places yet. It swaps in as soon as it can.")
                         return true
                     }
-                    log(civ, "Our ${unit.name} has been stuck for ${order.turnsStuck} turns on its way to ${RulerCampaigns.placeOf(civ, target)}, no nearer than it was" +
-                        (blocker?.let { " - the tile is held by ${it.civ.civName}'s ${it.name}" } ?: " - no way to it opens") + ". The order is dropped and the officials take it back.")
-                    noteGarrisonFailure(unit, order, target)
-                    drop(unit)
+                    dropped(unit, "Our ${unit.name} has been stuck for ${order.turnsStuck} turns on its way to ${RulerCampaigns.placeOf(civ, target)}, no nearer than it was" +
+                        (blocker?.let { " - the tile is held by ${it.civ.civName}'s ${it.name}" } ?: " - no way to it opens"))
                     return false
                 }
                 return true // still on the way
@@ -277,8 +275,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                     order.turnsStuck += 1
                     if (order.turnsStuck == 1) log(civ, "Our ${unit.name} #${unit.id} could not use its ability ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}${order.ability?.let { " ($it)" } ?: ""}: ${abilitiesHere(unit)}. Name one with the order and stand where it applies. It tries again for two more turns, then the order is dropped.")
                     if (order.turnsStuck < 3) return true
-                    log(civ, "Our ${unit.name} still could not use its ability ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}; the order is dropped and the officials take it back.")
-                    drop(unit)
+                    dropped(unit, "Our ${unit.name} still could not use its ability ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}")
                     return false // taken back this turn, as said
                 }
                 orders.remove(unit.id)
@@ -299,8 +296,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                     if (!recipient.isCityState) log(recipient, "${civ.civName} gave us their $name, now our $name #$id ${RulerCampaigns.atPlaceOf(recipient, unit.getTile())}.") // its number: a new unit to order
                     true
                 } else {
-                    log(civ, "Our $name could not be given to ${recipient.civName} $here: ${giftProblem(civ, unit, recipient) ?: "they would not take it there"}. The order is dropped and the officials take it back.")
-                    drop(unit)
+                    dropped(unit, "Our $name could not be given to ${recipient.civName} $here: ${giftProblem(civ, unit, recipient) ?: "they would not take it there"}")
                     false
                 }
             }
@@ -333,7 +329,6 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         try { return block() } finally { unit.cache.canEnterCityStates = false; unit.movement.clearPathfindingCache() }
     }
 
-    private fun strengthOf(unit: MapUnit) = unit.baseUnit.strength.coerceAtLeast(unit.baseUnit.rangedStrength)
 
     private fun recipientOf(civ: Civilization, order: Order) = civ.gameInfo.civilizations.firstOrNull { it.civName == order.to }
 
@@ -344,8 +339,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         val recipient = recipientOf(civ, order)?.takeIf { it.isAlive() }
         val problem = if (recipient == null) "${order.to} is gone" else giftProblem(civ, unit, recipient)
         if (problem != null || recipient == null) {
-            log(civ, "Our ${unit.name} #${unit.id} cannot be given to ${order.to}: $problem. The order is dropped and the officials take it back.")
-            drop(unit)
+            dropped(unit, "Our ${unit.name} #${unit.id} cannot be given to ${order.to}: $problem")
             return false
         }
         val target = order.x?.let { x -> order.y?.let { y -> civ.gameInfo.tileMap.getIfTileExistsOrNull(x, y) } }
@@ -354,8 +348,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             ?: target?.takeIf { canBeGivenOn(unit, it, recipient) && canMarch(unit, it) }
             ?: giftTile(unit, recipient)
         if (tile == null) {
-            log(civ, "${recipient.civName}'s land is now beyond the reach of our ${unit.name} #${unit.id}; the gift order is dropped and the officials take it back.")
-            drop(unit)
+            dropped(unit, "${recipient.civName}'s land is now beyond the reach of our ${unit.name} #${unit.id}")
             return false
         }
         if (tile != target) {
@@ -405,15 +398,21 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             .filter { it.isLand && !it.isImpassible() && it.getOwner() == unit.civ && it.civilianUnit == null && !claimed(unit, it) }
             .sortedBy { it.aerialDistanceTo(unit.getTile()) }.take(8).firstOrNull { canMarch(unit, it) }
 
-    /** An order dropped for good: a Great Person goes to the officials with it, or the hold at the top of [handle] would take it back next turn and the ruler would be asked again */
     /** An order that could not be carried out at all - the engine refused a step of it: dropped, said in the chancery, and the officials take the unit */
     fun dropAfterFailure(unit: MapUnit) {
         val order = orders[unit.id] ?: return
-        log(unit.civ, "Our ${unit.name} #${unit.id} could not carry out its ${order.action} order${order.x?.let { " for ${where(unit.civ, unit.civ.gameInfo.tileMap[it, order.y!!])}" } ?: ""} from ${where(unit.civ, unit.getTile())}: the way would not open. The order is dropped and the officials take it back.")
-        order.x?.let { noteGarrisonFailure(unit, order, unit.civ.gameInfo.tileMap[it, order.y!!]) }
+        dropped(unit, "Our ${unit.name} #${unit.id} could not carry out its ${order.action} order${order.x?.let { " for ${where(unit.civ, unit.civ.gameInfo.tileMap[it, order.y!!])}" } ?: ""} from ${where(unit.civ, unit.getTile())}: the way would not open")
+    }
+
+    /** An order given up: the chancery told why, a garrison that could not reach its city remembered for the warnings, and the officials take the unit back */
+    private fun dropped(unit: MapUnit, why: String) {
+        val order = orders[unit.id] ?: return
+        log(unit.civ, "$why. The order is dropped and the officials take it back.")
+        order.x?.let { x -> order.y?.let { y -> unit.civ.gameInfo.tileMap.getIfTileExistsOrNull(x, y) } }?.let { noteGarrisonFailure(unit, order, it) }
         drop(unit)
     }
 
+    /** An order dropped for good: a Great Person goes to the officials with it, or the hold at the top of [handle] would take it back next turn and the ruler would be asked again */
     private fun drop(unit: MapUnit) {
         orders.remove(unit.id)
         if (unit.isGreatPerson()) released += unit.id
@@ -439,7 +438,6 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     /** Re-arm one of our units by the ruler's hand, paid from the treasury above [reserve]: (done, what to tell). A unit that has spent its movement
      *  is re-armed at the start of our next turn instead, as a player's would be */
     fun rearm(civ: Civilization, id: Int, reserve: Int, deferIfSpent: Boolean = true): Pair<Boolean, String> {
-        fun a(name: String) = (if (name.first().lowercaseChar() in "aeiou") "an " else "a ") + name
         val unit = civ.units.getUnitById(id) ?: return Pair(false, "No unit of ours is #$id - see the briefing's unit list")
         val label = "${unit.name} #$id"
         val ruleset = civ.gameInfo.ruleset
@@ -447,9 +445,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         if (options.isEmpty()) {
             val next = unit.baseUnit.getUpgradeUnits(unit.cache.state).mapNotNull { ruleset.units[it] }.map { civ.getEquivalentUnit(it) }.toList()
             return Pair(false, "$label cannot be re-armed: " + when {
-                next.isEmpty() -> "there are no newer arms for ${a(unit.name)}"
+                next.isEmpty() -> "there are no newer arms for ${article(unit.name)}"
                 unit.getTile().getOwner() != civ -> "it stands outside our borders, and can be re-armed only on our own land"
-                else -> next.first().let { to -> "we do not yet know how to make ${a(to.name)}" + (to.requiredTech?.let { " (it needs $it)" } ?: "") }
+                else -> next.first().let { to -> "we do not yet know how to make ${article(to.name)}" + (to.requiredTech?.let { " (it needs $it)" } ?: "") }
             })
         }
         // As the officials choose: the cheapest of the newer arms that can be had
@@ -457,22 +455,22 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         if (usable.isEmpty()) {
             val to = options.first().unitToUpgradeTo
             val lacking = to.getResourceRequirementsPerTurn(unit.cache.state).keys.filter { civ.getResourceAmount(it) < 1 }
-            return Pair(false, "$label cannot be re-armed as ${a(to.name)}: it needs ${lacking.ifEmpty { to.getResourceRequirementsPerTurn(unit.cache.state).keys.toList() }.joinToString(" and ")}, which we lack")
+            return Pair(false, "$label cannot be re-armed as ${article(to.name)}: it needs ${lacking.ifEmpty { to.getResourceRequirementsPerTurn(unit.cache.state).keys.toList() }.joinToString(" and ")}, which we lack")
         }
         val choice = usable.minBy { it.goldCostOfUpgrade }
         val to = choice.unitToUpgradeTo.name
         val cost = choice.goldCostOfUpgrade
-        if (civ.gold - reserve < cost) return Pair(false, "$label cannot be re-armed as ${a(to)}: it costs $cost gold, and only ${(civ.gold - reserve).coerceAtLeast(0)} lies above the reserve")
+        if (civ.gold - reserve < cost) return Pair(false, "$label cannot be re-armed as ${article(to)}: it costs $cost gold, and only ${(civ.gold - reserve).coerceAtLeast(0)} lies above the reserve")
         if (unit.isEmbarked()) return Pair(false, "$label is at sea, embarked; it can be re-armed once ashore on our land")
         if (!unit.hasMovement()) {
             if (!deferIfSpent) return Pair(false, "$label has no movement left to be re-armed")
             rearmNext[id] = reserve
-            return Pair(true, "$label has marched this turn: it is re-armed as ${a(to)} at the start of our next turn, for about $cost gold if the treasury still allows")
+            return Pair(true, "$label has marched this turn: it is re-armed as ${article(to)} at the start of our next turn, for about $cost gold if the treasury still allows")
         }
-        val action = choice.action ?: return Pair(false, "$label cannot be re-armed as ${a(to)} here and now")
+        val action = choice.action ?: return Pair(false, "$label cannot be re-armed as ${article(to)} here and now")
         action.invoke()
         val now = civ.units.getUnitById(id)
-        if (now == null || now.name == unit.name) return Pair(false, "$label could not be re-armed as ${a(to)}: the new arms found no room to stand")
+        if (now == null || now.name == unit.name) return Pair(false, "$label could not be re-armed as ${article(to)}: the new arms found no room to stand")
         log(civ, "By your order: re-armed our ${unit.name} #$id as $to for $cost gold.")
         return Pair(true, "$label re-armed as $to for $cost gold")
     }
@@ -795,11 +793,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             val nearest = civ.cities.minByOrNull { it.getCenterTile().aerialDistanceTo(tile) } ?: return coords
             val distance = nearest.getCenterTile().aerialDistanceTo(tile)
             if (distance == 0) return "$coords, in ${nearest.name}"
-            val from = HexMath.hex2WorldCoords(nearest.getCenterTile().position)
-            val to = HexMath.hex2WorldCoords(tile.position)
-            val angle = Math.toDegrees(atan2((to.y - from.y).toDouble(), (to.x - from.x).toDouble()))
-            val compass = listOf("E", "NE", "N", "NW", "W", "SW", "S", "SE")[(((angle + 360 + 22.5) % 360) / 45).toInt()]
-            return "$coords, $distance tile${if (distance == 1) "" else "s"} $compass of ${nearest.name}"
+            val compass = RulerCampaigns.compassOf(HexMath.hex2WorldCoords(tile.position), HexMath.hex2WorldCoords(nearest.getCenterTile().position), short = true)
+            return "$coords, $distance tile${plural(distance)} $compass of ${nearest.name}"
         }
     }
 }

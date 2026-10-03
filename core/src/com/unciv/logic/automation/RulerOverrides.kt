@@ -77,16 +77,25 @@ object RulerOverrides {
         .any { to -> to.getResourceRequirementsPerTurn(unit.cache.state).any { (resource, needs) -> resource in promised && !unit.requiresResource(resource)
             && unit.civ.getResourceAmount(resource) - needs < promised[resource]!! } }
 
-    /** A ruled civ's land soldier far behind its best arms - less than half the strength of our strongest land soldier, engines aside (RulerHost.poorDefender's
-     *  test): under the attack posture it is not sent to a siege or an assault but stays home as garrison and reserve. Warriors, Lancers and a Pikeman thrown
-     *  at Information-era guns died for nothing (Run 16) */
+    /** A soldier's might, as every reckoning of ours weighs one: the greater of its strength and its ranged strength */
+    @yairm210.purity.annotations.Readonly
+    fun might(unit: MapUnit): Int = unit.baseUnit.strength.coerceAtLeast(unit.baseUnit.rangedStrength)
+
+    /** Far behind its civ's best arms: less than half the might of its strongest land soldier, engines aside. The one test for both uses - the attack
+     *  posture keeping it home (outclassed) and the host's weak-garrison warning and relief (RulerHost.poorDefender); a warship's might never counts */
+    @yairm210.purity.annotations.Readonly
+    fun farBehind(unit: MapUnit): Boolean {
+        val best = unit.civ.units.getCivUnits().filter { it.isMilitary() && it.baseUnit.isLandUnit && !it.baseUnit.isProbablySiegeUnit() }.maxOfOrNull { might(it) } ?: return false
+        return might(unit) * 2 < best
+    }
+
+    /** A ruled civ's land soldier far behind its best arms ([farBehind]): under the attack posture it is not sent to a siege or an assault but stays home
+     *  as garrison and reserve. Warriors, Lancers and a Pikeman thrown at Information-era guns died for nothing (Run 16) */
     @yairm210.purity.annotations.Readonly
     fun outclassed(unit: MapUnit): Boolean {
         if (unit.civ.civID !in ruledCivs || !unit.isMilitary() || !unit.baseUnit.isLandUnit || unit.baseUnit.isProbablySiegeUnit()) return false
         if ((postures[unit.civ.civID]?.stance ?: "attack") != "attack") return false
-        fun might(soldier: MapUnit) = soldier.baseUnit.strength.coerceAtLeast(soldier.baseUnit.rangedStrength)
-        val best = unit.civ.units.getCivUnits().filter { it.isMilitary() && it.baseUnit.isLandUnit && !it.baseUnit.isProbablySiegeUnit() }.maxOfOrNull { might(it) } ?: return false
-        return might(unit) * 2 < best
+        return farBehind(unit)
     }
 
     /** The tiles the enemy soldiers near this civilian of a ruled civ could strike or take next turn, by their own movement and range - the engine's own

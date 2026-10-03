@@ -8,6 +8,9 @@ import com.unciv.logic.map.HexMath
 import com.unciv.logic.map.mapunit.MapUnit
 import com.unciv.logic.map.tile.Tile
 import com.unciv.models.ruleset.unique.UniqueType
+import com.unciv.app.desktop.ruler.Prose.andList
+import com.unciv.app.desktop.ruler.Prose.article
+import com.unciv.app.desktop.ruler.Prose.pluralOf
 
 /**
  *  What a realm's people did in an age, reckoned from the trail: where each company marched and fell, what the scouts and ships found,
@@ -32,9 +35,8 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
         val by = loss.enemyUnit?.takeIf { ruleset.units[it]?.isMilitary == true } ?: return
         val byEra = eraOf(by) ?: return // a city's guns are not arms of an age
         if ((ruleset.eras[byEra]?.eraNumber ?: 0) - (ruleset.eras[era]?.eraNumber ?: 0) < 3) return
-        val city = loss.where.getCity()?.takeIf { loss.where.isCityCenter() }
-        val near = city ?: loss.civ.gameInfo.getCities().minByOrNull { it.getCenterTile().aerialDistanceTo(loss.where) }
-        val place = when { city != null -> "at ${city.name}"; near != null -> "near ${near.name}"; else -> "far from any city" }
+        // The place as the fallen side knew it, in the words every other place of the chronicle is told in
+        val place = RulerCampaigns.atPlaceOf(loss.civ, loss.where)
         outclassed += Outclassed(turn, loss.civ.civName, loss.unit.name, era, enemy.civName, by, byEra, place)
         trail.stands.firstEntry()?.key?.let { oldest -> outclassed.removeAll { it.turn < oldest } }
     }
@@ -51,7 +53,7 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
     private fun curiosities(civ: Civilization, from: Int, to: Int, first: Map<Int, RulerTrail.Stand>, last: Map<Int, RulerTrail.Stand>, enemies: Set<String>): List<String> {
         val game = civ.gameInfo
         val lines = ArrayList<String>()
-        fun count(n: Int, name: String) = if (n == 1) (if (name.firstOrNull()?.lowercaseChar()?.let { it in "aeiou" } == true) "An $name" else "A $name") else "$n ${name}s"
+        fun count(n: Int, name: String) = if (n == 1) article(name).replaceFirstChar { it.uppercase() } else "$n ${pluralOf(name)}"
         // (a) arms of an older age destroyed by a far newer one - the world's
         outclassed.filter { it.turn in from..to }.groupBy { listOf(it.loser, it.unit, it.victor, it.by, it.place) }.entries.take(3).forEach { (_, group) ->
             val o = group[0]
@@ -72,7 +74,7 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
             here.filter { it.baseUnit.isLandUnit }.map { it to farOf(it.getTile()) }
                 .filter { (unit, distance) -> distance >= 12 && tileOf(first[unit.id])?.let { farOf(it) < 12 } != false }
                 .sortedByDescending { it.second }.take(2)
-                .forEach { (unit, _) -> lines += "Our ${unit.name} reached ${placeOf(civ, unit.getTile(), enemies)}, far from any town of ours." }
+                .forEach { (unit, _) -> lines += "Our ${unit.name} reached ${RulerCampaigns.placeOf(civ, unit.getTile(), enemies)}, far from any town of ours." }
             here.filter { it.isCivilian() && it.getTile().isCityCenter() && it.getTile().getOwner() != civ && tileOf(first[it.id]) != it.getTile() }.take(2)
                 .forEach { unit -> lines += "Our ${unit.name} went into ${unit.getTile().getCity()!!.name}, a city of ${unit.getTile().getOwner()!!.civName}." }
         }
@@ -80,8 +82,8 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
         val ageLength = to - from
         for (unit in civ.units.getCivUnits()) {
             val still = stillFor(unit)
-            if (unit.isGreatPerson() && still >= 40 && still - ageLength < 40) lines += "Our ${unit.name} has stood ${RulerCampaigns.atPlace(placeOf(civ, unit.getTile(), enemies))} since ${yearText(to - still)}."
-            else if (unit.hasUnique(UniqueType.FoundCity) && still >= 30 && still - ageLength < 30) lines += "Our ${unit.name} has waited ${RulerCampaigns.atPlace(placeOf(civ, unit.getTile(), enemies))} since ${yearText(to - still)}."
+            if (unit.isGreatPerson() && still >= 40 && still - ageLength < 40) lines += "Our ${unit.name} has stood ${RulerCampaigns.atPlace(RulerCampaigns.placeOf(civ, unit.getTile(), enemies))} since ${yearText(to - still)}."
+            else if (unit.hasUnique(UniqueType.FoundCity) && still >= 30 && still - ageLength < 30) lines += "Our ${unit.name} has waited ${RulerCampaigns.atPlace(RulerCampaigns.placeOf(civ, unit.getTile(), enemies))} since ${yearText(to - still)}."
         }
         return lines
     }
@@ -107,7 +109,7 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
         // Losses the campaigns do not already tell: a garrison overrun, a picket caught alone
         val inCampaigns = campaigns.flatMap { c -> c.members.map { c.whose to it.id } }.toSet()
         val ours = RulerCampaigns.members(trail, game, civ.civName, from, to)
-        val lost = ours.filter { it.fell && (civ.civName to it.id) !in inCampaigns }.groupBy { placeOf(civ, it.end, enemies) }.entries.sortedByDescending { it.value.size }
+        val lost = ours.filter { it.fell && (civ.civName to it.id) !in inCampaigns }.groupBy { RulerCampaigns.placeOf(civ, it.end, enemies) }.entries.sortedByDescending { it.value.size }
             .map { (place, group) -> mapOf("what" to RulerCampaigns.company(group.map { it.name }), "where" to place, "at" to RulerCampaigns.atPlace(place), "xy" to group[0].end.position.let { listOf(it.x, it.y) }) }
         val enemyLost = enemies.flatMap { enemy -> RulerCampaigns.members(trail, game, enemy, from, to).filter { it.fell && it.end.isExplored(civ) && (enemy to it.id) !in inCampaigns }.map { enemy to it } }
             .groupBy { (enemy, member) -> enemy to RulerCampaigns.placeOf(civ, member.end, enemies, enemy) }.entries
@@ -122,7 +124,7 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
         val capital = civ.getCapital()?.getCenterTile()
         val exploration = if (fresh.isEmpty()) null else {
             val land = fresh.count { it.isLand }
-            val direction = capital?.let { compassOf(it, fresh.map { t -> HexMath.hex2WorldCoords(t.position) }.let { pts -> pts.reduce { a, b -> a.add(b) }.scl(1f / pts.size) }, HexMath.hex2WorldCoords(it.position)) }
+            val direction = capital?.let { RulerCampaigns.compassOf(fresh.map { t -> HexMath.hex2WorldCoords(t.position) }.let { pts -> pts.reduce { a, b -> a.add(b) }.scl(1f / pts.size) }, HexMath.hex2WorldCoords(it.position)) }
             val farthest = capital?.let { c -> fresh.maxOf { it.aerialDistanceTo(c) } }
             val wonders = fresh.mapNotNull { it.naturalWonder }.distinct()
             val found = fresh.filter { it.isCityCenter() }.mapNotNull { it.getCity() }
@@ -133,7 +135,7 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
         // Our farthest ranging units - the scouts and ships whose journeys the exploration came from
         val explorers = ours.filter { m -> !m.air && civ.cities.none { it.getCenterTile().aerialDistanceTo(m.end) < 8 } && m.start.aerialDistanceTo(m.end) >= 8 }
             .sortedByDescending { it.start.aerialDistanceTo(it.end) }.take(3)
-            .map { mapOf("what" to it.name, "reached" to placeOf(civ, it.end, enemies)) }
+            .map { mapOf("what" to it.name, "reached" to RulerCampaigns.placeOf(civ, it.end, enemies)) }
 
         // The companies in sight now, as the map's badges show them: none inside a city, which stands for its garrison, and no aircraft
         // A soldier at sea is embarked, in boats - not standing on the water
@@ -165,8 +167,7 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
         for (hands in taken.groupBy { it["city"] }.values) {
             val city = hands[0]["city"]
             lines += if (hands.size == 1) "$city fell to ${RulerCampaigns.people(hands[0]["by"] as String)} in ${hands[0]["year"]}."
-            else "$city changed hands ${RulerCampaigns.count(hands.size)} times: " + hands.mapIndexed { i, t -> "to ${RulerCampaigns.people(t["by"] as String)}${if (hands.take(i).any { it["by"] == t["by"] }) " again" else ""} in ${t["year"]}" }
-                .let { it.dropLast(1).joinToString(", ") + " and " + it.last() } + "; ${RulerCampaigns.people(hands.last()["by"] as String)} holds it now."
+            else "$city changed hands ${RulerCampaigns.count(hands.size)} times: " + andList(hands.mapIndexed { i, t -> "to ${RulerCampaigns.people(t["by"] as String)}${if (hands.take(i).any { it["by"] == t["by"] }) " again" else ""} in ${t["year"]}" }) + "; ${RulerCampaigns.people(hands.last()["by"] as String)} holds it now."
         }
         // The known world's growth in words, never a count of tiles: how much, land or water, which way and how far from home
         if (exploration != null) lines += run {
@@ -187,8 +188,4 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
             "exploration" to exploration, "explorers" to explorers, "met" to met, "inSight" to inSight, "glimpses" to glimpses, "lines" to lines,
             "curiosities" to curiosities(civ, from, to, first, last, enemies))
     }
-
-    private fun placeOf(civ: Civilization, tile: Tile, enemies: Set<String>) = RulerCampaigns.placeOf(civ, tile, enemies)
-
-    private fun compassOf(origin: Tile, to: com.badlogic.gdx.math.Vector2, from: com.badlogic.gdx.math.Vector2) = RulerCampaigns.compassOf(to, from)
 }

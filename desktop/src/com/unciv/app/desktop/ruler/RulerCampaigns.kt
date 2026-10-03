@@ -6,6 +6,9 @@ import com.unciv.logic.civilization.Civilization
 import com.unciv.logic.map.HexMath
 import com.unciv.logic.map.tile.Tile
 import kotlin.math.atan2
+import com.unciv.app.desktop.ruler.Prose.andList
+import com.unciv.app.desktop.ruler.Prose.article
+import com.unciv.app.desktop.ruler.Prose.pluralOf
 
 /**
  *  An age's movements as a history atlas draws them: not every unit's wiggle, but the few forces that went somewhere together -
@@ -160,15 +163,8 @@ object RulerCampaigns {
 
     /** "3 Infantry and a Rocket Artillery" */
     fun company(names: List<String>): String {
-        val parts = names.groupingBy { it }.eachCount().entries.sortedByDescending { it.value }.map { (name, n) -> if (n == 1) article(name) else "$n ${plural(name)}" }
-        return if (parts.size <= 1) parts.joinToString() else parts.dropLast(1).joinToString(", ") + " and " + parts.last()
-    }
-    private fun article(name: String) = if (name.firstOrNull()?.lowercaseChar()?.let { it in "aeiou" } == true) "an $name" else "a $name"
-    private fun plural(name: String) = when {
-        name.endsWith("man") -> name.dropLast(3) + "men"
-        name.endsWith("s") || Regex("(Infantry|Artillery|Cavalry)$").containsMatchIn(name) -> name
-        name.endsWith("y") && name.getOrNull(name.length - 2)?.let { it !in "aeiou" } == true -> name.dropLast(1) + "ies"
-        else -> name + "s"
+        val parts = names.groupingBy { it }.eachCount().entries.sortedByDescending { it.value }.map { (name, n) -> if (n == 1) article(name) else "$n ${pluralOf(name)}" }
+        return andList(parts)
     }
 
     fun count(n: Int) = listOf("no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve").getOrNull(n) ?: "$n"
@@ -230,7 +226,7 @@ object RulerCampaigns {
 
     /** Cities by whose they are: "Axum and Addis Ababa of Ethiopia; Carthage" - a city-state named for its city stands alone */
     fun citiesOf(cities: List<City>, civ: Civilization): String = cities.groupBy { it.civ }.entries.joinToString("; ") { (owner, group) ->
-        val names = group.map { it.name }.let { if (it.size == 1) it[0] else it.dropLast(1).joinToString(", ") + " and " + it.last() }
+        val names = andList(group.map { it.name })
         if (owner == civ || group.all { it.name == owner.civName }) names else "$names of ${people(owner.civName)}"
     }
 
@@ -245,8 +241,10 @@ object RulerCampaigns {
         else -> "at $place"
     }
 
-    fun compassOf(to: com.badlogic.gdx.math.Vector2, from: com.badlogic.gdx.math.Vector2): String {
+    fun compassOf(to: com.badlogic.gdx.math.Vector2, from: com.badlogic.gdx.math.Vector2, short: Boolean = false): String {
         val angle = Math.toDegrees(atan2((to.y - from.y).toDouble(), (to.x - from.x).toDouble()))
-        return listOf("east", "north-east", "north", "north-west", "west", "south-west", "south", "south-east")[(((angle + 360 + 22.5) % 360) / 45).toInt()]
+        val point = (((angle + 360 + 22.5) % 360) / 45).toInt()
+        // The advisor's unit list reads "NE"; the world's words read "north-east"
+        return (if (short) listOf("E", "NE", "N", "NW", "W", "SW", "S", "SE") else listOf("east", "north-east", "north", "north-west", "west", "south-west", "south", "south-east"))[point]
     }
 }
