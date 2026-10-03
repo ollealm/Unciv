@@ -633,8 +633,10 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         return "it can now ${open.joinToString { named(it) }.ifEmpty { "do nothing here" }}" + (has - open.toSet()).takeIf { it.isNotEmpty() }?.let { blocked -> "; " + blocked.joinToString("; ") { "${named(it)} needs ${why(it)}" } }.orEmpty()
     }
 
-    /** The way there for a unit given a full turn's movement - orders are given between turns, when units have spent theirs, and Unciv finds no path for a spent unit */
-    /** Could this unit, given a full turn's movement, walk to that tile at all? */
+    /** Could this unit, given a full turn's movement, walk to that tile at all? Orders are given between turns, when units have spent theirs, and Unciv finds no
+     *  path for a spent unit. A yes is a hope, not a promise: the engine's path reckoning counts unexplored tiles as passable, so a way found now may close as the
+     *  march uncovers the ground - why a garrison march can fail turns later and a march can wander (Runs 22 and 23), and why failures are remembered and
+     *  "stuck" means no nearer */
     fun canMarch(unit: MapUnit, target: Tile) = target == unit.getTile() || pathTo(unit, target).isNotEmpty()
 
     /** Does this unit, sent on a trade mission to [target]'s city-state, stand on that city-state's land - where the engine lets the mission be made (the tile's owner,
