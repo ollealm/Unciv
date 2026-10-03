@@ -24,10 +24,11 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
 
     /** action: move (then release), settle, fortify/garrison, hold, explore (then release), use (a great person's ability, then release), gift (march onto [to]'s land and give the unit to them) */
     class Order(val action: String, var x: Int?, var y: Int?, val ability: String? = null, val to: String? = null) {
-        /** Where the unit stood last turn and for how many turns, to notice an order that is going nowhere */
-        var lastSpot: String? = null
+        /** The fewest steps left to the target at any turn's start so far, and how many turns running the march has not come nearer than that,
+         *  to notice an order that is going nowhere - standing still or wandering alike */
+        var stepsBest: Int? = null
         var turnsStuck = 0
-        fun toMap() = mapOf("action" to action, "x" to x, "y" to y, "ability" to ability, "to" to to, "lastSpot" to lastSpot, "turnsStuck" to turnsStuck)
+        fun toMap() = mapOf("action" to action, "x" to x, "y" to y, "ability" to ability, "to" to to, "stepsBest" to stepsBest, "turnsStuck" to turnsStuck)
     }
 
     /** unit id -> order */
@@ -45,13 +46,40 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     /** Units ordered re-armed that had spent their movement: re-armed at the start of our next turn, when they have it again (unit id -> the reserve then in force) */
     private val rearmNext = HashMap<Int, Int>()
 
+    /** Set by the host: a garrison march to this city failed - the city's defender warnings are to show in full again, acknowledged or not */
+    var garrisonMissed: (Civilization, Tile) -> Unit = { _, _ -> }
+
+    /** Garrison marches that failed ("unit id@city position" -> the turn): the way reckoned at the order's giving runs through unknown ground the march
+     *  may find closed, so the same soldier is not sent to the same city again for [GARRISON_RETRY] turns (Grand River's Warrior was sent twice and failed twice, Run 23) */
+    private val garrisonFailed = HashMap<String, Int>()
+
     /** Forget everything of one game */
-    fun reset() { orders.clear(); released.clear(); given.clear(); usedByOrder.clear(); rearmNext.clear(); landLeft.clear(); stillSince.clear() }
+    fun reset() { orders.clear(); released.clear(); given.clear(); usedByOrder.clear(); rearmNext.clear(); landLeft.clear(); stillSince.clear(); garrisonFailed.clear() }
 
     /** Orders for units that no longer exist (a soldier killed on the march; re-arming keeps a unit's number, so its order stays): forgotten, so a dead man never counts as "on the way" */
     fun forgetTheDead(game: com.unciv.logic.GameInfo) {
         val alive = game.civilizations.asSequence().flatMap { it.units.getCivUnits() }.map { it.id }.toHashSet()
         orders.keys.retainAll(alive); released.retainAll(alive); rearmNext.keys.retainAll(alive)
+        garrisonFailed.values.removeIf { game.turns - it >= GARRISON_RETRY } // old enough to be tried again, so no longer kept
+    }
+
+    /** Did this soldier's garrison march to that city fail within the last [GARRISON_RETRY] turns? The standing garrison order passes it over then */
+    fun failedLately(unit: MapUnit, city: Tile) = garrisonFailed[garrisonKey(unit.id, city)]?.let { unit.civ.gameInfo.turns - it < GARRISON_RETRY } == true
+    private fun garrisonKey(id: Int, city: Tile) = "$id@${cityKey(city)}"
+    private fun cityKey(city: Tile) = "${city.position.x.toInt()},${city.position.y.toInt()}"
+
+    /** The failed garrison march to this city still remembered, for its defender warning: "our Warrior #53, sent to garrison it, could not reach it (turn 56)"; null if none */
+    fun garrisonMiss(civ: Civilization, city: Tile): String? {
+        val (key, turn) = garrisonFailed.entries.filter { it.key.endsWith("@${cityKey(city)}") }.maxByOrNull { it.value }?.let { it.key to it.value } ?: return null
+        val id = key.substringBefore("@").toInt()
+        val name = civ.gameInfo.civilizations.asSequence().flatMap { it.units.getCivUnits() }.firstOrNull { it.id == id }?.name ?: "soldier"
+        return "our $name #$id, sent to garrison it, could not reach it (turn $turn)"
+    }
+
+    private fun noteGarrisonFailure(unit: MapUnit, order: Order, target: Tile) {
+        if (order.action != "garrison") return
+        garrisonFailed[garrisonKey(unit.id, target)] = unit.civ.gameInfo.turns
+        garrisonMissed(unit.civ, target)
     }
 
     /** A hold that only ever meant "a Great Person awaits orders" must not bind a soldier: the old name check froze Great War Infantry and Bombers,
@@ -67,7 +95,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     fun load(json: JsonValue?) {
         orders.clear()
         json?.forEach { orders[it.name.toInt()] = Order(it.getString("action"), it.get("x")?.takeUnless { v -> v.isNull }?.asInt(), it.get("y")?.takeUnless { v -> v.isNull }?.asInt(), it.get("ability")?.takeUnless { v -> v.isNull }?.asString(), it.getString("to", null)).apply {
-            lastSpot = it.getString("lastSpot", null); turnsStuck = it.getInt("turnsStuck", 0) } }
+            stepsBest = it.get("stepsBest")?.takeUnless { v -> v.isNull }?.asInt(); turnsStuck = it.getInt("turnsStuck", 0) } }
     }
 
     fun toMap() = orders.mapKeys { it.key.toString() }.mapValues { it.value.toMap() }
@@ -77,12 +105,14 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         "released" to released.toList(),
         "embarkedSince" to embarkedSince.mapKeys { it.key.toString() },
         "rearmNext" to rearmNext.mapKeys { it.key.toString() },
+        "garrisonFailed" to garrisonFailed,
         "stillSince" to stillSince.mapKeys { it.key.toString() }.mapValues { mapOf("spot" to it.value.first, "turn" to it.value.second) })
 
     fun loadState(json: JsonValue?) {
-        released.clear(); stillSince.clear(); rearmNext.clear()
+        released.clear(); stillSince.clear(); rearmNext.clear(); garrisonFailed.clear()
         json?.get("released")?.forEach { released += it.asInt() }
         json?.get("rearmNext")?.forEach { rearmNext[it.name.toInt()] = it.asInt() }
+        json?.get("garrisonFailed")?.forEach { garrisonFailed[it.name] = it.asInt() }
         embarkedSince.clear(); json?.get("embarkedSince")?.forEach { embarkedSince[it.name.toInt()] = it.asInt() }
         json?.get("stillSince")?.forEach { stillSince[it.name.toInt()] = Pair(it.getString("spot"), it.getInt("turn")) }
     }
@@ -173,12 +203,14 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             // A held one whose waiting place another of ours has taken meanwhile looks for another (Mongolia's two prophets swapped places every turn from T239)
             if (order.action == "hold" && unit.isGreatPerson() && claimed(unit, target)) {
                 val other = shelterFor(unit)
-                order.x = other?.position?.x?.toInt(); order.y = other?.position?.y?.toInt(); order.turnsStuck = 0
+                order.x = other?.position?.x?.toInt(); order.y = other?.position?.y?.toInt(); order.turnsStuck = 0; order.stepsBest = null
                 if (other == null || other == unit.getTile()) return true
                 return carryOut(unit, order)
             }
-            if (!canMarch(unit, target)) {
+            val way = pathTo(unit, target)
+            if (way.isEmpty()) {
                 log(civ, "Our ${unit.name} cannot reach ${where(civ, target)}; the order is dropped and the officials take it back.")
+                noteGarrisonFailure(unit, order, target)
                 drop(unit)
                 return false
             }
@@ -193,9 +225,11 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 return carryOut(unit, order)
             }
             if (unit.getTile() != target) {
-                val spot = unit.getTile().position.toString()
-                order.turnsStuck = if (spot == order.lastSpot) order.turnsStuck + 1 else 0
-                order.lastSpot = spot
+                // Nearer is fewer steps left at the turn's start than at any before: a march that moves but comes no nearer - the way reckoned through unknown ground
+                // closing as it is explored (Babylon's Warrior wandered at sea for 18 turns, Run 22) - is as stuck as one that stands still
+                val best = order.stepsBest
+                order.turnsStuck = if (best != null && way.size >= best) order.turnsStuck + 1 else 0
+                order.stepsBest = if (best == null) way.size else minOf(best, way.size)
                 if (order.turnsStuck >= 3) {
                     val blocker = target.militaryUnit?.takeIf { !unit.isCivilian() } ?: target.civilianUnit?.takeIf { unit.isCivilian() }
                     // One of our own holds the place - a garrison's relief, or a civilian bound where our Worker stands: it waits beside it and swaps in the turn it can, instead of giving up
@@ -203,8 +237,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                         if (order.turnsStuck == 3) log(civ, "Our ${unit.name} #${unit.id} waits beside ${where(civ, target)}: our ${blocker.name} #${blocker.id} holds it and cannot change places yet. It swaps in as soon as it can.")
                         return true
                     }
-                    log(civ, "Our ${unit.name} #${unit.id} has been stuck for ${order.turnsStuck} turns on its way to ${where(civ, target)}" +
-                        (blocker?.let { " - the tile is held by ${it.civ.civName}'s ${it.name}" } ?: " - the way is blocked") + ". The order is dropped and the officials take it back.")
+                    log(civ, "Our ${unit.name} #${unit.id} has been stuck for ${order.turnsStuck} turns on its way to ${where(civ, target)}, no nearer than it was" +
+                        (blocker?.let { " - the tile is held by ${it.civ.civName}'s ${it.name}" } ?: " - no way to it opens") + ". The order is dropped and the officials take it back.")
+                    noteGarrisonFailure(unit, order, target)
                     drop(unit)
                     return false
                 }
@@ -327,7 +362,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             if (target != null && tile != unit.getTile()) log(civ, "The ground our ${unit.name} #${unit.id} was marching to " +
                 (if (target.getOwner() != recipient) "is no longer ${recipient.civName}'s" else "cannot take it now") + "; it makes for ${where(civ, tile)} instead, to be given to ${recipient.civName} there.")
             order.x = tile.position.x.toInt(); order.y = tile.position.y.toInt()
-            order.turnsStuck = 0
+            order.turnsStuck = 0; order.stepsBest = null
         }
         return null
     }
@@ -375,6 +410,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     fun dropAfterFailure(unit: MapUnit) {
         val order = orders[unit.id] ?: return
         log(unit.civ, "Our ${unit.name} #${unit.id} could not carry out its ${order.action} order${order.x?.let { " for ${where(unit.civ, unit.civ.gameInfo.tileMap[it, order.y!!])}" } ?: ""} from ${where(unit.civ, unit.getTile())}: the way would not open. The order is dropped and the officials take it back.")
+        order.x?.let { noteGarrisonFailure(unit, order, unit.civ.gameInfo.tileMap[it, order.y!!]) }
         drop(unit)
     }
 
@@ -696,6 +732,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     companion object {
         /** How far from our cities the land survey looks: the officials' settlers range as far (15 tiles and more) */
         private const val REACH = 16
+        /** Turns a soldier whose garrison march to a city failed is passed over for that city by the standing garrison order */
+        private const val GARRISON_RETRY = 10
         private val ABILITIES = listOf(UnitActionType.ConductTradeMission, UnitActionType.HurryResearch, UnitActionType.HurryWonder,
             UnitActionType.HurryBuilding, UnitActionType.HurryPolicy, UnitActionType.FoundReligion, UnitActionType.EnhanceReligion,
             UnitActionType.TriggerUnique, UnitActionType.CreateImprovement, UnitActionType.SpreadReligion)

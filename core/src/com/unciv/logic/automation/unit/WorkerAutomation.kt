@@ -80,13 +80,16 @@ class WorkerAutomation(
         val currentTileIsCreatesOneImprovementMarker = currentTile.isMarkedForCreatesOneImprovement()
         // Must be called before any getPriority checks to guarantee the local road cache is processed
         val citiesToConnect = roadBetweenCitiesAutomation.getNearbyCitiesToConnect(unit)
+        // A ruled civ's worker with enemy soldiers near keeps off the tiles they could reach - near our cities, once they can reach where it stands - and sets out for no other city or road
+        val keptOffAtWar = com.unciv.logic.automation.RulerOverrides.keptOffAtWar(unit, dangerousTiles)
+        val tilesToAvoid = keptOffAtWar ?: dangerousTiles
         // Shortcut, we are working a suitable tile, and we're better off minimizing worker-turns by finishing everything on this tile
         if (!currentTileIsCreatesOneImprovementMarker
-            && currentTile.improvementInProgress != null && !dangerousTiles.contains(currentTile)
+            && currentTile.improvementInProgress != null && !tilesToAvoid.contains(currentTile)
             && getFullPriority(unit.getTile(), unit) >= 2) {
             return
         }
-        val tileToWork = findTileToWork(unit, dangerousTiles)
+        val tileToWork = findTileToWork(unit, tilesToAvoid)
 
         if (tileToWork != currentTile && tileToWork != null) {
             headTowardsTileToWork(unit, tileToWork)
@@ -97,6 +100,8 @@ class WorkerAutomation(
 
         if (tileToWork == currentTile && tileHasWorkToDo(currentTile, unit)) 
             return startWorkOnCurrentTile(unit)
+
+        if (keptOffAtWar != null) return // nothing safe to work while the enemy is near: it waits where it stands
 
         // Support Alpha Frontier-Style Workers that _also_ have the "May create improvements on water resources" unique
         if (unit.cache.hasUniqueToCreateWaterImprovements && automateWorkBoats(unit)) return

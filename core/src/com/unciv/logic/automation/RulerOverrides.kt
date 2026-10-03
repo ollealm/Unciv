@@ -68,6 +68,39 @@ object RulerOverrides {
         return might(unit) * 2 < best
     }
 
+    /** The tiles the enemy soldiers near this civilian of a ruled civ could strike or take next turn, by their own movement and range - the engine's own
+     *  reckoning of a tile's danger (UnitAutomation.getDangerousTiles), which it applies only to enemies three tiles off, while its civilian flees only what
+     *  it could itself walk to: eight Workers were taken in the open at war (Run 23). Looks eight tiles out, the farthest-reaching arms plus the civilian's
+     *  own step. Empty for an unruled civ's unit, which keeps the engine's habit */
+    fun enemyReach(unit: MapUnit): Set<Tile> {
+        if (unit.civ.civID !in ruledCivs) return emptySet()
+        val threat = unit.civ.threatManager
+        return threat.getEnemyUnitsOnTiles(threat.getTilesWithEnemyUnitsInDistance(unit.getTile(), 8))
+            .flatMap { it.getTile().getTilesInDistance(it.getMaxMovement() - 1 + it.getRange()) }.toHashSet()
+    }
+
+    /** Where a ruled civ's civilian with enemy soldiers in reach of it keeps to: of the tiles it can step to that lie beyond their reach, the one nearest a city
+     *  of ours - never the open field the engine's "furthest from danger" may choose. Null when none is open to it or none of the enemy can reach it */
+    fun shelterNearHome(unit: MapUnit, open: Sequence<Tile>): Tile? {
+        val reach = enemyReach(unit)
+        if (unit.getTile() !in reach || unit.civ.cities.isEmpty()) return null
+        return open.filter { it !in reach }.minByOrNull { tile -> unit.civ.cities.minOf { it.getCenterTile().aerialDistanceTo(tile) } }
+    }
+
+    /** The tiles a ruled civ's worker keeps off while enemy soldiers are near: those they could reach next turn (two Workers walked from safe ground into
+     *  Babylon's tanks' reach the turn war was declared, on the way to a tile to work and a city short of workers), and while its own tile is among them, all
+     *  that are not within two of a city of ours - it works near home till they are gone, or waits. Null when none is near: the engine's own list serves */
+    fun keptOffAtWar(unit: MapUnit, dangerousTiles: HashSet<Tile>): HashSet<Tile>? {
+        val reach = enemyReach(unit)
+        if (reach.isEmpty()) return null
+        val kept = HashSet(dangerousTiles); kept += reach
+        if (unit.getTile() in reach) {
+            val nearHome = unit.civ.cities.flatMap { it.getCenterTile().getTilesInDistance(2) }.toHashSet()
+            kept += unit.getTile().getTilesInDistance(3).filter { it !in nearHome }
+        }
+        return kept
+    }
+
     /** The officials' own demands of another power: (our civ, the other power, the demand). Demands made OF a ruled civ are not answered by its officials -
      *  they wait on its desk (its popupAlerts) for the advisor */
     @Volatile var demandMade: ((Civilization, Civilization, com.unciv.logic.civilization.diplomacy.Demand) -> Unit)? = null

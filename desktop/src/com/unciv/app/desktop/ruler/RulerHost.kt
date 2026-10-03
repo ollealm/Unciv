@@ -124,6 +124,8 @@ object RulerHost {
         RulerOverrides.blockFailed = { civ, what, why -> log(civ, "The officials could not finish $what this turn: $why. The units it moved stand where they were left, and the officials try again next turn.") }
         RulerOverrides.unitNotMoved = { civ, unit, why -> log(civ, "Our ${unit.name} #${unit.id} could not be moved this turn: $why. It stands ${describeWhere(civ, unit.getTile())}, and the officials try again next turn.") }
         units.researchRefill = { civ -> applyResearchGoals(civ) }
+        // A city's defender warning, acknowledged while a garrison march was on its way, shows in full again when that march fails (Grand River stood empty 13 turns under an acknowledged one, Run 23)
+        units.garrisonMissed = { civ, city -> city.getCity()?.name?.lowercase()?.let { name -> orders[civ.civName]?.acknowledged?.removeIf { it.startsWith("$name has no defender") || it.startsWith("$name is only held by") } } }
         RulerOverrides.rulersFirst = { civ -> units.rearmDue(civ) }
         RulerOverrides.worldVoteOf = { civ -> castWorldVote(civ) }
         RulerOverrides.promised = { civ -> diplomacy.promised(civ) }
@@ -697,7 +699,6 @@ object RulerHost {
             log(civ, "By your order: ${city.name} builds $item first; its queue is now ${city.cityConstructions.constructionQueue.joinToString()}.")
             "${city.name} queue is now: ${city.cityConstructions.constructionQueue.joinToString()}"
         }
-        // Buy outright with gold
         // What becomes of a city: annex a puppet, raze it, or stop a razing
         tryEach(json.get("cities")) { order ->
             val city = civ.city(order.getString("city"))
@@ -710,6 +711,20 @@ object RulerHost {
         }
         tryEach(json.get("marry")) { entry -> diplomacy.marry(civ, entry.asString(), policyCostPerCity(civ)) }
         tryEach(json.get("denounce")) { entry -> diplomacy.denounce(civ, entry.asString()) }
+        // Re-arming by hand: named units, or "all" - each told apart, done or not and why
+        json.get("rearm")?.let { list ->
+            val entries = list.asStringArray().map { it.trim() }
+            entries.filter { !it.equals("all", ignoreCase = true) && it.removePrefix("#").toIntOrNull() == null }.forEach { failed += "rearm takes unit numbers or \"all\"; not '$it'" }
+            val wanted = entries.flatMap { entry -> if (entry.equals("all", ignoreCase = true)) units.rearmable(civ).map { it.id } else listOfNotNull(entry.removePrefix("#").toIntOrNull()) }.distinct()
+            for (id in wanted) {
+                val result = units.rearm(civ, id, standing.goldReserve ?: 0)
+                if (result.first) done += result.second else failed += result.second
+            }
+            if (wanted.isEmpty() && entries.any { it.equals("all", ignoreCase = true) }) done += "No soldier of ours can be re-armed with newer arms we know."
+        }
+        // Unit orders, diplomacy
+        tryEach(json.get("units")) { units.give(civ, it) }
+        // Buy outright with gold - after the unit orders: a disbanding is done at once, and a soldier bought in the same breath then lands inside the city it emptied, not beside it (Persia's Infantry, Run 23)
         tryEach(json.get("purchase")) { order ->
             val city = civ.city(order.getString("city"))
             val item = order.getString("item")
@@ -740,19 +755,6 @@ object RulerHost {
             log(civ, "By your order: bought $item in ${city.name} for $cost gold.$note$refill")
             "Bought $item in ${city.name} for $cost gold (${civ.gold} left).$note$refill"
         }
-        // Re-arming by hand: named units, or "all" - each told apart, done or not and why
-        json.get("rearm")?.let { list ->
-            val entries = list.asStringArray().map { it.trim() }
-            entries.filter { !it.equals("all", ignoreCase = true) && it.removePrefix("#").toIntOrNull() == null }.forEach { failed += "rearm takes unit numbers or \"all\"; not '$it'" }
-            val wanted = entries.flatMap { entry -> if (entry.equals("all", ignoreCase = true)) units.rearmable(civ).map { it.id } else listOfNotNull(entry.removePrefix("#").toIntOrNull()) }.distinct()
-            for (id in wanted) {
-                val result = units.rearm(civ, id, standing.goldReserve ?: 0)
-                if (result.first) done += result.second else failed += result.second
-            }
-            if (wanted.isEmpty() && entries.any { it.equals("all", ignoreCase = true) }) done += "No soldier of ours can be re-armed with newer arms we know."
-        }
-        // Unit orders, diplomacy
-        tryEach(json.get("units")) { units.give(civ, it) }
         // Answers before proposals: a counter is a refusal and a new offer in one order, and the new offer is refused as a mirror while the old one still waits
         tryEach(json.get("answerOffers")) { diplomacy.answerOffer(civ, it.getString("power"), it.getString("answer"), it.getString("terms", null)) }
         tryEach(json.get("answerDemands")) { entry ->
@@ -882,7 +884,7 @@ object RulerHost {
             if (holder != null && !poorDefender(civ, holder)) continue
             if (units.orders.any { (id, order) -> id != holder?.id && order.action == "garrison" && order.x == position.x.toInt() && order.y == position.y.toInt() }) continue // someone is on the way
             val soldier = civ.units.getCivUnits()
-                .filter { it.isMilitary() && it.baseUnit.isLandUnit && it.id !in units.orders && !it.getTile().isCityCenter() && !poorDefender(civ, it) && units.canMarch(it, centre) } // same landmass: a spent unit cannot be asked for a path
+                .filter { it.isMilitary() && it.baseUnit.isLandUnit && it.id !in units.orders && !it.getTile().isCityCenter() && !poorDefender(civ, it) && !units.failedLately(it, centre) && units.canMarch(it, centre) } // same landmass: a spent unit cannot be asked for a path
                 .minByOrNull { it.getTile().aerialDistanceTo(centre) } ?: continue
             units.orders[soldier.id] = RulerUnits.Order("garrison", position.x.toInt(), position.y.toInt())
             log(civ, "By your standing order: ${city.name} ${if (holder == null) "stood empty" else "was held only by a ${holder.name}"}, so our ${soldier.name} #${soldier.id} marches in to garrison it.")
@@ -1750,9 +1752,11 @@ object RulerHost {
         else if (goalsLeft == 1) warnings += "Only one research goal left - add more."
         for (city in civ.cities) {
             val defender = city.getCenterTile().militaryUnit
-            if (defender == null) warnings += "${city.name} has no defender in it."
+            // A garrison march that failed is told with the warning, so the ruler knows the standing order has not mended it (the tail is no part of the warning's key)
+            val missed = units.garrisonMiss(civ, city.getCenterTile())?.let { "; $it" } ?: ""
+            if (defender == null) warnings += "${city.name} has no defender in it$missed."
             else if (poorDefender(civ, defender))
-                warnings += "${city.name} is only held by ${if (defender.name.first().lowercaseChar() in "aeiou") "an" else "a"} ${defender.name} - weak for this age."
+                warnings += "${city.name} is only held by ${if (defender.name.first().lowercaseChar() in "aeiou") "an" else "a"} ${defender.name} - weak for this age$missed."
         }
         for (unit in civ.units.getCivUnits()) if (unit.isGreatPerson() && units.orders[unit.id]?.action == "hold")
             warnings += "${unit.name} #${unit.id} ${describeWhere(civ, unit.getTile())} awaits orders."

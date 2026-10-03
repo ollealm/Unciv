@@ -188,7 +188,8 @@ object CivilianUnitAutomation {
         val enemyUnitsInWalkingDistance = unit.movement.getDistanceToTiles().keys
             .filter { unit.civ.threatManager.doesTileHaveMilitaryEnemy(it) }
 
-        if (enemyUnitsInWalkingDistance.isNotEmpty() && !unit.baseUnit.isMilitary
+        // A ruled civ's civilian runs from whatever could reach it next turn, by the enemy's own reach, not only from what it could walk to itself
+        if ((enemyUnitsInWalkingDistance.isNotEmpty() || unit.getTile() in com.unciv.logic.automation.RulerOverrides.enemyReach(unit)) && !unit.baseUnit.isMilitary
             && unit.getTile().militaryUnit == null && !unit.getTile().isCityCenter()) {
             runAway(unit)
             return true
@@ -216,6 +217,12 @@ object CivilianUnitAutomation {
 
         val unitTile = unit.getTile()
         val dangerousTiles = unit.civ.threatManager.getDangerousTiles(unit)
+        // A ruled civ's civilian keeps near our cities: the tile beyond the enemy's reach nearest to one, before the open field furthest from danger
+        com.unciv.logic.automation.RulerOverrides.shelterNearHome(unit, reachableTiles.keys.asSequence()
+            .filter { unit.movement.canMoveTo(it) && unit.getDamageFromTerrain(it) < unit.health && it !in dangerousTiles })?.let {
+            unit.movement.moveToTile(it)
+            return
+        }
         val tileClosestToDanger = dangerousTiles
             // Priotirize capture threat over ranged attack
             .sortedByDescending { unit.civ.threatManager.getEnemyUnitsOnTiles(listOf(it)).isNotEmpty() }
