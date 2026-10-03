@@ -477,8 +477,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         val unitId = json.getInt("unit")
         val unit = civ.units.getUnitById(unitId) ?: throw IllegalArgumentException("No unit with id $unitId - see the briefing's unit list")
         val action = json.getString("action", "move")
-        if (action !in listOf("move", "settle", "fortify", "garrison", "hold", "explore", "use", "gift", "disband", "release"))
-            throw IllegalArgumentException("Unknown unit action $action; use move, settle, fortify, garrison, hold, explore, use, gift, disband or release")
+        if (action !in UNIT_ACTIONS) throw IllegalArgumentException("Unknown unit action $action; use ${UNIT_ACTIONS.joinToString()}")
         if (action == "disband") { orders.remove(unitId); val name = unit.name; unit.disband(); log(civ, "By your order: our $name #$unitId was disbanded."); return "$name #$unitId disbanded." }
         if (action == "release") { orders.remove(unitId); released += unitId; if (unit.isExploring()) unit.action = null; return "${unit.name} #$unitId is back under the officials." }
         if (action == "settle" && !unit.hasUnique(UniqueType.FoundCity)) throw IllegalArgumentException("${unit.name} cannot found cities")
@@ -727,6 +726,10 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     }
 
     companion object {
+        /** What a unit order may ask, as the order names it (published by GET /schema) */
+        val UNIT_ACTIONS = listOf("move", "settle", "garrison", "fortify", "hold", "explore", "use", "gift", "disband", "release")
+        /** The ways of spending a Great Person, as the order names them */
+        val ABILITY_NAMES get() = ABILITY_WORDS.keys.toList()
         /** How far from our cities the land survey looks: the officials' settlers range as far (15 tiles and more) */
         private const val REACH = 16
         /** Turns a soldier whose garrison march to a city failed is passed over for that city by the standing garrison order */

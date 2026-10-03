@@ -217,13 +217,11 @@ object RulerHost {
                 Regex("#\\d+").containsMatchIn(text) && !asksForOrders.containsMatchIn(text) -> selfCheck("words", civ.civName, "a unit's number in prose: $text")
             }
         }
-        // A unit the ruler put in place (hold, fortify, garrison) that stood on its spot when the turn began, under the same order still, and stands
-        // elsewhere now. One on its way may move; so may one whose order changed within the turn (a held Great Person's shelter taken, a new hold)
+        // A unit the ruler put in place that stood on its spot when the turn began and stands elsewhere now: a hold without a place, a fortify, or a
+        // garrison already in its city. A hold with a place walks to it and waits there (a Great Person's shelter, which moves when another takes it)
         for ((id, order) in units.orders) {
-            if (order.action !in setOf("hold", "fortify", "garrison")) continue
+            if (order.action !in setOf("hold", "fortify", "garrison") || (order.action == "hold" && order.x != null)) continue
             val was = before.units[id]?.second ?: continue
-            val start = before.unitOrders[id] ?: continue
-            if (start != Triple(order.action, order.x, order.y)) continue
             if (order.x != null && (was.position.x.toInt() != order.x || was.position.y.toInt() != order.y)) continue // still on its way
             val now = civ.units.getUnitById(id)?.getTile() ?: continue
             if (now != was) selfCheck("orders", civ.civName, "${civ.units.getUnitById(id)?.name} #$id under a ${order.action} order moved from ${was.position} to ${now.position}")
@@ -315,6 +313,7 @@ object RulerHost {
         val since = query["since"]?.toIntOrNull() ?: -1
         return when ("$method $path") {
             "GET /state" -> state()
+            "GET /schema" -> schema()
             "GET /nations" -> RulesetCache[com.unciv.models.metadata.BaseRuleset.Civ_V_GnK.fullName]!!.nations.values
                 .filter { it.isMajorCiv }.map { mapOf("name" to it.name, "leader" to it.leaderName) }
             "POST /new" -> newGame(json)
@@ -707,8 +706,28 @@ object RulerHost {
     }
 
     /** Every field an order may carry: an order with none of them is no order (a model that wrapped its fields in "arguments" sent nothing) */
-    private val ORDER_FIELDS = listOf("personality", "research", "policyBranches", "neverBuild", "officials", "goldReserve", "faithReserve", "mayDeclareWar", "withRulersWord", "garrisonEveryCity", "posture",
-        "queue", "build", "purchase", "rearm", "cities", "units", "trade", "renew", "answerOffers", "answerDemands", "peace", "friendship", "gift", "declareWar", "cityFocus", "acknowledge", "worldVote", "marry", "denounce", "protect", "endProtection")
+    private val ORDER_FIELDS get() = STANDING_FIELDS + IMMEDIATE_FIELDS + ORCHESTRATOR_FIELDS
+    /** Kept until changed */
+    private val STANDING_FIELDS = listOf("personality", "research", "policyBranches", "neverBuild", "officials", "goldReserve", "faithReserve", "garrisonEveryCity", "posture", "worldVote", "acknowledge")
+    /** Done now */
+    private val IMMEDIATE_FIELDS = listOf("queue", "build", "purchase", "rearm", "cities", "units", "trade", "renew", "answerOffers", "answerDemands", "peace", "friendship", "gift",
+        "declareWar", "cityFocus", "marry", "denounce", "protect", "endProtection")
+    /** Sent with every order by the orchestrator itself, never by the advisor: the war leave */
+    private val ORCHESTRATOR_FIELDS = listOf("mayDeclareWar", "withRulersWord")
+    private val STANCES = listOf("attack", "defend", "raid")
+    private val CITY_ACTIONS = listOf("annex", "raze", "spare")
+    /** A city's focus as an order names it: the engine's own, "Focus" left off ("Food", "GoldGrowth"), and NoFocus as it is */
+    private fun focusWord(focus: com.unciv.logic.city.CityFocus) = if (focus == com.unciv.logic.city.CityFocus.NoFocus) focus.name else focus.name.removeSuffix("Focus")
+
+    /** The lists an order is checked against, published so the orchestrator's tools list the same (GET /schema): the fields by kind, the officials'
+     *  acts by default, and the words each field takes. What each one means stays the orchestrator's to say, by hand */
+    private fun schema() = mapOf(
+        "orderFields" to mapOf("standing" to STANDING_FIELDS, "immediate" to IMMEDIATE_FIELDS, "orchestrator" to ORCHESTRATOR_FIELDS),
+        "officials" to mapOf("open" to RulerOverrides.Act.entries.filter { !it.fixed && it.byDefault }.map { it.label },
+            "closed" to RulerOverrides.Act.entries.filter { !it.fixed && !it.byDefault }.map { it.label },
+            "never" to RulerOverrides.Act.entries.filter { it.fixed }.map { it.label }),
+        "unitActions" to RulerUnits.UNIT_ACTIONS, "abilities" to RulerUnits.ABILITY_NAMES, "stances" to STANCES, "cityActions" to CITY_ACTIONS,
+        "cityFocus" to com.unciv.logic.city.CityFocus.entries.filter { it != com.unciv.logic.city.CityFocus.Manual }.map(::focusWord))
 
     private fun setOrders(civ: Civilization, json: JsonValue): Any? {
         val given = json.map { it.name }
@@ -763,7 +782,7 @@ object RulerHost {
             wishes.remove(); json.addChild("policyBranches", JsonValue(JsonValue.ValueType.array).also { array -> kept.forEach { array.addChild(JsonValue(it)) } })
         }
         json.get("posture")?.takeUnless { it.isNull }?.let { posture ->
-            posture.get("stance")?.takeUnless { it.isNull }?.asString()?.let { if (it !in listOf("attack", "defend", "raid")) rejected += "stance must be attack, defend or raid, not '$it'; the posture was not changed".also { posture.remove() } }
+            posture.get("stance")?.takeUnless { it.isNull }?.asString()?.let { if (it !in STANCES) rejected += "stance must be attack, defend or raid, not '$it'; the posture was not changed".also { posture.remove() } }
             posture.get("warAim")?.takeUnless { it.isNull }?.asString()?.let { name ->
                 val target = civ.gameInfo.getCities().firstOrNull { it.name == name }
                 val declaringOn = json.get("declareWar")?.asStringArray()?.toList() ?: emptyList()
@@ -859,7 +878,7 @@ object RulerHost {
                 "annex" -> { if (!city.isPuppet) throw ApiError(400, "${city.name} is not a puppet"); city.annexCity(); log(civ, "By your order: ${city.name} is annexed and governed as our own."); "${city.name} annexed" }
                 "raze" -> { if (city.isCapital()) throw ApiError(400, "A capital cannot be razed"); city.isBeingRazed = true; log(civ, "By your order: ${city.name} is being razed; it shrinks each turn until nothing is left."); "${city.name} is being razed" }
                 "spare" -> { if (!city.isBeingRazed) throw ApiError(400, "${city.name} is not being razed"); city.isBeingRazed = false; log(civ, "By your order: the razing of ${city.name} is stopped."); "${city.name} spared" }
-                else -> throw ApiError(400, "Unknown city action $action; use annex, raze or spare")
+                else -> throw ApiError(400, "Unknown city action $action; use ${CITY_ACTIONS.joinToString()}")
             }
         }
         tryEach(json.get("marry")) { entry -> diplomacy.marry(civ, entry.asString(), policyCostPerCity(civ)) }
@@ -1146,8 +1165,6 @@ object RulerHost {
         val turnsLeft = RulerHost.dealTurnsLeft(civ)
         val faith = civ.religionManager.storedFaith
         val policies = civ.policies.getAdoptedPolicies().toSet()
-        /** The ruler's standing unit orders as the turn began: the action and its place, each unit by number */
-        val unitOrders = civ.units.getCivUnits().mapNotNull { unit -> RulerHost.units.orders[unit.id]?.let { unit.id to Triple(it.action, it.x, it.y) } }.toMap()
     }
 
     internal fun dealsOf(civ: Civilization) = diplomacy.dealsInForce(civ)
