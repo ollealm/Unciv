@@ -156,7 +156,23 @@ object RulerOverrides {
     /** The faith a civ's officials may spend on their own: what lies above the ruler's reserve for a ruled civ, all of it for any other. Every faith spender
      *  of the officials' measures its price against this - a purchase, and the pantheon, which was bought past the reserve till audit 2026-10-04 */
     @yairm210.purity.annotations.Readonly
-    fun faithAboveReserve(civ: Civilization): Int = civ.religionManager.storedFaith - (if (civ.civID in ruledCivs) faithReserve[civ.civID] ?: 0 else 0)
+    fun faithAboveReserve(civ: Civilization): Int = civ.religionManager.storedFaith - (if (civ.civID in ruledCivs && civ.civID !in underFloor) faithReserve[civ.civID] ?: 0 else 0)
+    /** The gold a civ's officials may spend on their own, as [faithAboveReserve] is for faith */
+    @yairm210.purity.annotations.Readonly
+    fun goldAboveReserve(civ: Civilization): Int = civ.gold - (if (civ.civID in ruledCivs && civ.civID !in underFloor) goldReserve[civ.civID] ?: 0 else 0)
+
+    /** Ruled civs whose officials' turn runs under the floor now: their reserves are set aside, out of sight */
+    private val underFloor: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    /** The officials' whole turn for a ruled civ under one spending floor: the gold and faith the ruler keeps are set aside before it and put back after,
+     *  so every spender of theirs - a purchase, an upgrade, a gift, a deal's gold, the pantheon, a Great Person - sees only what lies above the reserves
+     *  and chooses within it (the faith reserve once refused after the officials had picked, so nothing at all was bought). Unruled civs play as ever */
+    fun <T> underTheFloor(civ: Civilization, turn: () -> T): T {
+        if (civ.civID !in ruledCivs) return turn()
+        val gold = (goldReserve[civ.civID] ?: 0).coerceIn(0, civ.gold.coerceAtLeast(0))
+        val faith = (faithReserve[civ.civID] ?: 0).coerceIn(0, civ.religionManager.storedFaith.coerceAtLeast(0))
+        civ.addGold(-gold); civ.religionManager.storedFaith -= faith; underFloor += civ.civID
+        try { return turn() } finally { underFloor -= civ.civID; civ.addGold(gold); civ.religionManager.storedFaith += faith }
+    }
     /** Set by the host: told of every faith purchase the officials make for a ruled civ - (civ, faith, "Great Scientist in Persepolis") */
     @Volatile var faithSpent: ((Civilization, Int, String) -> Unit)? = null
     fun noteFaithSpent(civ: Civilization, faith: Int, what: String) { if (civ.civID in ruledCivs) faithSpent?.invoke(civ, faith, what) }
@@ -187,7 +203,7 @@ object RulerOverrides {
      *  a step from victory (nine agreements fed Greece's science after its Apollo Program, Run 22). Unruled civs keep the engine's habit */
     fun officialsMayOfferResearch(civ: Civilization, other: Civilization, cost: Int): Boolean {
         if (civ.civID !in ruledCivs) return true
-        if (civ.gold - cost < (goldReserve[civ.civID] ?: 0)) return false
+        if (goldAboveReserve(civ) < cost) return false
         if (civ.getKnownCivs().any { it.isMajorCiv() && civ.isAtWarWith(it) }) return false
         return nearWinner?.invoke(other) != true
     }

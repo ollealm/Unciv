@@ -42,6 +42,12 @@ object NextTurnAutomation {
         if (civInfo.isBarbarian) return BarbarianAutomation(civInfo).automate()
         if (civInfo.isSpectator()) return // When there's a spectator in multiplayer games, it's processed automatically, but shouldn't be able to actually do anything
 
+        // A ruled civ: the ruler's own deferred re-armings first, from the whole treasury; then the officials' turn under the ruler's reserves
+        if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) com.unciv.logic.automation.RulerOverrides.rulersFirst?.invoke(civInfo)
+        com.unciv.logic.automation.RulerOverrides.underTheFloor(civInfo) { automateOfficials(civInfo, tradeAndChangeState) }
+    }
+
+    private fun automateOfficials(civInfo: Civilization, tradeAndChangeState: Boolean) {
         respondToPopupAlerts(civInfo)
         TradeAutomation.respondToTradeRequests(civInfo, tradeAndChangeState)
 

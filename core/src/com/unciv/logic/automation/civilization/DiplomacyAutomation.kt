@@ -159,7 +159,7 @@ object DiplomacyAutomation {
                     val ourGpt = civInfo.stats.statsForNextTurn.gold.toInt()
                     if (embassyGptValue in 1..ourGpt)
                         tradeLogic.currentTrade.ourOffers.add(TradeOffer(Constants.goldPerTurn, TradeOfferType.Gold_Per_Turn, embassyGptValue, civInfo.gameInfo.speed))
-                    else if (civInfo.gold >= embassyValue + (com.unciv.logic.automation.RulerOverrides.goldReserve[civInfo.civID] ?: 0) && ourGpt >= 0) // a ruled realm's reserve stays
+                    else if (com.unciv.logic.automation.RulerOverrides.goldAboveReserve(civInfo) >= embassyValue && ourGpt >= 0) // a ruled realm's reserve stays
                         tradeLogic.currentTrade.ourOffers.add(TradeOffer(Constants.flatGold, TradeOfferType.Gold, embassyValue, civInfo.gameInfo.speed))
                     // else let them make counter offer
                 }

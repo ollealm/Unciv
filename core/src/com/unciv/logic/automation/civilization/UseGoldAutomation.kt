@@ -18,12 +18,9 @@ object UseGoldAutomation {
 
     /** allow AI to spend money to purchase city-state friendship, buildings & unit */
     fun useGold(civ: Civilization) {
-        if (civ.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) com.unciv.logic.automation.RulerOverrides.rulersFirst?.invoke(civ)
-        // A ruler's treasury reserve is a floor, not a gate: the officials only ever see what lies above it
-        val reserve = com.unciv.logic.automation.RulerOverrides.goldReserve[civ.civID] ?: 0
-        if (reserve > 0 && civ.gold <= reserve) return
-        if (reserve > 0) civ.addGold(-reserve)
-        try { spendGold(civ) } finally { if (reserve > 0) civ.addGold(reserve) }
+        // A ruler's treasury reserve is a floor around the officials' whole turn (RulerOverrides.underTheFloor): what is seen here lies above it
+        if (civ.gold <= 0) return
+        spendGold(civ)
     }
 
     /** Tells a ruled civ's chancery what the officials just paid for */
@@ -41,7 +38,7 @@ object UseGoldAutomation {
             if (com.unciv.logic.automation.RulerOverrides.spendsPromised(unit, promised)) continue
             val name = unit.name
             val tile = unit.getTile()
-            itemised(civ, { "re-arming a $name as ${(if (unit.isCivilian()) tile.civilianUnit else tile.militaryUnit)?.name ?: "something newer"}" }) { UnitAutomation.tryUpgradeUnit(unit) }
+            itemised(civ, { "re-arming ${if (name.first().lowercaseChar() in "aeiou") "an" else "a"} $name as ${(if (unit.isCivilian()) tile.civilianUnit else tile.militaryUnit)?.name ?: "something newer"}" }) { UnitAutomation.tryUpgradeUnit(unit) }
         }
 
         if (civ.isMajorCiv() && civ.civID !in com.unciv.logic.automation.RulerOverrides.noGifts) {
