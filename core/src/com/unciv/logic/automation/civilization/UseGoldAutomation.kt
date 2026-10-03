@@ -41,7 +41,7 @@ object UseGoldAutomation {
             itemised(civ, { "re-arming ${if (name.first().lowercaseChar() in "aeiou") "an" else "a"} $name as ${(if (unit.isCivilian()) tile.civilianUnit else tile.militaryUnit)?.name ?: "something newer"}" }) { UnitAutomation.tryUpgradeUnit(unit) }
         }
 
-        if (civ.isMajorCiv() && civ.civID !in com.unciv.logic.automation.RulerOverrides.noGifts) {
+        if (civ.isMajorCiv() && com.unciv.logic.automation.RulerOverrides.officialsMay(civ, com.unciv.logic.automation.RulerOverrides.Act.Gifts)) {
             val influence = civ.getKnownCivs().filter { it.isCityState }.associateWith { it.getDiplomacyManager(civ)?.getInfluence() ?: 0f }
             // The ruler's chancery is told whom the gift went to and what that city-state has to offer, so the ledger line is a reason and not a mystery
             itemised(civ, { "a gift to win the friendship of " + (influence.filter { (it.key.getDiplomacyManager(civ)?.getInfluence() ?: 0f) > it.value + 1 }.keys.joinToString(" and ") { cityState ->
@@ -75,7 +75,7 @@ object UseGoldAutomation {
 
         // canBeMarriedBy checks actual cost, but it can't be below 500*speedmodifier, and the later check is expensive
         // A marriage is the ruler's to make (the marry order): Austria's officials took four city-states in Run 21, each raising the cost of every policy
-        if (civ.gold >= 330 && civ.getHappiness() > 0 && civ.hasUnique(UniqueType.CityStateCanBeBoughtForGold) && civ.civID !in com.unciv.logic.automation.RulerOverrides.ruledCivs) {
+        if (civ.gold >= 330 && civ.getHappiness() > 0 && civ.hasUnique(UniqueType.CityStateCanBeBoughtForGold) && com.unciv.logic.automation.RulerOverrides.officialsMay(civ, com.unciv.logic.automation.RulerOverrides.Act.Marriage)) {
             for (cityState in knownCityStates.toList() ) {  // Materialize sequence as diplomaticMarriage may kill a CS
                 if (cityState.cityStateFunctions.canBeMarriedBy(civ))
                     cityState.cityStateFunctions.diplomaticMarriage(civ)

@@ -60,14 +60,30 @@ object RulerOverrides {
         warDeclared?.invoke(War(if (pactPartnerJoins) other else civ, if (pactPartnerJoins) civ else other, reason.warType, reason.allyCiv))
     }
 
-    /** civID -> when a ruled civ's officials may re-arm units with gold on their own (a standing order of the ruler): "always", "war" (the default), "never" */
-    val rearming = ConcurrentHashMap<String, String>()
-    /** May the officials re-arm this civ's units now? Under "war", only while at war with a major power - city-states and barbarians do not count. Unruled civs always may */
-    fun mayRearm(civ: Civilization): Boolean = when (rearming[civ.civID] ?: if (civ.civID in ruledCivs) "war" else "always") {
-        "always" -> true
-        "never" -> false
-        else -> civ.getKnownCivs().any { it.isMajorCiv() && civ.isAtWarWith(it) }
+    /** What a ruled civ's officials may do on their own, as one table. [fixed]: the act binds the court - war and peace, its sworn word, its cities - and is
+     *  never the officials', whatever an order says. The rest are the officials' own by [byDefault], and a court's standing order may open or bar each.
+     *  Unruled civs do as the engine always has. [label] is the order's and the briefing's word for it */
+    enum class Act(val label: String, val fixed: Boolean, val byDefault: Boolean) {
+        Peace("peace", true, false), War("war", true, false), DefensivePact("Defensive Pact", true, false), CallToWar("calls to war", true, false),
+        DemandNotToAttack("the demand not to attack us", true, false), Marriage("marriage", true, false), Annexation("annexation", true, false),
+        Denouncement("denouncement", true, false), Protection("protection", true, false), Tribute("tribute", true, false),
+        // The realm's sworn word for thirty turns, and the door to pacts: closed unless the court opens it (an unadvised power accepts a proposal on its turn)
+        Friendship("Declaration of Friendship", false, false),
+        Luxuries("luxuries", false, true), OpenBorders("Open Borders", false, true), Embassy("Embassy", false, true), ResearchAgreement("Research Agreement", false, true),
+        Gifts("gifts", false, true), Demands("demands", false, true),
+        // Re-arming soldiers with gold above the reserve: in a war with a great power by default; at peace only when the court opens it
+        Rearm("re-arming", false, true), RearmAtPeace("re-arming at peace", false, false);
+        companion object { fun of(label: String) = entries.firstOrNull { it.label.equals(label.trim(), ignoreCase = true) } }
     }
+    /** civID -> the court's own word on its officials' acts, where it differs from [Act.byDefault] (a standing order of the ruler, kept by the host) */
+    val officialsOrders = ConcurrentHashMap<String, Map<Act, Boolean>>()
+    /** May this civ's officials do [act] on their own now? */
+    @yairm210.purity.annotations.Readonly
+    fun officialsMay(civ: Civilization, act: Act): Boolean =
+        civ.civID !in ruledCivs || !act.fixed && (officialsOrders[civ.civID]?.get(act) ?: act.byDefault)
+    /** May the officials re-arm this civ's units now: at war with a great power (city-states and barbarians do not count), or at peace where the court allows it */
+    fun mayRearm(civ: Civilization): Boolean = officialsMay(civ, Act.Rearm) &&
+        (civ.getKnownCivs().any { it.isMajorCiv() && civ.isAtWarWith(it) } || civ.civID !in ruledCivs || officialsMay(civ, Act.RearmAtPeace))
 
     /** Strategic resources a ruled civ's own pending proposals offer (name -> amount): the officials' re-arming and their construction choices must not spend
      *  them out from under the deal (a Horseman queued while a Horses-for-Copper proposal waited would void it, audit 2026-10-04) */
@@ -145,12 +161,6 @@ object RulerOverrides {
     /** Called for a ruled civ before its officials spend any gold: the ruler's own purchases due this turn come first */
     @Volatile var rulersFirst: ((Civilization) -> Unit)? = null
 
-    /** civIDs whose officials may not give gold to city-states on their own (a standing order of the ruler) */
-    val noGifts: MutableSet<String> = ConcurrentHashMap.newKeySet()
-
-    /** Kinds of deal a ruled civ's officials may not propose on their own (a standing order of the ruler): "Open Borders", "Research Agreement",
-     *  "Defensive Pact", "Declaration of Friendship", "luxuries", "calls to war" (asking another power to join a war of ours), or "all" */
-    val noProposals = ConcurrentHashMap<String, Set<String>>()
     /** civID -> faith the officials leave untouched (a ruler's standing order, as goldReserve is for gold) */
     val faithReserve = ConcurrentHashMap<String, Int>()
     /** The faith a civ's officials may spend on their own: what lies above the ruler's reserve for a ruled civ, all of it for any other. Every faith spender
@@ -208,7 +218,6 @@ object RulerOverrides {
         return nearWinner?.invoke(other) != true
     }
 
-    fun mayPropose(civ: com.unciv.logic.civilization.Civilization, kind: String) = noProposals[civ.civID]?.let { "all" in it || kind in it } != true
 
     /** Does [other]'s own offer of this kind of deal already wait on a ruled civ's desk for its advisor? Then its officials propose none of that kind
      *  to them - the two would cross (China and Egypt each proposed a Research Agreement while the other's waited, Run 19). Luxuries are one kind;

@@ -29,8 +29,8 @@ private const val PEACE_OFFER_WAITS = 8
 private const val HOLD_OFF = 10
 /** What proposeTrade says when the same offer of theirs waited on our desk and was accepted instead */
 private const val TAKEN_THEIRS = "their offer was taken"
-/** The war leave, said once: the host refuses every way of declaring war (the order, a deal that has us declare it, a refused demand not to attack, the generals'
- *  DeclareWar weight) without it - a sovereign has it, an advisor only by the ruler's plain word (record_rulers_will) or at an audience */
+/** The war leave, said once: the host refuses every way of declaring war (the order, a deal that has us declare it, a refused demand not to attack) without it -
+ *  a sovereign has it, an advisor only by the ruler's plain word (record_rulers_will) or at an audience. The officials never declare one (RulerOverrides.Act.War) */
 const val WAR_LEAVE = "war is the ruler's alone to declare, and they have not given leave to declare it on your own - bring the case for war to the ruler"
 /** A friendship is no trade, but it is offered, answered and renewed beside them under this name */
 private const val FRIENDSHIP = "Declaration of Friendship"

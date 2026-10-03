@@ -54,7 +54,7 @@ object NextTurnAutomation {
         if (tradeAndChangeState && civInfo.isMajorCiv()) {
             if (!civInfo.gameInfo.ruleset.modOptions.hasUnique(UniqueType.DiplomaticRelationshipsCannotChange)) {
                 DiplomacyAutomation.declareWar(civInfo)
-                if (civInfo.civID !in com.unciv.logic.automation.RulerOverrides.ruledCivs) DiplomacyAutomation.offerPeaceTreaty(civInfo) // a ruler's peace is the ruler's to offer
+                if (com.unciv.logic.automation.RulerOverrides.officialsMay(civInfo, com.unciv.logic.automation.RulerOverrides.Act.Peace)) DiplomacyAutomation.offerPeaceTreaty(civInfo) // a ruler's peace is the ruler's to offer
                 DiplomacyAutomation.askForHelp(civInfo)
                 DiplomacyAutomation.offerDeclarationOfFriendship(civInfo)
             }
@@ -62,7 +62,7 @@ object NextTurnAutomation {
                 ReligionAutomation.spendFaithOnReligion(civInfo)
             }
 
-            if (civInfo.civID !in com.unciv.logic.automation.RulerOverrides.ruledCivs) DiplomacyAutomation.denounce(civInfo) // a ruler's denouncement is the ruler's to make
+            if (com.unciv.logic.automation.RulerOverrides.officialsMay(civInfo, com.unciv.logic.automation.RulerOverrides.Act.Denouncement)) DiplomacyAutomation.denounce(civInfo) // a ruler's denouncement is the ruler's to make
             DiplomacyAutomation.offerToEstablishEmbassy(civInfo)
             DiplomacyAutomation.offerOpenBorders(civInfo)
             DiplomacyAutomation.offerResearchAgreement(civInfo)
@@ -227,7 +227,7 @@ object NextTurnAutomation {
     }
 
     private fun protectCityStates(civInfo: Civilization) {
-        if (civInfo.civID in RulerOverrides.ruledCivs) return // a ruled realm pledges protection by the ruler's protect order only
+        if (!RulerOverrides.officialsMay(civInfo, RulerOverrides.Act.Protection)) return // a ruled realm pledges protection by the ruler's protect order only
         for (state in civInfo.getKnownCivs().filter { !it.isDefeated() && it.isCityState }) {
             if (state.cityStateFunctions.otherCivCanPledgeProtection(civInfo))
                 state.cityStateFunctions.addProtectorCiv(civInfo) 
@@ -236,7 +236,7 @@ object NextTurnAutomation {
     }
 
     private fun bullyCityStates(civInfo: Civilization) {
-        if (civInfo.civID in RulerOverrides.ruledCivs) return // tribute is never the officials' to demand for a ruled realm
+        if (!RulerOverrides.officialsMay(civInfo, RulerOverrides.Act.Tribute)) return // tribute is never the officials' to demand for a ruled realm
         for (state in civInfo.getKnownCivs().filter { !it.isDefeated() && it.isCityState }.toList()) {
             val diplomacyManager = state.getDiplomacyManager(civInfo)!!
             if (!diplomacyManager.isRelationshipLevelLT(RelationshipLevel.Friend)) continue
@@ -608,7 +608,7 @@ object NextTurnAutomation {
         val civHasSignificantlyWeakerMilitaryThanEnemies =
                 ownMilitaryStrength < sumOfEnemiesMilitaryStrength * 0.66f
         for (city in civInfo.cities) {
-            if (civInfo.civID !in com.unciv.logic.automation.RulerOverrides.ruledCivs && shouldAnnexCity(civInfo, city)) city.annexCity() // a ruled realm annexes only by the cities order
+            if (com.unciv.logic.automation.RulerOverrides.officialsMay(civInfo, com.unciv.logic.automation.RulerOverrides.Act.Annexation) && shouldAnnexCity(civInfo, city)) city.annexCity() // a ruled realm annexes only by the cities order
 
             // Don't pull a city off a spaceship part it's already building for the military push (only if actually attacked)
             val onSpaceshipPart = city.cityConstructions.getCurrentConstruction().name in civInfo.gameInfo.spaceResources
@@ -742,9 +742,9 @@ object NextTurnAutomation {
             else -> {
                 val threatLevel = Automation.threatAssessment(civInfo, offendingCiv)
                 if ((threatLevel < ThreatLevel.High // don't piss them off for no reason please.
-                    || demand == Demand.DoNotAttackUs) && com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, "demands") // a court may bar its officials' demands
+                    || demand == Demand.DoNotAttackUs) && com.unciv.logic.automation.RulerOverrides.officialsMay(civInfo, com.unciv.logic.automation.RulerOverrides.Act.Demands) // a court may bar its officials' demands
                     // a ruled civ's officials never make this one: a refusal of it is a declaration of war on us, and war is the ruler's alone to bring (audit 2026-10-03)
-                    && !(demand == Demand.DoNotAttackUs && civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs)) {
+                    && (demand != Demand.DoNotAttackUs || com.unciv.logic.automation.RulerOverrides.officialsMay(civInfo, com.unciv.logic.automation.RulerOverrides.Act.DemandNotToAttack))) {
                     offendingCiv.popupAlerts.add(PopupAlert(demand.demandAlert, civInfo.civID))
                     if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) com.unciv.logic.automation.RulerOverrides.demandMade?.invoke(civInfo, offendingCiv, demand)
                 }

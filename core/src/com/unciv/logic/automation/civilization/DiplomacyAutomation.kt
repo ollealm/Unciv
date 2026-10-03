@@ -31,7 +31,7 @@ import kotlin.random.Random
 object DiplomacyAutomation {
 
     internal fun offerDeclarationOfFriendship(civInfo: Civilization) {
-        if (!com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, "Declaration of Friendship")) return // a ruler's standing order
+        if (!com.unciv.logic.automation.RulerOverrides.officialsMay(civInfo, com.unciv.logic.automation.RulerOverrides.Act.Friendship)) return // a ruler's standing order
         val civsThatWeCanDeclareFriendshipWith = civInfo.getKnownCivs()
             .filter {
                 civInfo.diplomacyFunctions.canSignDeclarationOfFriendshipWith(it)
@@ -132,7 +132,7 @@ object DiplomacyAutomation {
      */
     internal fun offerToEstablishEmbassy(civInfo: Civilization) {
         if (civInfo.getCapital() == null) return
-        if (!com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, "Embassy")) return // a ruler's standing order, "all" included
+        if (!com.unciv.logic.automation.RulerOverrides.officialsMay(civInfo, com.unciv.logic.automation.RulerOverrides.Act.Embassy)) return // a ruler's standing order, "all" included
         val civsThatWeCanEstablishEmbassyWith = civInfo.getKnownCivs().filter {
             civInfo.diplomacyFunctions.canEstablishEmbassyWith(it)
             && !civInfo.getDiplomacyManager(it)!!.hasFlag(DiplomacyFlags.DeclinedEmbassy)
@@ -174,7 +174,7 @@ object DiplomacyAutomation {
     }
 
     internal fun offerOpenBorders(civInfo: Civilization) {
-        if (!com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, Constants.openBorders)) return // a ruler's standing order
+        if (!com.unciv.logic.automation.RulerOverrides.officialsMay(civInfo, com.unciv.logic.automation.RulerOverrides.Act.OpenBorders)) return // a ruler's standing order
         if (!civInfo.hasUnique(UniqueType.EnablesOpenBorders)) return
 
         val civsThatWeCanOpenBordersWith = civInfo.getKnownCivs().filter {
@@ -253,7 +253,7 @@ object DiplomacyAutomation {
     }
 
     internal fun offerResearchAgreement(civInfo: Civilization) {
-        if (!com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, Constants.researchAgreement)) return // a ruler's standing order
+        if (!com.unciv.logic.automation.RulerOverrides.officialsMay(civInfo, com.unciv.logic.automation.RulerOverrides.Act.ResearchAgreement)) return // a ruler's standing order
         if (!civInfo.diplomacyFunctions.canSignResearchAgreement()) return // don't waste your time
         
         val civsThatWeCanSignResearchAgreementWith = civInfo.getKnownCivs().filter {
@@ -279,7 +279,7 @@ object DiplomacyAutomation {
     }
 
     internal fun offerDefensivePact(civInfo: Civilization) {
-        if (!com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, Constants.defensivePact)) return // a ruler's standing order
+        if (!com.unciv.logic.automation.RulerOverrides.officialsMay(civInfo, com.unciv.logic.automation.RulerOverrides.Act.DefensivePact)) return // a ruler's standing order
         if (!civInfo.diplomacyFunctions.canSignDefensivePact()) return // don't waste your time
 
         val civsThatWeCanSignDefensivePactWith = civInfo.getKnownCivs().filter {
@@ -374,6 +374,7 @@ object DiplomacyAutomation {
     internal fun declareWar(civInfo: Civilization) {
         if (civInfo.cities.isEmpty() || civInfo.diplomacy.isEmpty()) return
         if (civInfo.getPersonality()[PersonalityValue.DeclareWar] == 0f) return
+        if (!com.unciv.logic.automation.RulerOverrides.officialsMay(civInfo, com.unciv.logic.automation.RulerOverrides.Act.War)) return // war is the ruler's alone: never the officials' for a ruled realm, whatever its weights
         if (civInfo.getHappiness() <= 0) return
 
         val ourMilitaryUnits = civInfo.units.getCivUnits().count { !it.isCivilian() }
@@ -464,7 +465,7 @@ object DiplomacyAutomation {
 
     internal fun askForHelp(civInfo: Civilization) {
         if (!civInfo.isAtWar() || civInfo.cities.isEmpty() || civInfo.diplomacy.isEmpty()) return
-        if (!com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, "calls to war")) return // a ruler's standing order: whom to call into our wars is the ruler's to decide
+        if (!com.unciv.logic.automation.RulerOverrides.officialsMay(civInfo, com.unciv.logic.automation.RulerOverrides.Act.CallToWar)) return // a ruler's standing order: whom to call into our wars is the ruler's to decide
 
         val enemyCivs = civInfo.getCivsAtWarWith().filter { it.isMajorCiv() }
             .sortedByDescending { it.getStatForRanking(RankingType.Force) }

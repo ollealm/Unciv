@@ -65,18 +65,14 @@ object RulerHost {
         var policyBranches = ArrayList<String>()
         /** Buildings and units the officials must never queue on their own */
         var neverBuild = ArrayList<String>()
-        /** Kinds of deal the officials must never propose on their own: Open Borders, Research Agreement, Defensive Pact, Declaration of Friendship, luxuries, calls to war, all */
-        var neverPropose = ArrayList<String>()
+        /** The court's word on its officials' acts (RulerOverrides.Act, by label): true opens one, false bars it; an act not named keeps its default */
+        var officials = LinkedHashMap<String, Boolean>()
         /** Gold the officials must leave untouched; null = they spend as they see fit */
         var goldReserve: Int? = null
         /** Faith the officials leave untouched; the ruler's own purchases with faith are not bound by it */
         var faithReserve: Int? = null
         /** The war leave: a sovereign's, or an advisor's by the ruler's plain word. Every way of declaring war checks it here (audit 2026-10-04: it lived in the orchestrator, which parsed the host's words to guard it) */
         var mayDeclareWar = false
-        /** The officials may not give gold to city-states on their own */
-        var noGifts = false
-        /** When the officials re-arm units with gold on their own: always, war (only while at war with a major power), never */
-        var officialsRearm = "war"
         /** Keep a soldier inside every city: when one stands empty, the nearest free soldier is sent in under a garrison order */
         var garrisonEveryCity = false
         /** The great power our vote for world leader is pledged to, when the world votes; null = we abstain */
@@ -91,15 +87,14 @@ object RulerHost {
             "goldReserve" to goldReserve,
             "faithReserve" to faithReserve,
             "mayDeclareWar" to mayDeclareWar,
-            "noGifts" to noGifts,
-            "officialsRearm" to officialsRearm,
+            // Saved as the court's own word; the briefing shows what the officials may and may not do now, and what is never theirs
+            "officials" to (if (civ == null) officials else officialsInWords(this)),
             "garrisonEveryCity" to garrisonEveryCity,
             "worldVote" to (worldVote ?: "not pledged: we abstain when the world votes"),
             "posture" to (if (civ?.isAtWar() == true || warAim != null || stance != "attack" || reserve != 0) mapOf("warAim" to warAim, "stance" to stance, "reserve" to reserve)
                 else "the officials' own (attack when at war); set it when a war comes"),
             "personality" to personality,
             "neverBuild" to neverBuild,
-            "neverPropose" to neverPropose,
             "research" to research.filter { civ == null || !civ.tech.isResearched(it) || civ.gameInfo.ruleset.technologies[it]?.isContinuallyResearchable() == true },
             "policyBranches" to policyBranches)
     }
@@ -464,7 +459,7 @@ object RulerHost {
         orders.clear(); publicEvents.clear(); chancery.clear(); spending.clear(); warningsWoken.clear(); losses.clear(); warsDeclared.clear(); notificationsSeen.clear(); shipRaids.clear(); inPlaySeen.clear()
         units.reset(); diplomacy.reset(); trail.clear(); ages.clear()
         worldAtLastAdvance = null
-        RulerOverrides.lockedCities.clear(); RulerOverrides.focusedCities.clear(); RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.faithReserve.clear(); RulerOverrides.noProposals.clear(); RulerOverrides.noGifts.clear(); RulerOverrides.rearming.clear(); RulerOverrides.noWonders.clear()
+        RulerOverrides.lockedCities.clear(); RulerOverrides.focusedCities.clear(); RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.faithReserve.clear(); RulerOverrides.officialsOrders.clear(); RulerOverrides.noWonders.clear()
     }
 
     /** Written to a sibling file and moved into place, so a crash mid-write never leaves a half file behind */
@@ -547,19 +542,25 @@ object RulerHost {
         json.get("research")?.let { research = ArrayList(it.asStringArray().toList()) }
         json.get("policyBranches")?.let { policyBranches = ArrayList(it.asStringArray().toList()) }
         json.get("neverBuild")?.let { neverBuild = ArrayList(it.asStringArray().toList()) }
-        json.get("neverPropose")?.let { list ->
-            val kinds = listOf(Constants.openBorders, Constants.researchAgreement, Constants.defensivePact, "Declaration of Friendship", "luxuries", "calls to war", "demands", "Embassy", "all")
-            neverPropose = ArrayList(list.asStringArray().map { given -> kinds.firstOrNull { it.equals(given.trim(), ignoreCase = true) || it.equals(given.trim().removeSuffix("s"), ignoreCase = true) }
-                ?: throw ApiError(400, "neverPropose takes ${kinds.joinToString()}; not '$given'") })
+        json.get("officials")?.takeUnless { it.isNull }?.let { given ->
+            for (entry in given) {
+                val act = RulerOverrides.Act.of(entry.name) ?: RulerOverrides.Act.of(entry.name.removeSuffix("s"))
+                    ?: throw ApiError(400, "officials takes ${RulerOverrides.Act.entries.filter { !it.fixed }.joinToString { "'${it.label}'" }}; not '${entry.name}'")
+                if (act.fixed) throw ApiError(400, "'${act.label}' is never the officials': it binds the court, and only your own order makes it. Nothing was changed")
+                if (entry.isNull || entry.asBoolean() == act.byDefault) officials.remove(act.label) else officials[act.label] = entry.asBoolean()
+            }
         }
+        // A host.json from before the one table: the three orders it replaced, read into it (a pact and a call to war are never the officials' now)
+        json.get("neverPropose")?.asStringArray()?.forEach { kind ->
+            val acts = if (kind == "all") listOf(RulerOverrides.Act.Luxuries, RulerOverrides.Act.OpenBorders, RulerOverrides.Act.Embassy, RulerOverrides.Act.ResearchAgreement, RulerOverrides.Act.Demands)
+                else listOfNotNull(RulerOverrides.Act.of(kind)?.takeIf { !it.fixed && it.byDefault })
+            for (act in acts) officials[act.label] = false
+        }
+        if (json.getBoolean("noGifts", false)) officials[RulerOverrides.Act.Gifts.label] = false
+        when (json.getString("officialsRearm", null)) { "always" -> officials[RulerOverrides.Act.RearmAtPeace.label] = true; "never" -> officials[RulerOverrides.Act.Rearm.label] = false }
         json.get("goldReserve")?.let { goldReserve = if (it.isNull) null else it.asInt().coerceAtLeast(0) }
         json.get("faithReserve")?.let { faithReserve = if (it.isNull) null else it.asInt().coerceAtLeast(0) }
         json.get("mayDeclareWar")?.takeUnless { it.isNull }?.let { mayDeclareWar = it.asBoolean() }
-        json.get("noGifts")?.let { noGifts = it.asBoolean() }
-        json.get("officialsRearm")?.takeUnless { it.isNull }?.asString()?.trim()?.lowercase()?.let { mode ->
-            if (mode !in listOf("always", "war", "never")) throw ApiError(400, "officialsRearm takes always, war or never; not '$mode'")
-            officialsRearm = mode
-        }
         json.get("garrisonEveryCity")?.takeUnless { it.isNull }?.let { garrisonEveryCity = it.asBoolean() }
         if (json.has("worldVote")) worldVote = json.get("worldVote").takeUnless { it.isNull }?.asString()?.takeUnless { it.startsWith("not pledged") }
         json.get("acknowledged")?.let { acknowledged = ArrayList(it.asStringArray().toList()) } // as saved; the order is "acknowledge", matched in setOrders
@@ -570,16 +571,21 @@ object RulerHost {
         }
     }
 
+    /** The officials' acts as the briefing says them: what they may do on their own now, what they may not, and what is never theirs */
+    private fun officialsInWords(standing: StandingOrders): Map<String, Any> {
+        val (may, mayNot) = RulerOverrides.Act.entries.filter { !it.fixed }.partition { standing.officials[it.label] ?: it.byDefault }
+        return mapOf("may" to may.map { it.label }, "mayNot" to mayNot.map { it.label },
+            "neverTheirs" to RulerOverrides.Act.entries.filter { it.fixed }.joinToString { it.label } + " - each binds the court, and only your own order makes it")
+    }
+
     private fun applyPersonality(civ: Civilization, standing: StandingOrders) {
-        // Rulers decide on war themselves, so by default the automation never declares it
-        val personality = Personality().apply { this[PersonalityValue.DeclareWar] = 0f }
+        // War is never the officials' (RulerOverrides.Act.War): the DeclareWar weight is the nation's own, and bears only on what they build and keep
+        val personality = Personality()
         for ((name, value) in standing.personality) personality[PersonalityValue.valueOf(name)] = value
         RulerOverrides.personalities[civ.civID] = personality
         standing.goldReserve?.let { RulerOverrides.goldReserve[civ.civID] = it } ?: RulerOverrides.goldReserve.remove(civ.civID)
         standing.faithReserve?.let { RulerOverrides.faithReserve[civ.civID] = it } ?: RulerOverrides.faithReserve.remove(civ.civID)
-        if (standing.noGifts) RulerOverrides.noGifts += civ.civID else RulerOverrides.noGifts -= civ.civID
-        RulerOverrides.rearming[civ.civID] = standing.officialsRearm
-        if (standing.neverPropose.isNotEmpty()) RulerOverrides.noProposals[civ.civID] = standing.neverPropose.toSet() else RulerOverrides.noProposals.remove(civ.civID)
+        RulerOverrides.officialsOrders[civ.civID] = standing.officials.mapNotNull { (label, may) -> RulerOverrides.Act.of(label)?.let { it to may } }.toMap()
     }
 
     /** Which of the ruler's weights most favoured an item the officials queued on their own, as their scoring leans: a building by the stat its
@@ -689,7 +695,7 @@ object RulerHost {
     }
 
     /** Every field an order may carry: an order with none of them is no order (a model that wrapped its fields in "arguments" sent nothing) */
-    private val ORDER_FIELDS = listOf("personality", "research", "policyBranches", "neverBuild", "neverPropose", "goldReserve", "faithReserve", "mayDeclareWar", "withRulersWord", "noGifts", "officialsRearm", "garrisonEveryCity", "posture",
+    private val ORDER_FIELDS = listOf("personality", "research", "policyBranches", "neverBuild", "officials", "goldReserve", "faithReserve", "mayDeclareWar", "withRulersWord", "garrisonEveryCity", "posture",
         "queue", "build", "purchase", "rearm", "cities", "units", "trade", "renew", "answerOffers", "answerDemands", "peace", "friendship", "gift", "declareWar", "cityFocus", "acknowledge", "worldVote", "marry", "denounce", "protect", "endProtection")
 
     private fun setOrders(civ: Civilization, json: JsonValue): Any? {
@@ -708,14 +714,10 @@ object RulerHost {
         }
         val standing = orders.getOrPut(civ.civName) { StandingOrders() }
         // The war leave for this order: standing (a sovereign's, or the ruler's plain word), or the ruler's own word at an audience (withRulersWord - this call only)
-        val standingLeave = json.get("mayDeclareWar")?.takeUnless { it.isNull }?.asBoolean() ?: standing.mayDeclareWar
-        val leave = standingLeave || json.getBoolean("withRulersWord", false)
+        val leave = (json.get("mayDeclareWar")?.takeUnless { it.isNull }?.asBoolean() ?: standing.mayDeclareWar) || json.getBoolean("withRulersWord", false)
         val alreadyKnown = ArrayList<String>()
         val rejected = ArrayList<String>()
         val taken = ArrayList<String>()
-        // The generals' DeclareWar weight starts wars on its own after the audience: it takes the standing leave, never the audience's
-        json.get("personality")?.get("DeclareWar")?.takeUnless { it.isNull }?.let { weight ->
-            if (weight.asFloat() > 0f && !standingLeave) { rejected += "DeclareWar above 0 lets the generals start wars on their own, and $WAR_LEAVE; the other weights were set"; json.get("personality").remove("DeclareWar") } }
         json.get("research")?.let { goals ->
             val ahead = ruleset.technologies.keys.filter { !reached(civ, it) }
             val kept = goals.asStringArray().map { goal -> if (goal in ruleset.technologies) goal else onlyMatch(goal, ruleset.technologies.keys)?.also { taken += "$goal -> $it" }
@@ -2226,7 +2228,7 @@ object RulerHost {
         // The rearm order's own test (RulerUnits.newerArms), so the warning never sends the advisor to an order that then finds no one to re-arm
         val oldArms = civ.units.getCivUnits().filter { it.baseUnit.isLandUnit && units.newerArms(it).isNotEmpty() }.toList()
         val (outdated, waiting) = oldArms.partition { unit -> units.newerArms(unit).any { unit.upgrade.canUpgrade(it) } }
-        val rearmMode = orders[civ.civName]?.officialsRearm ?: "war"
+        val rearmMode = when { !RulerOverrides.officialsMay(civ, RulerOverrides.Act.Rearm) -> "never"; RulerOverrides.officialsMay(civ, RulerOverrides.Act.RearmAtPeace) -> "always"; else -> "war" }
         // Re-arming is done only on our own land and ashore: soldiers abroad or at sea are said apart, and never sent to the order alone
         val away = outdated.filter { it.isEmbarked() || it.getTile().getOwner() != civ }
         // Each re-arming passes the resource test alone; all of them together may need more than we have (6 to re-arm with 4 Aluminum spare, Run 20)
@@ -2616,7 +2618,7 @@ object RulerHost {
                     "Commerce" to "willingness to trade luxuries and make deals",
                     "Diplomacy" to "effort spent on city-states and friendships",
                     "Loyal" to "how much they honour friendships",
-                    "DeclareWar" to "0 = never on their own; higher = they may start wars they think they can win")),
+                    "DeclareWar" to "how warlike their building and keeping is (the Great Wall, a standing army); they never declare war on their own - war is the ruler's")),
             "diplomacy" to diplomacy.tradeOptions(civ, leave),
             // What each city can build, with turns and its price in gold - and in faith where faith buys it (a Missionary is bought, never built)
             "buildable" to civ.cities.associate { city ->
