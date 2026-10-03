@@ -1051,14 +1051,19 @@ object RulerHost {
                 else if (civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.SpaceshipPart) == true && civ.victoryManager.currentsSpaceshipParts[unit.first] > 0) "Our ${unit.first} was added to the ship in the capital."
                 else "Our ${unit.first} #$id ${describeWhere(civ, unit.second)} left service: disbanded by the officials to save its upkeep${needs?.let { " or to free its $it" } ?: ""}, or used up (a missionary spent).")
         }
-        // Our own blows, which the engine tells only to the one struck: one line per target this turn - a city by name, a power's soldiers in the field together
-        for ((_, blows) in (strikes.remove(civ.civName) ?: emptyList<RulerOverrides.Strike>()).groupBy { it.targetCity ?: it.targetCivName }) {
+        // Our own blows, which the engine tells only to the one struck: one line per target this turn - a city by name, a power's soldiers in the field together,
+        // its ships at sea together (a blow on a barbarian Caravel once read "soldiers in the field")
+        for ((_, blows) in (strikes.remove(civ.civName) ?: emptyList<RulerOverrides.Strike>()).groupBy { it.targetCity ?: (it.targetCivName + if (it.targetTile?.isWater == true) " at sea" else "") }) {
             val whose = blows.first().targetCivName.let { if (it == Constants.barbarians) "the barbarians" else it }
             val theirs = whose + if (whose.endsWith("s")) "'" else "'s" // the Aztecs' soldiers, Japan's
             val times = when (blows.size) { 1 -> "once"; 2 -> "twice"; else -> "${blows.size} times" }
             val city = blows.first().targetCity
             log(civ, if (city != null) "Our host struck $city ($whose) $times: " + (if (blows.any { it.fell }) "the walls were stormed and the city is taken." else "the walls at ${blows.last().health} of ${blows.last().maxHealth} health.")
-                else "Our host struck $theirs soldiers in the field $times: " + listOfNotNull(
+                else "Our host struck " + (if (blows.first().targetTile?.isWater == true) {
+                    // On the water, ships and embarked soldiers alike: in one harbour, said by name, or else at sea
+                    val harbour = blows.mapNotNull { it.targetTile }.map { RulerCampaigns.placeOf(civ, it, emptySet()) }.distinct().singleOrNull()?.takeIf { it.startsWith("the harbour of") }
+                    "$whose ${harbour?.let { "in $it" } ?: "at sea"}"
+                } else "$theirs soldiers in the field") + " $times: " + listOfNotNull(
                     blows.filter { it.fell }.map { it.targetUnit!! }.takeIf { it.isNotEmpty() }?.let { "their ${it.joinToString(" and ")} fell" },
                     blows.filter { !it.fell }.groupBy { it.targetUnit!! }.map { (name, hits) -> "$name at ${hits.last().health} health" }.takeIf { it.isNotEmpty() }?.let { "their ${it.joinToString(", ")}" }
                 ).joinToString("; ") + ".")

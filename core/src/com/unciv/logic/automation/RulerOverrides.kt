@@ -158,13 +158,13 @@ object RulerOverrides {
 
     /** A blow struck by a ruled civ's unit or city: the engine tells only the defender of it. [targetCity] when the blow fell on a city (its walls' health after),
      *  else [targetUnit], the unit struck; [fell] when the blow destroyed or captured it */
-    class Strike(val attacker: Civilization, val targetCivName: String, val targetCity: String?, val targetUnit: String?, val health: Int, val maxHealth: Int, val fell: Boolean)
+    class Strike(val attacker: Civilization, val targetCivName: String, val targetCity: String?, val targetUnit: String?, val health: Int, val maxHealth: Int, val fell: Boolean, val targetTile: Tile? = null)
     @Volatile var struck: ((Strike) -> Unit)? = null
     fun noteStrike(attacker: ICombatant, defender: ICombatant, fell: Boolean) {
         val civ = attacker.getCivInfo()
         if (civ.civID !in ruledCivs || civ == defender.getCivInfo()) return
         struck?.invoke(Strike(civ, defender.getCivInfo().civName, if (defender.isCity()) defender.getName() else null, if (defender.isCity()) null else defender.getName(),
-            defender.getHealth().coerceAtLeast(0), defender.getMaxHealth(), fell))
+            defender.getHealth().coerceAtLeast(0), defender.getMaxHealth(), fell, defender.getTile()))
     }
 
     /** civIDs that may raise no world wonder at all (a game setting: e.g. only the rulers' realms compete for them) */
