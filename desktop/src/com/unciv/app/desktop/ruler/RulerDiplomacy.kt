@@ -318,13 +318,22 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         return "$side cannot offer ${supplies.first().resource.name}: it comes to $whose only by ${from.joinToString(" and ")}, and what comes by trade or from a city-state cannot be passed on"
     }
 
+    /** What allows research agreements in this world, and whether [civ] has it: the technology (or other source) the rules name */
+    private fun enablingLearning(civ: Civilization, who: String): String {
+        val sources = civ.gameInfo.ruleset.technologies.values.filter { it.hasUnique(UniqueType.EnablesResearchAgreements) }.map { it.name }
+        return if (sources.isEmpty()) "the rules of this world allow them only by a gift no realm of ours holds" else "it takes ${sources.joinToString(" or ")}, which $who not learned"
+    }
+
     /** What a research agreement between the two lacks, as the rules have it (DiplomacyFunctions.canSignResearchAgreementWith); null when nothing does */
     private fun researchAgreementLacks(civ: Civilization, other: Civilization): String? {
         val ours = civ.getDiplomacyManager(other) ?: return "we have not met them"
         val cost = civ.diplomacyFunctions.getResearchAgreementCost(other)
         return when {
-            !civ.diplomacyFunctions.canSignResearchAgreement() -> "we cannot sign research agreements yet (it takes the learning that allows it), or we have nothing left to learn"
-            !other.diplomacyFunctions.canSignResearchAgreement() -> "${other.civName} cannot sign research agreements yet, or has nothing left to learn"
+            // One cause each: the learning that allows it, or nothing left to learn (DiplomacyFunctions.canSignResearchAgreement)
+            civ.tech.allTechsAreResearched() -> "we have nothing left to learn"
+            !civ.diplomacyFunctions.canSignResearchAgreement() -> "we cannot sign research agreements yet: ${enablingLearning(civ, "we have")}"
+            other.tech.allTechsAreResearched() -> "${other.civName} has nothing left to learn"
+            !other.diplomacyFunctions.canSignResearchAgreement() -> "${other.civName} cannot sign research agreements yet: ${enablingLearning(other, "they have")}"
             !civ.diplomacyFunctions.meetsEmbassyRequirementFor(other) -> "we have no shared embassies with ${other.civName}"
             !ours.hasFlag(DiplomacyFlags.DeclarationOfFriendship) -> "there is no Declaration of Friendship between us (propose one with the friendship order first)"
             ours.hasFlag(DiplomacyFlags.ResearchAgreement) || ours.otherCivDiplomacy().hasFlag(DiplomacyFlags.ResearchAgreement) -> "one is already running between us"

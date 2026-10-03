@@ -624,6 +624,13 @@ object RulerHost {
         } }
         if (taken.isNotEmpty()) rejected += "Taken as meant: ${taken.joinToString()}."
         standing.readFrom(json)
+        // An item put on the never-build list goes from every queue now, not after the turn (a Military Academy ordered off at T240 was finished at T241, Run 20)
+        val struckNow = if (!json.has("neverBuild")) emptyList() else civ.cities.flatMap { city ->
+            city.cityConstructions.constructionQueue.toList().filter { name -> (ruleset.buildings[name] ?: ruleset.units[name])?.let { isForbidden(civ, it) } == true }.map { name ->
+                city.cityConstructions.constructionQueue.remove(name)
+                if (city.cityConstructions.constructionQueue.isEmpty()) city.cityConstructions.chooseNextConstruction()
+                "$name in ${city.name}" } }
+        if (struckNow.isNotEmpty()) log(civ, "By your order: ${struckNow.joinToString()} struck from the queues, as never to be built.")
         applyPersonality(civ, standing)
         RulerOverrides.postures[civ.civID] = RulerOverrides.Posture(standing.warAim, standing.stance, standing.reserve)
         if (json.has("posture")) log(civ, "By your order: the host's posture is now ${standing.stance}" + (standing.warAim?.let { ", its aim $it" } ?: "") + (if (standing.reserve > 0) ", ${standing.reserve} soldiers kept home" else "") + ".")
@@ -635,6 +642,7 @@ object RulerHost {
         } }
 
         val done = ArrayList<String>()
+        if (struckNow.isNotEmpty()) done += "Struck from the queues now, as never to be built: ${struckNow.joinToString()}"
         val failed = ArrayList<String>(rejected)
         /** Each item stands alone: a bad one is reported under "failed" and the rest still go through */
         fun tryEach(list: JsonValue?, action: (JsonValue) -> String) {
@@ -997,6 +1005,11 @@ object RulerHost {
                     else if (city.id !in RulerOverrides.lockedCities) "The officials changed their own plan for ${city.name}: $item out."
                     else "The officials dropped $item from ${city.name}'s queue, replacing it with their own choice.")
             }
+            // A city that starts or stops turning its production into Science or Gold (or faith) by the officials' hand: one line each way (Songhai never ordered it, Run 20)
+            val wasTurning = was.firstOrNull()?.takeIf(isPerpetual); val nowTurning = now.firstOrNull()?.takeIf(isPerpetual)
+            if (wasTurning != nowTurning && city.id !in RulerOverrides.lockedCities) log(civ, when {
+                nowTurning != null -> "The officials set ${city.name} to turn its production into $nowTurning."
+                else -> "${city.name} no longer turns its production into $wasTurning: the officials have it build ${now.firstOrNull() ?: "nothing"}." })
             for (item in now) if (item !in was && !isPerpetual(item) && civ.cities.none { other -> other != city && item in (before.queues[other.name] ?: emptyList()) && item !in other.cityConstructions.constructionQueue
                     && notifications.none { "has been built in [${other.name}]" in it.text && "[$item]" in it.text } })
                 log(civ, "The officials queued $item in ${city.name}" + (favouredBy(civ, city, item)?.let { ", favoured by your $it weight" } ?: "") + ".")
@@ -1025,9 +1038,11 @@ object RulerHost {
             // The host knows whose hand spent a unit: the ruler's use order says so as it is carried out, anything else was the officials' once it was left to them
             val byWhom = if (units.usedByOrder.remove(id)) "by your order" else "by the officials once it was left to them"
             val went = expended[civ.civName]?.remove(id)
-            log(civ, if (disbandedWhy != null) "Our ${unit.first} #$id ${describeWhere(civ, unit.second)} was disbanded by the officials $disbandedWhy."
+            log(civ, if (disbandedWhy != null && !civ.isDefeated()) "Our ${unit.first} #$id ${describeWhere(civ, unit.second)} was disbanded by the officials $disbandedWhy."
                 else if (fell != null) "Our ${unit.first} #$id was ${if (fell.captured) "captured" else "lost in action"} ${describeWhere(civ, fell.where)}" +
                     (fell.enemy?.let { enemy -> ", ${if (fell.captured) "taken" else "killed"} by ${if (enemy.isBarbarian) "a barbarian" else enemy.civName + "'s"} ${fell.enemyUnit ?: "soldiers"}" } ?: "") + "."
+                // A realm that fell takes what was left of its host with it: no officials disbanded them (the Maya at T210, Run 20)
+                else if (civ.isDefeated()) "Our ${unit.first} #$id ${describeWhere(civ, unit.second)} was lost with the fall of ${civ.civName}."
                 else if (spent) "Our ${unit.first} ${describeWhere(civ, unit.second)} did its work and was used up, as such boats are: the fishing grounds it set up stay."
                 else if (great) "Our ${unit.first} #$id was spent $byWhom: its ability used ${describeWhere(civ, went?.second ?: unit.second)}."
                 else if (went != null) "Our ${unit.first} #$id ${describeWhere(civ, went.second)} ${went.first}${if (went.first.startsWith("was used up")) ", $byWhom" else ""}."
@@ -1203,7 +1218,9 @@ object RulerHost {
         val every = civ.getTurnsBetweenDiplomaticVotes()
         val powers = (listOf(civ) + civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }).toList()
         return mapOf(
-            "unitedNations" to if (holder != null) "built by ${if (holder == civ) "us" else holder.civName}: the world votes for a leader every $every turns" + (civ.getTurnsTillNextDiplomaticVote()?.let { if (it == 0) "; the world votes this turn" else "; the next vote in $it turn${if (it == 1) "" else "s"}" } ?: "")
+            "unitedNations" to if (holder != null) "built by ${if (holder == civ) "us" else holder.civName}: the world votes for a leader every $every turns" + (civ.getTurnsTillNextDiplomaticVote()?.let { if (it == 0) "; the world votes this turn" else "; the next vote in $it turn${if (it == 1) "" else "s"}" } ?: "") +
+                    // City-states cast for their ally as the vote's turn is played, after every great power has moved (NextTurnAutomation): what moves one must be done before
+                    ". A city-state votes for whoever is its ally when the voting turn is played, after every great power has moved in it, so the last look-in that can still move a city-state's vote is the one before that turn"
                 else "not yet built (${un.name} is a wonder${un.requiredTech?.let { " that needs $it" } ?: ""}): nobody votes until it stands; the first vote comes $every turns after it is built, then one every $every turns",
             "votes" to "$total votes in all${if (holder == null) " once it stands" else ""}: one for each of the ${voters.count { it.isMajorCiv() }} great powers and ${voters.count { it.isCityState }} city-states still standing, and a second for the holder of the ${un.name}. $needed are needed to win, and the most votes with no tie. No power may vote for itself - the holder's two votes go to another",
             "howTheyVote" to run {
@@ -1371,6 +1388,8 @@ object RulerHost {
     // Not "demands": that is a city asking for a luxury, not a neighbour asking for tribute.
     // Not our own order's echo ("By your order: we declared war"), and not a barbarian camp cleared ("We have captured a barbarian encampment").
     private val wakeWorthy = listOf("dropped .* because", "(?<!By your order: we )declared war", "joined .* in the war against us", "has denounced us", "lost in action",
+        // A city-state's alliance lost: its vote and its goods go with it (the Inca lost Geneva at T281 and slept through the vote, Run 20). Churn within a turn is filtered before it is logged
+        "lost our alliance",
         // The alerts every realm gets (the Utopia Project begun or finished): the end of the game may be in sight
         "has started constructing", "has completed [^.]*!$",
         "awaits orders", "The United Nations now stands", "our vote is not pledged", "(?<!We have )captured(?! a barbarian)", "has been destroyed", "has been stuck", "offers peace", "\\(an advised court\\) offers a deal", "demands that we", "proposes a Declaration of Friendship").map { Regex(it, RegexOption.IGNORE_CASE) }
@@ -1575,6 +1594,8 @@ object RulerHost {
         val soldiers = civ.units.getCivUnits().filter { it.isMilitary() && it.baseUnit.isLandUnit }.toList()
         val siege = soldiers.filter { it.baseUnit.isProbablySiegeUnit() }
         val melee = soldiers.filter { it.baseUnit.isMelee() }
+        // A foot soldier standing in a city of ours holds it; it is not free to walk into another (Rome broke Uxmal's walls with all six of its infantry on garrison, Run 20)
+        val inGarrison = melee.count { it.getTile().isCityCenter() && it.getTile().getOwner() == civ }
         val aircraft = civ.units.getCivUnits().count { it.isMilitary() && it.baseUnit.isAirUnit() }
         val warships = civ.units.getCivUnits().filter { it.isMilitary() && it.baseUnit.isWaterUnit }.toList()
         val ourLands = civ.cities.map { it.getCenterTile().getContinent() }.toSet()
@@ -1595,8 +1616,10 @@ object RulerHost {
                 val fullVolley = (bestEngine?.let { volley(it, city) } ?: 0).coerceIn(0, com.unciv.logic.battle.CityCombatant(city).getMaxHealth())
                 val perVolley = fullVolley.coerceAtMost(city.health)
                 val volleysToBreak = if (perVolley > 0) (city.health + perVolley - 1) / perVolley else null
-                val perTurn = fullVolley * siege.size - healing
-                val turnsToBreak = if (perTurn > 0) (city.health + perTurn - 1) / perTurn else null
+                // Whether all our engines together, each with its own volley, outpace the healing at all. How many turns a siege takes is not reckoned: engines
+                // move, set up, are shot at and fall back, and the one figure that tried said 1-2 turns where Run 20's sieges took 5 to 13
+                val allEnginesTake = siege.sumOf { (volley(it, city)).coerceIn(0, com.unciv.logic.battle.CityCombatant(city).getMaxHealth()) }
+                val outpaced = allEnginesTake > healing
                 val hitOnFoot = bestFoot?.let { cityHits(it, city) }
                 // What stands about the city within three tiles, on the tiles we can see: its soldiers, and whatever shoots at aircraft (a SAM, a fighter on
                 // its field, a building that intercepts). Of the tiles we cannot see we say nothing - the walls alone misled three sieges in Run 11
@@ -1632,30 +1655,38 @@ object RulerHost {
                         ". The reckoning below is of the walls alone, once our engines stand ashore before them"
                 // The march: from the nearest of our engines (or towns) to the walls, at the pace of our slowest engine - the walls are judged as they stand now,
                 // and a defender with warning raises and buys defenders while we march (Run 19: 1 of 7 such reckonings held)
-                val from = siege.minByOrNull { it.getTile().aerialDistanceTo(city.getCenterTile()) }?.getTile() ?: civ.cities.minByOrNull { it.getCenterTile().aerialDistanceTo(city.getCenterTile()) }?.getCenterTile()
+                // Only engines and towns on the city's own landmass march to it; from anywhere else the way is water
+                val land = city.getCenterTile().getContinent()
+                val enginesAcross = siege.isNotEmpty() && siege.none { it.getTile().getContinent() == land }
+                val from = siege.filter { it.getTile().getContinent() == land }.minByOrNull { it.getTile().aerialDistanceTo(city.getCenterTile()) }?.getTile()
+                    ?: civ.cities.filter { it.getCenterTile().getContinent() == land }.minByOrNull { it.getCenterTile().aerialDistanceTo(city.getCenterTile()) }?.getCenterTile()
                 val pace = siege.minOfOrNull { it.getMaxMovement() }?.coerceAtLeast(1) ?: 2
-                val marchTurns = from?.let { ((it.aerialDistanceTo(city.getCenterTile()) - 2).coerceAtLeast(0) + pace - 1) / pace }
+                // Across the water the straight line is no road: no march in turns is given there
+                val marchTurns = if (acrossTheSea != null || enginesAcross) null else from?.let { ((it.aerialDistanceTo(city.getCenterTile()) - 2).coerceAtLeast(0) + pace - 1) / pace }
                 val march = when {
+                    acrossTheSea != null -> "the way there is across the sea, and how long the crossing takes cannot be reckoned from here"
+                    enginesAcross -> "our engines all stand across the sea from it, so they must cross the water first, and how long that takes cannot be reckoned from here"
                     marchTurns == null -> ""
                     marchTurns == 0 -> "our engines already stand within reach of the walls"
                     else -> "the march there is about $marchTurns turn${s(marchTurns)} at the pace of our slowest engine, and the defender will raise and buy defenders in that time"
                 }
                 val verdict = (acrossTheSea?.let { "$it - " } ?: "") + when {
                     bestEngine == null -> "no siege engines - the walls cannot be broken"
-                    turnsToBreak == null -> "our ${siege.size} engine${s(siege.size)} together take less off the walls in a turn (${fullVolley * siege.size}) than the $healing they heal - what we have cannot break them"
-                    else -> "$volleysToBreak volley${s(volleysToBreak ?: 0)} once our engines stand before the walls (about $turnsToBreak turn${s(turnsToBreak)} of our ${siege.size} engine${s(siege.size)} firing together, healing counted, if the walls stay as they are now)" +
-                        (if (march.isNotEmpty()) "; $march" else "") + "; $beside"
+                    !outpaced -> "our ${siege.size} engine${s(siege.size)} together take less off the walls in a turn ($allEnginesTake) than the $healing they heal - what we have cannot break them"
+                    else -> "$volleysToBreak volley${s(volleysToBreak ?: 0)} of our best engine (${bestEngine.name}) to break the walls as they stand now, which heal $healing a turn" +
+                        (if (march.isNotEmpty()) "; $march" else "") + "; $beside" +
+                        (if (melee.size - inGarrison == 0) "; and every foot soldier of ours holds a city, so none is free to walk in once the walls are down" else "")
                 }
                 mapOf("city" to city.name, "of" to city.civ.civName, "defence" to defence, "health" to city.health, "walls" to city.cityConstructions.builtBuildings.any { "Walls" in it || "Castle" in it },
                     "garrison" to city.getCenterTile().militaryUnit?.name, "tilesFromOurNearestCity" to civ.cities.minOfOrNull { it.getCenterTile().aerialDistanceTo(city.getCenterTile()) },
                     "acrossTheSea" to (acrossTheSea != null).takeIf { it },
-                    "oneVolleyOfOurBestEngineTakes" to perVolley, "volleysToBreak" to volleysToBreak, "healsPerTurn" to healing, "turnsOfFireOnceThere" to turnsToBreak, "marchTurns" to marchTurns,
+                    "oneVolleyOfOurBestEngineTakes" to perVolley, "volleysToBreak" to volleysToBreak, "healsPerTurn" to healing, "marchTurns" to marchTurns,
                     "defendersWithin3Tiles" to if (near.isEmpty()) null else defenders.size, "defendersStrength" to if (near.isEmpty()) null else defendersStrength, "antiAirWithin3Tiles" to if (near.isEmpty()) null else antiAir,
                     "cityShotAtOurBestFootSoldierTakes" to hitOnFoot, "approaches" to gate, "verdict" to verdict)
             }.sortedBy { it["volleysToBreak"] as Int? ?: 999 }
         val unseen = civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.associate { other -> other.civName to other.cities.count { !it.getCenterTile().isExplored(civ) } }.filterValues { it > 0 }
         return mapOf(
-            "ourBestEngine" to bestEngine?.name, "ourBestFootSoldier" to bestFoot?.name, "siegeEngines" to siege.size, "footSoldiers" to melee.size,
+            "ourBestEngine" to bestEngine?.name, "ourBestFootSoldier" to bestFoot?.name, "siegeEngines" to siege.size, "footSoldiers" to (melee.size - inGarrison), "footSoldiersHoldingOurCities" to inGarrison.takeIf { it > 0 },
             "ranged" to soldiers.count { it.baseUnit.isRanged() && !it.baseUnit.isProbablySiegeUnit() }, "ourAircraft" to aircraft, "ourWarships" to warships.size,
             "citiesWeHaveSeen" to cities,
             "citiesNeverSeen" to unseen,
@@ -1663,7 +1694,7 @@ object RulerHost {
                 (civ.gameInfo.civilizations.filter { ally -> ally != target && ally != civ && ally.isAlive() && ((ally.isMajorCiv() && ally.getDiplomacyManager(target)?.diplomaticStatus == com.unciv.logic.civilization.diplomacy.DiplomaticStatus.DefensivePact) || (ally.isCityState && ally.allyCiv == target)) }
                     .map { it.civName + (if (it.isCityState) " (city-state ally)" else " (defensive pact)") }) }.filterValues { it.isNotEmpty() },
 
-            "howToRead" to "Sums from the chancery's own reckoning of battle, at full health and even luck. A city is taken by breaking its health with engines and then walking a foot soldier in; it heals each turn, shoots one volley a turn at anything within two tiles, and its garrison and walls do the rest. Defenders and anti-air are counted within three tiles of the city, on the tiles we can see this turn. Bowmen and crossbows barely scratch walls. A city across the sea is reached only by embarking, and its verdict says so first; tilesFromOurNearestCity is a straight line over land and water alike. What we have never seen we cannot judge - say so.")
+            "howToRead" to "Sums from the chancery's own reckoning of battle, at full health and even luck. A city is taken by breaking its health with engines and then walking a foot soldier in; it heals each turn, shoots one volley a turn at anything within two tiles, and its garrison and walls do the rest. Defenders and anti-air are counted within three tiles of the city, on the tiles we can see this turn. Bowmen and crossbows barely scratch walls. A city across the sea is reached only by embarking, and its verdict says so first; tilesFromOurNearestCity is a straight line over land and water alike. footSoldiers are those free to march: one standing in a city of ours holds it. What we have never seen we cannot judge - say so.")
     }
 
     /** The log as a look-in should read it: no bookkeeping echoes, repeats folded, and never more than the last sixty lines */
@@ -1713,7 +1744,13 @@ object RulerHost {
         val rearmMode = orders[civ.civName]?.officialsRearm ?: "war"
         // Re-arming is done only on our own land and ashore: soldiers abroad or at sea are said apart, and never sent to the order alone
         val away = outdated.filter { it.isEmbarked() || it.getTile().getOwner() != civ }
+        // Each re-arming passes the resource test alone; all of them together may need more than we have (6 to re-arm with 4 Aluminum spare, Run 20)
+        val needed = HashMap<String, Int>()
+        for (unit in outdated) units.newerArms(unit).firstOrNull { unit.upgrade.canUpgrade(it) }?.getResourceRequirementsPerTurn(unit.cache.state)?.forEach { (name, amount) ->
+            needed[name] = (needed[name] ?: 0) + amount - (unit.baseUnit.getResourceRequirementsPerTurn(unit.cache.state)[name] ?: 0) }
+        val short = needed.filter { (name, amount) -> amount > (civ.getCivResourcesByName()[name] ?: 0) }
         if (outdated.size >= 3) warnings += "${outdated.size} soldiers carry arms of an earlier age (${outdated.groupingBy { it.name }.eachCount().entries.joinToString { "${it.value} ${it.key}" }}): they cost upkeep and would not hold a wall. " +
+            short.entries.joinToString("") { (name, amount) -> "Re-arming them all needs $amount $name and we have ${civ.getCivResourcesByName()[name] ?: 0} spare, so not all can be. " } +
             (if (away.size == outdated.size) "All of them stand abroad or at sea, where none can be re-armed: bring them home to our own land, or disband the worst." else when (rearmMode) {
                 "always" -> "Gold above your reserve lets the officials re-arm them; or disband the worst."
                 "never" -> "The officials re-arm nothing on their own: order rearm to do it, or disband the worst."
@@ -1773,11 +1810,21 @@ object RulerHost {
         if (game.tileMap.mapParameters.type == com.unciv.logic.map.MapType.pangaea) return null // one landmass: every people can be walked to, and the line would only press ships on a court that needs none
         val others = game.civilizations.count { it.isMajorCiv() && it.isAlive() && it != civ }
         val met = civ.getKnownCivs().count { it.isMajorCiv() && it.isAlive() }
-        if (met >= others || civ.units.getCivUnits().any { it.isMilitary() && it.baseUnit.isWaterUnit }) return null
+        if (met >= others) return null
+        // A Trireme and its kind keep to the coast: what crosses the open sea is the first ship without that bar (Songhai's Trireme explored its coasts and met nobody, Run 20)
+        val coastBound = { unit: com.unciv.models.ruleset.unit.BaseUnit -> unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CannotEnterOcean) }
+        val firstOceanGoing = game.ruleset.units.values.filter { it.isWaterUnit && it.isMilitary && !coastBound(it) && it.uniqueTo == null }.minByOrNull { it.cost }
+        val oceanShip = firstOceanGoing?.let { "the ${it.name}" + (it.requiredTech?.let { tech -> if (civ.tech.isResearched(tech)) ", which we can build" else ", which needs $tech" } ?: "") }
+        val ocean = oceanShip?.let { "the first ship that can cross the open sea is $it" } ?: ""
+        val ships = civ.units.getCivUnits().filter { it.baseUnit.isWaterUnit && it.isMilitary() }.toList()
+        if (ships.any { !coastBound(it.baseUnit) }) return null
+        if (ships.isNotEmpty()) return if (ships.any { it.isExploring() } || ocean.isEmpty()) null
+            else "Our ships keep to the coast, and we have met $met of the $others other great powers: a ${ships.first().name} and its kind cannot cross the open sea; the first that can is $oceanShip."
         val canBuild = civ.cities.filter { it.isCoastal() }.flatMap { city -> game.ruleset.units.values.filter { it.isWaterUnit && it.isMilitary && it.isBuildable(city.cityConstructions) } }.distinct()
         if (canBuild.isEmpty()) return null
+        val first = canBuild.sortedBy { it.cost }.first()
         return "We have no ship at sea, and have met $met of the $others other great powers: on foot our people find only the land they can walk to, and lands beyond the water are found only by ships - " +
-            "${canBuild.sortedBy { it.cost }.first().name} or better, ordered to explore."
+            "${first.name} or better, ordered to explore" + (if (coastBound(first) && ocean.isNotEmpty()) ". A ${first.name} keeps to the coast; $ocean" else "") + "."
     }
 
     /** Barbarian camps we can see and foreign soldiers close to our cities */
@@ -1829,7 +1876,9 @@ object RulerHost {
                 "soldiers of the ages before the Industrial, where the city's religion holds the Holy Warriors belief; and from the Industrial era on, Great Prophets (in a city following a founded religion, dearer with each bought) and the Great Person of each completed Commerce, Rationalism, Freedom, Autocracy or Order branch (1,000 faith, dearer each time). " +
                 "Before the Industrial era a Great Prophet comes only as stored faith grows. get_options.buildable gives each city's price in faith; the purchase order with with: faith buys.",
             "greatPeopleForFaith" to greatPeopleForFaith(civ),
-            "faithBuysNow" to civ.cities.flatMap { city -> (civ.gameInfo.ruleset.buildings.values + civ.gameInfo.ruleset.units.values).mapNotNull { item -> faithPrice(city, item)?.let { item.name to (it to city.name) } } }
+            // A unit bought appears on the city's centre: a city whose centre holds one of the same kind already cannot take it (Rome's Great Merchants, Run 20)
+            "faithBuysNow" to civ.cities.flatMap { city -> (civ.gameInfo.ruleset.buildings.values + civ.gameInfo.ruleset.units.values).filter { item -> item !is com.unciv.models.ruleset.unit.BaseUnit || city.canPlaceNewUnit(item) }
+                .mapNotNull { item -> faithPrice(city, item)?.let { item.name to (it to city.name) } } }
                 .groupBy({ it.first }, { it.second }).map { (item, offers) -> "$item: ${offers.minOf { it.first }} faith (${offers.filter { it.first == offers.minOf { o -> o.first } }.joinToString { it.second }})" }
                 .ifEmpty { listOf("nothing faith can buy now (the note below says what it buys, and when)") },
             "note" to "The officials spend faith by their own rule, and much of it stays unspent: until our religion is founded and enhanced they keep it for a Great Prophet (which faith can buy only from the Industrial era); after that, missionaries and an inquisitor to win back cities of ours that follow another faith, and a few missionaries abroad; once no religion is left to found in the world, a Great Person or a religious building where one can be bought. " +
