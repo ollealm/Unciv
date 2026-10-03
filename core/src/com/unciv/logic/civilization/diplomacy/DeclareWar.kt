@@ -28,6 +28,9 @@ object DeclareWar {
         val otherCiv = diplomacyManager.otherCiv
         val otherCivDiplomacy = diplomacyManager.otherCivDiplomacy()
 
+        // Told before the pact partners and allies are called in below, so the world's record reads the declaration first and the joins after it
+        com.unciv.logic.automation.RulerOverrides.noteWar(civInfo, otherCiv, declareWarReason)
+
         if (otherCiv.isCityState && declareWarReason.warType == WarType.DirectWar)
             handleCityStateDirectAttack(diplomacyManager)
 

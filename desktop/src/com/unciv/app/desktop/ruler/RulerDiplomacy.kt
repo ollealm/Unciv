@@ -32,6 +32,8 @@ private const val TAKEN_THEIRS = "their offer was taken"
 private const val FRIENDSHIP = "Declaration of Friendship"
 /** A treaty's duration in a brief: it ticks down, so terms are compared without it */
 private val DURATION = Regex(" for \\d+ turns?\\b")
+/** A Research Agreement as a deal in force reads it, both sides alike: one wording for the loss of it */
+private val RESEARCH_PAID = Regex("we give Research Agreement \\((\\d+) gold from each side\\); they give Research Agreement \\(\\d+ gold from each side\\)")
 
 class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
 
@@ -630,6 +632,15 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
     fun dealsInForce(civ: Civilization): Set<String> =
         civ.diplomacy.values.flatMap { manager -> manager.trades.map { "${manager.otherCivName}: ${it.brief(civ.gameInfo).replace(DURATION, "")}" } }.toSet() // durations tick down, the deal is the same
 
+    /** The deals a declaration of war swept away - the engine clears them without a word, and between turns the turn's compare cannot see it - by partner,
+     *  a Research Agreement marked for the gold already paid. Defensive pacts are left out: the declaration's own line names those (audit 2026-10-03) */
+    fun lostToWar(civ: Civilization, before: Set<String>): String? {
+        val gone = (before - dealsInForce(civ)).filter { Constants.defensivePact !in it }
+        if (gone.isEmpty()) return null
+        return gone.groupBy({ it.substringBefore(": ") }, { it.substringAfter(": ") }).entries.joinToString("; ") { (partner, terms) ->
+            "with $partner - " + terms.joinToString("; ") { it.replace(RESEARCH_PAID, "a Research Agreement ($1 gold from each side, paid and now lost)") } }
+    }
+
     private fun heldPeaceOffer(civ: Civilization, other: Civilization) = civ.tradeRequests.firstOrNull { request -> request.requestingCiv == other.civID && isPeace(request) }
 
     /** A held request is stored as we, the receiver, see it */
@@ -827,10 +838,13 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit) {
         val told = waiting.map { (demand, _) ->
             civ.popupAlerts.removeAll { it.type == demand.demandAlert && it.value == from.civID }
             demandOfferedOn.remove("${civ.civName}<${from.civName}: ${demand.name}")
+            val dealsBefore = dealsInForce(civ)
             if (agree) manager.agreeToDemand(demand) else manager.refuseDemand(demand)
+            // A refusal that declared war cleared our deals with them in the same breath: named here, where the turn's compare cannot see them
+            val swept = if (agree) "" else lostToWar(civ, dealsBefore)?.let { " It swept away our deals: $it." } ?: ""
             log(civ, "By your order: we ${if (agree) "agreed to" else "refused"} ${from.civName}'s demand that we ${asked(demand)}" +
-                (if (agree) " - a promise now binds us for 100 turns." else if (demand == Demand.DoNotAttackUs) ": that refusal is a declaration of war, and we are at war with ${from.civName}." else ". They will hold it against us."))
-            "${if (agree) "Agreed to" else "Refused"} ${from.civName}'s demand that we ${asked(demand)}"
+                (if (agree) " - a promise now binds us for 100 turns." else if (demand == Demand.DoNotAttackUs) ": that refusal is a declaration of war, and we are at war with ${from.civName}.$swept" else ". They will hold it against us."))
+            "${if (agree) "Agreed to" else "Refused"} ${from.civName}'s demand that we ${asked(demand)}$swept"
         }
         return Pair(told.joinToString("; "), from.takeIf { !wasAtWar && civ.isAtWarWith(it) })
     }

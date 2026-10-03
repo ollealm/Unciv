@@ -14,6 +14,7 @@ import com.unciv.logic.city.City
 import com.unciv.logic.civilization.Civilization
 import com.unciv.logic.civilization.PlayerType
 import com.unciv.logic.civilization.diplomacy.DiplomaticStatus
+import com.unciv.logic.civilization.diplomacy.WarType
 import com.unciv.logic.files.UncivFiles
 import com.unciv.logic.map.MapParameters
 import com.unciv.logic.map.MapSize
@@ -133,9 +134,11 @@ object RulerHost {
         RulerOverrides.worldVoteOf = { civ -> castWorldVote(civ) }
         RulerOverrides.promised = { civ -> diplomacy.promised(civ) }
         // The officials make demands of their own, and the chancery hears of each (a demand made of us waits on the desk instead - RulerDiplomacy.demands)
+        // The demand not to attack us is never theirs for a ruled civ (a refusal of it is a war, the ruler's alone to bring - NextTurnAutomation), so no line warns of one
         RulerOverrides.demandMade = { civ, other, demand -> log(civ, "The officials made a demand of ${other.civName}: \"${demand.demandText}\" " +
-            (if (other.civID in RulerOverrides.ruledCivs) "${other.civName} is an advised court: its advisor answers at its next look-in" else "They answer on their turn") + "; a demand is resented whatever the answer" +
-            (if (demand == com.unciv.logic.civilization.diplomacy.Demand.DoNotAttackUs) ", and if they refuse this one, they are at war with us" else "") + ".") }
+            (if (other.civID in RulerOverrides.ruledCivs) "${other.civName} is an advised court: its advisor answers at its next look-in" else "They answer on their turn") + "; a demand is resented whatever the answer.") }
+        // Every war the engine declares, whoever's: the world's events say who drew the sword and who was pulled in, and the council is framed from it
+        RulerOverrides.warDeclared = { war -> noteWar(war) }
         RulerOverrides.underOrders = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.underOrders(unit) }
         RulerOverrides.tradeAnswered = { request, receiver, outcome -> diplomacy.settle(request, receiver, outcome) }
         RulerOverrides.nearWinner = { other -> diplomacy.nearVictory(other) != null }
@@ -184,6 +187,7 @@ object RulerHost {
         RulerOverrides.faithSpent?.let { f -> RulerOverrides.faithSpent = { civ, faith, what -> hook("faithSpent", Unit) { f(civ, faith, what) } } }
         RulerOverrides.freeTechTaken?.let { f -> RulerOverrides.freeTechTaken = { civ, tech, goal -> hook("freeTechTaken", Unit) { f(civ, tech, goal) } } }
         RulerOverrides.unitLost?.let { f -> RulerOverrides.unitLost = { loss -> hook("unitLost", Unit) { f(loss) } } }
+        RulerOverrides.warDeclared?.let { f -> RulerOverrides.warDeclared = { war -> hook("warDeclared", Unit) { f(war) } } }
         val refill = units.researchRefill; units.researchRefill = { civ -> hook("researchRefill", Unit) { refill(civ) } }
         val missed = units.garrisonMissed; units.garrisonMissed = { civ, tile -> hook("garrisonMissed", Unit) { missed(civ, tile) } }
     }
@@ -340,7 +344,7 @@ object RulerHost {
             "unitState" to units.stateToMap(),
             "worldVoteState" to mapOf("tallied" to voteTallied, "reminded" to voteReminded, "unHolder" to unHolder),
             "diplomacy" to diplomacy.toMap(),
-            "ownWars" to ownWars.map { "${it.first}>${it.second}" },
+            "warsDeclared" to warsDeclared.map { it.toString() },
             "trail" to trail.toMap(),
             "ages" to ages.toMap(),
             "lockedCities" to RulerOverrides.lockedCities.toList(),
@@ -374,7 +378,7 @@ object RulerHost {
 
     /** Everything the host remembers about a game, forgotten in one place - so a new world starts clean whatever the last one left behind */
     private fun resetHostState() {
-        orders.clear(); publicEvents.clear(); chancery.clear(); spending.clear(); warningsWoken.clear(); losses.clear(); ownWars.clear(); notificationsSeen.clear(); shipRaids.clear()
+        orders.clear(); publicEvents.clear(); chancery.clear(); spending.clear(); warningsWoken.clear(); losses.clear(); warsDeclared.clear(); notificationsSeen.clear(); shipRaids.clear()
         units.reset(); diplomacy.reset(); trail.clear(); ages.clear()
         worldAtLastAdvance = null
         RulerOverrides.lockedCities.clear(); RulerOverrides.focusedCities.clear(); RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.faithReserve.clear(); RulerOverrides.noProposals.clear(); RulerOverrides.noGifts.clear(); RulerOverrides.rearming.clear(); RulerOverrides.noWonders.clear()
@@ -412,9 +416,10 @@ object RulerHost {
             // A save from before the vote was the ruler's: whoever holds the United Nations now is no news
             ?: run { voteTallied = -1; unHolder = loaded.civilizations.firstOrNull { it.isMajorCiv() }?.victoryManager?.getUNBuildingAndOwnerNames()?.second?.let { loaded.getCivilization(it).civName } }
         diplomacy.load(host.get("diplomacy"))
-        ownWars.clear(); host.get("ownWars")?.asStringArray()?.forEach { ownWars += Pair(it.substringBefore(">"), it.substringAfter(">")) }
+        warsDeclared.clear(); host.get("warsDeclared")?.asStringArray()?.forEach { warsDeclared += WarRecord.parse(it) }
         units.dropMistakenHolds(loaded, chancery.values)
-        worldAtLastAdvance = WorldSnapshot(loaded)
+        // A war declared by order before a restart is still news to the next advance: the round's start is the world before it, not the loaded world
+        worldAtLastAdvance = WorldSnapshot(loaded).also { start -> start.wars.removeAll { war -> war.toList().let { (first, second) -> warsDeclared.any { it.covers(first, second) } } } }
         trail.load(host.get("trail"))
         ages.load(host.get("ages"))
         trail.record(loaded) // a save from before the trail was kept starts one here
@@ -805,9 +810,7 @@ object RulerHost {
         tryEach(json.get("answerDemands")) { entry ->
             val (told, warWith) = diplomacy.answerDemand(civ, entry.getString("power"), entry.getString("answer"))
             if (warWith == null) told else {
-                // The refusal was a declaration: the war is ours, as if declared by order
-                ownWars += Pair(civ.civName, warWith.civName)
-                addPublicEvent("${civ.civName} has declared war on ${warWith.civName}!")
+                // The refusal was a declaration: the war is ours, as if declared by order (the engine's declaration wrote the world's event and the council's record)
                 "$told - that refusal declared war on ${warWith.civName}. No peace can be made for ${civ.gameInfo.ruleset.modOptions.constants.minimumWarDuration} turns"
             }
         }
@@ -838,13 +841,16 @@ object RulerHost {
             if (!diplomacy.canDeclareWar()) throw ApiError(400, "Cannot declare war on $targetName now")
             // Declaring war ends every defensive pact of ours (the game's rule): named, since Greece lost three in Run 16 without having weighed it
             val pacts = civ.diplomacy.values.filter { it.diplomaticStatus == DiplomaticStatus.DefensivePact }.map { it.otherCivName }
-            diplomacy.declareWar()
-            ownWars += Pair(civ.civName, targetName)
-            addPublicEvent("${civ.civName} has declared war on $targetName!")
+            // The engine clears our deals with the target and with everyone it pulls in, without a word, here between turns where the turn's compare cannot see it:
+            // diffed around the declaration and named, the gold already paid for a Research Agreement among them (audit 2026-10-03)
+            val dealsBefore = dealsOf(civ); val warsBefore = warsDeclared.size
+            diplomacy.declareWar() // the engine's declaration writes the world's event and the council's record, and calls in the target's pact partners and allies
             val minimum = civ.gameInfo.ruleset.modOptions.constants.minimumWarDuration
             val ended = if (pacts.isEmpty()) "" else " Declaring it ended our defensive pact${if (pacts.size == 1) "" else "s"} with ${pacts.joinToString(" and ")}."
-            log(civ, "By your order: we declared war on $targetName. No peace can be made for $minimum turns.$ended")
-            "Declared war on $targetName. No peace can be made for $minimum turns - neither side may offer it before then.$ended"
+            val swept = RulerHost.diplomacy.lostToWar(civ, dealsBefore)?.let { " It swept away our deals: $it." } ?: ""
+            val company = cameIn(civ, target, warsDeclared.drop(warsBefore))
+            log(civ, "By your order: we declared war on $targetName. No peace can be made for $minimum turns.$ended$swept$company")
+            "Declared war on $targetName. No peace can be made for $minimum turns - neither side may offer it before then.$ended$swept$company"
         }
         if (alreadyKnown.isNotEmpty()) failed += "Already known, dropped from the research goals: ${alreadyKnown.joinToString()}"
         standing.research.removeAll { reached(civ, it) }
@@ -1430,6 +1436,8 @@ object RulerHost {
         for (war in after.wars - before.wars) {
             // History needs to know who drew the sword: without it the Chronicler guesses, and blames the victim
             val (first, second) = war.toList().let { it[0] to it[1] }
+            // The engine's own record wrote this one as it was declared, join or declaration (noteWar); the grievance below is read only for a war it did not see
+            if (warsDeclared.any { it.covers(first, second) }) continue
             // the grievance fades slowly, so between two old enemies the fresher (deeper) one names this war's aggressor
             fun grievance(victim: String, aggressor: String) = game().civilizations.firstOrNull { it.civName == victim }
                 ?.getDiplomacyManager(game().civilizations.first { it.civName == aggressor })
@@ -1490,8 +1498,57 @@ object RulerHost {
     private val warningsWoken = HashMap<String, HashSet<String>>()
     /** The world as the last advance left it (null before the first) */
     private var worldAtLastAdvance: WorldSnapshot? = null
-    /** (declarer, enemy) for each war a ruled civ began by its own order since the last advance: the council it stops is framed for the declarer as their own doing */
-    private val ownWars = ArrayList<Pair<String, String>>()
+    /** A war as the engine declared it (RulerOverrides.warDeclared), names only, kept since the last advance: the world's events and the council's news are
+     *  built from these, so a pact partner's or a city-state's join is never told as a declaration, and the council is framed for the declarer as their
+     *  own doing and for a partner pulled in as its pact's (audit 2026-10-03) */
+    private class WarRecord(val declarer: String, val target: String, val type: WarType, val ally: String?) {
+        val joins get() = type == WarType.DefensivePactWar || type == WarType.CityStateAllianceWar
+        val byPact get() = type == WarType.DefensivePactWar
+        fun covers(first: String, second: String) = setOf(declarer, target) == setOf(first, second)
+        /** Is this join part of [war]: its ally's war against its target, on either side of it */
+        fun joined(war: WarRecord) = joins && ally != null && (war.declarer == ally && war.target == target || war.target == ally && war.declarer == target)
+        override fun toString() = "$declarer>$target>$type>${ally ?: ""}"
+        companion object { fun parse(text: String) = text.split(">").let { WarRecord(it[0], it[1], WarType.valueOf(it[2]), it.getOrNull(3)?.ifEmpty { null }) } }
+    }
+    private val warsDeclared = ArrayList<WarRecord>()
+
+    /** The world's one line for a war as it was declared */
+    private fun told(war: WarRecord) = when (war.type) {
+        WarType.DirectWar -> "${war.declarer} declared war on ${war.target}."
+        WarType.DefensivePactWar -> "${war.declarer} came in at ${war.ally}'s side by its pact, against ${war.target}."
+        WarType.CityStateAllianceWar -> "${war.declarer}, ${war.ally}'s ally, joined the war against ${war.target}."
+        WarType.JoinWar -> "${war.declarer} declared war on ${war.target}, called in by ${war.ally}."
+        WarType.TeamWar -> "${war.declarer} declared war on ${war.target}, together with ${war.ally}."
+        WarType.ProtectedCityStateWar -> "${war.declarer} declared war on ${war.target} for ${war.ally}, the city-state under its protection."
+        WarType.AlliedCityStateWar -> "${war.declarer} declared war on ${war.target} for its ally ${war.ally}."
+    }
+
+    /** Every war the engine declares, whoever's, as it is declared: recorded for the council, and written into the world's events at once */
+    private fun noteWar(war: RulerOverrides.War) {
+        if (war.declarer.isBarbarian || war.target.isBarbarian) return
+        val record = WarRecord(war.declarer.civName, war.target.civName, war.type, war.ally?.civName)
+        warsDeclared += record
+        // A power's city-state allies join one by one as the engine calls them in; the world's history has them in one line, not one per city
+        val last = publicEvents.lastOrNull()?.takeIf { it["turn"] == stamp() }
+        val company = last?.let { Regex("^(.+), ${Regex.escape(record.ally ?: "")}'s all(?:y|ies), joined the war against ${Regex.escape(record.target)}\\.$").find(it["text"] as String) }
+        if (record.type == WarType.CityStateAllianceWar && company != null) {
+            val names = company.groupValues[1].replace(" and ", ", ").split(", ") + record.declarer
+            publicEvents[publicEvents.size - 1] = last + ("text" to "${names.dropLast(1).joinToString()} and ${names.last()}, ${record.ally}'s allies, joined the war against ${record.target}.")
+        } else addPublicEvent(told(record))
+    }
+
+    /** Who came in on a war's first day, for the declaring court's own account: the target's pact partners and allies, and our own allies */
+    private fun cameIn(civ: Civilization, target: Civilization, joins: List<WarRecord>): String {
+        fun names(list: List<WarRecord>) = list.map { it.declarer }.distinct().let { if (it.size <= 1) it.joinToString() else it.dropLast(1).joinToString() + " and " + it.last() }
+        val partners = joins.filter { it.byPact && it.ally == target.civName }
+        val theirAllies = joins.filter { !it.byPact && it.ally == target.civName }
+        val ourAllies = joins.filter { !it.byPact && it.ally == civ.civName }
+        val theirs = listOfNotNull(
+            partners.takeIf { it.isNotEmpty() }?.let { "${target.civName}'s pact partner${if (it.size == 1) "" else "s"} ${names(it)} came in at its side" },
+            theirAllies.takeIf { it.isNotEmpty() }?.let { "${if (partners.isEmpty()) "${target.civName}'s" else "its"} all${if (it.size == 1) "y" else "ies"} ${names(it)} joined the war" })
+        return (if (theirs.isEmpty()) "" else " " + theirs.joinToString(", and ") + ".") +
+            (if (ourAllies.isEmpty()) "" else " Our all${if (ourAllies.size == 1) "y" else "ies"} ${names(ourAllies)} came in with us.")
+    }
     /** True while the turn's bookkeeping runs after nextTurn: lines written then belong to the turn just played, all other lines to the turn about to be */
     @Volatile private var settling = false
 
@@ -1503,7 +1560,7 @@ object RulerHost {
         // "Before" is the world as the last advance left it: a war declared by order between rounds is news to everyone else
         val roundStart = worldAtLastAdvance ?: WorldSnapshot(game)
         var stopReason: String? = null
-        var declaredBy: String? = null
+        var council: Council? = null
         val ruledCivs = orders.keys.map { name -> game.civilizations.first { it.civName == name } }.filter { it.isAlive() }
         // What each advisor has already been shown; anything new below is worth waking them for
         val warningsSeen = ruledCivs.associate { civ -> civ.civName to warnings(civ).map(::normalised).toSet() }
@@ -1543,19 +1600,18 @@ object RulerHost {
                 if (news.isNotEmpty() || fresh.isNotEmpty()) wake[civ.civName] = news + fresh
             }
             val winner = game.majorCivs().firstOrNull { it.victoryManager.hasWon() }
-            val council = if (winner == null) orders.keys.firstNotNullOfOrNull { ruled -> councilEvent(ruled, roundStart, after) } else null
+            council = if (winner == null) councilEvent(roundStart, after) else null
             stopReason = if (winner != null) "${winner.civName} has won a ${winner.victoryManager.getVictoryTypeAchieved()} victory" else council?.news
             // The world's history must hear of it too, or the last chapter never knows the story ended. Once: the events are saved with the host, and a restart must not add it again
             if (winner != null && publicEvents.none { (it["text"] as String).startsWith("${winner.civName} has won a ") }) {
                 settling = true // it belongs to the turn just played
                 try { addPublicEvent("$stopReason.") } finally { settling = false }
             }
-            declaredBy = council?.declaredBy
             save() // every turn on disk as soon as it is played: a turn that fails later goes back to this one, not to the start of the advance
             if (stopReason != null || (wakeOnEvents && wake.isNotEmpty())) break
         }
         worldAtLastAdvance = WorldSnapshot(game)
-        ownWars.clear() // whatever was declared by order before this advance is old news to the next
+        warsDeclared.clear() // whatever was declared before or during this advance is old news to the next
         save()
         backup()
         return mapOf(
@@ -1564,7 +1620,11 @@ object RulerHost {
             "turn" to game.turns,
             "year" to yearText(game.turns),
             "stoppedEarly" to stopReason,
-            "declaredBy" to declaredBy,
+            // The first war of the council in fields, for the orchestrator to frame each court's part without parsing the sentence; every war under "wars"
+            "declaredBy" to council?.wars?.firstOrNull()?.get("declaredBy"),
+            "target" to council?.wars?.firstOrNull()?.get("target"),
+            "drawnIn" to (council?.wars?.firstOrNull()?.get("drawnIn") ?: emptyList<Any>()),
+            "wars" to (council?.wars ?: emptyList<Any>()),
             "wake" to wake,
             "publicEvents" to publicEvents.filter { (it["turn"] as Int) > startTurn },
             "rankings" to rankings()
@@ -1596,15 +1656,38 @@ object RulerHost {
     /** Something a ruler must hear about right away, ending the round early */
     /** What stops the clocks for everyone: only a war with a major power - the one thing that needs the ruler's change of course.
      *  A lost city wakes the advisor (there is little a ruler can do in that hour, and the dispatch tells it); a fallen realm is dealt with when the age is done. */
-    private class Council(val news: String, val declaredBy: String?)
-    private fun councilEvent(ruled: String, roundStart: WorldSnapshot, now: WorldSnapshot): Council? {
-        if (ruled !in now.alive) return null
-        val newEnemies = (now.wars - roundStart.wars).filter { ruled in it }.flatten().filter { it != ruled }
-            .filter { enemy -> game().civilizations.first { it.civName == enemy }.isMajorCiv() }
-        if (newEnemies.isEmpty()) return null
-        // The ruled civ whose own order began one of these wars, on either side of it
-        val declarer = ownWars.firstOrNull { (declarer, enemy) -> declarer == ruled && enemy in newEnemies || enemy == ruled && declarer in newEnemies }?.first
-        return Council("$ruled is now at war with ${newEnemies.joinToString()}", declarer)
+    /** [news] is the sentence for every court; [wars] one entry per war it covers: declaredBy, target, drawnIn (the pact partners pulled in, each with the
+     *  partner whose pact it was) and its own line - so a ruler pulled in by its own pact is told so, not that it was struck (audit 2026-10-03) */
+    private class Council(val news: String, val wars: List<Map<String, Any?>>)
+    private fun councilEvent(roundStart: WorldSnapshot, now: WorldSnapshot): Council? {
+        val ruled = orders.keys.filter { it in now.alive }
+        fun major(name: String) = game().civilizations.first { it.civName == name }.isMajorCiv()
+        // Every new war between a ruled realm and a major power since the round began
+        val fresh = (now.wars - roundStart.wars).filter { war -> war.any { it in ruled } && war.all { major(it) } }
+        if (fresh.isEmpty()) return null
+        // The engine's own record of each: the declaration it began with (a join's is its ally's war), else the bare fact
+        val declarations = warsDeclared.filter { !it.joins }
+        val byWar = LinkedHashMap<WarRecord, Set<String>>(); val bare = ArrayList<Set<String>>()
+        for (pair in fresh) {
+            val (first, second) = pair.toList().let { it[0] to it[1] }
+            val record = warsDeclared.firstOrNull { it.covers(first, second) }
+            val war = if (record == null) null else if (!record.joins) record else declarations.firstOrNull { record.joined(it) }
+            if (war == null) bare += pair else byWar.putIfAbsent(war, pair)
+        }
+        fun names(list: List<String>) = if (list.size <= 1) list.joinToString() else list.dropLast(1).joinToString() + " and " + list.last()
+        val wars = byWar.keys.sortedBy { warsDeclared.indexOf(it) }.map { war ->
+            val joins = warsDeclared.filter { it.joined(war) }
+            val partners = joins.filter { it.byPact }
+            val allies = joins.filter { !it.byPact }.groupBy { it.ally!! }
+            val line = listOf(told(war).removeSuffix(".")) +
+                partners.map { "${it.declarer} came in at ${it.ally}'s side by its pact" } +
+                allies.map { (ally, company) -> "${names(company.map { it.declarer })}, $ally's all${if (company.size == 1) "y" else "ies"}, joined the war" }
+            mapOf("declaredBy" to war.declarer, "target" to war.target, "drawnIn" to partners.map { mapOf("civ" to it.declarer, "with" to it.ally) }, "news" to line.joinToString("; "))
+        } + bare.map { pair ->
+            val (ours, theirs) = pair.toList().sortedBy { it !in ruled }
+            mapOf("declaredBy" to null, "target" to null, "drawnIn" to emptyList<Any>(), "news" to "$ours is now at war with $theirs")
+        }
+        return Council(wars.joinToString(". ") { it["news"] as String }, wars)
     }
 
     private fun rankings() = game().majorCivs().filter { it.isAlive() }

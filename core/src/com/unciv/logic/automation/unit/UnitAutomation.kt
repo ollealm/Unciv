@@ -95,29 +95,26 @@ object UnitAutomation {
         val posture = com.unciv.logic.automation.RulerOverrides.postures[unit.civ.civID] // a ruled civ that never set one fights as under attack
             ?: com.unciv.logic.automation.RulerOverrides.Posture().takeIf { unit.civ.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs }
         if (posture != null && unit.isMilitary() && unit.civ.isAtWar()) {
-            // the home reserve: the soldiers nearest our cities, as many as the ruler asked to keep back, never march out
-            val inReserve = posture.reserve > 0 && unit.baseUnit.isLandUnit && unit.civ.units.getCivUnits()
-                .filter { it.isMilitary() && it.baseUnit.isLandUnit }
-                .sortedBy { soldier -> unit.civ.cities.minOfOrNull { it.getCenterTile().aerialDistanceTo(soldier.getTile()) } ?: 99 }
-                .take(posture.reserve).any { it.id == unit.id }
+            // the home reserve: the soldiers nearest our cities, as many as the ruler asked to keep back, never march out - whatever the stance
+            val inReserve = com.unciv.logic.automation.RulerOverrides.inReserve(unit)
             // A soldier far behind our best arms is no part of an attack: it holds home ground as a defending host does
             val outclassed = com.unciv.logic.automation.RulerOverrides.outclassed(unit)
             if (posture.stance == "defend" || inReserve || outclassed) {
                 // A defending host holds its own ground: out of any enemy city's guns first, then only an enemy on or beside our land is fought, and a
-                // soldier left abroad walks home. The reserve of an attacking or raiding host keeps the old habit and fights whatever is within reach
-                val holdsGround = posture.stance == "defend" || outclassed
-                if (holdsGround && tryLeaveEnemyCityRange(unit)) return
-                if (tryAttacking(unit, if (holdsGround) homeGroundTargets(unit) else null)) return
+                // soldier left abroad walks home. The reserve of an attacking or raiding host holds it the same way (it once fought whatever was within reach, audit 2026-10-03)
+                if (tryLeaveEnemyCityRange(unit)) return
+                if (tryAttacking(unit, homeGroundTargets(unit))) return
                 if (tryGarrisoningLandUnit(unit)) return
                 if (unit.health < 100 && tryHealUnit(unit)) return
-                if (unit.getTile().getOwner() != unit.civ) { if (!tryRetreat(unit) && holdsGround) tryHeadHome(unit); return }
+                if (unit.getTile().getOwner() != unit.civ) { if (!tryRetreat(unit)) tryHeadHome(unit); return }
                 tryPrepare(unit); return
             }
             if (posture.stance == "raid") {
-                if (tryAttacking(unit)) return
+                // A raider fights what is in the field and never storms a city: no city centre is among its targets, nor is one marched on
+                if (tryAttacking(unit, raidTargets(unit), keepOutOfCityGuns = false)) return
                 if (tryPillageImprovement(unit)) return
                 if (unit.health < 80 && tryHealUnit(unit)) return
-                if (tryAdvanceTowardsCloseEnemy(unit)) return
+                if (tryAdvanceTowardsCloseEnemy(unit, raiding = true)) return
                 if (tryGarrisoningLandUnit(unit)) return
                 tryPrepare(unit); return
             }
@@ -331,9 +328,9 @@ object UnitAutomation {
 
 
     /** @return true only if the unit has 0 movement left. [targets] limits the attack to those tiles (a defending host's home ground), made from no tile an enemy city can bombard */
-    private fun tryAttacking(unit: MapUnit, targets: List<Tile>? = null): Boolean {
+    private fun tryAttacking(unit: MapUnit, targets: List<Tile>? = null, keepOutOfCityGuns: Boolean = targets != null): Boolean {
         repeat(unit.maxAttacksPerTurn() - unit.attacksThisTurn) {
-            if (BattleHelper.tryAttackNearbyEnemy(unit, tilesToCheck = targets, keepOutOfCityGuns = targets != null)) return true
+            if (BattleHelper.tryAttackNearbyEnemy(unit, tilesToCheck = targets, keepOutOfCityGuns = keepOutOfCityGuns)) return true
             // Calvary style tctic, attack and then retreat
             if (unit.health < 50 && tryRetreat(unit)) return true
         }
@@ -362,6 +359,12 @@ object UnitAutomation {
         return unit.currentTile.getTilesInDistance(reach)
             .filter { it in unit.civ.viewableTiles && !it.isCityCenter() && (it.getOwner() == unit.civ || it.neighbors.any { near -> near.getOwner() == unit.civ }) }
             .toList()
+    }
+
+    /** The tiles a raider may strike at: anything in sight within its reach but a city centre - a raiding host pillages and pulls back, it storms no walls */
+    internal fun raidTargets(unit: MapUnit): List<Tile> {
+        val reach = unit.getRange() + if (unit.baseUnit.isAirUnit()) 0 else unit.getMaxMovement()
+        return unit.currentTile.getTilesInDistance(reach).filter { it in unit.civ.viewableTiles && !it.isCityCenter() }.toList()
     }
 
     /** A ruled civ at war under the defend posture: its soldiers keep out of every enemy city's guns, wherever the automation would otherwise send them */
@@ -586,7 +589,7 @@ object UnitAutomation {
      *
      *  Limited by [CLOSE_ENEMY_TURNS_AWAY_LIMIT] and [CLOSE_ENEMY_TILES_AWAY_LIMIT].
      *  Tiles attack from which would result in instant death of the [unit] are ignored. */
-    private fun tryAdvanceTowardsCloseEnemy(unit: MapUnit): Boolean {
+    private fun tryAdvanceTowardsCloseEnemy(unit: MapUnit, raiding: Boolean = false): Boolean {
         // this can be sped up if we check each layer separately
         val unitDistanceToTiles = unit.movement.getMovementToTilesAtPosition(
                 unit.getTile().position,
@@ -594,6 +597,7 @@ object UnitAutomation {
         )
         val closeEnemy = TargetHelper.getAttackableEnemies(unit, unitDistanceToTiles, tilesToCheck = unit.getTile().getTilesInDistance(CLOSE_ENEMY_TILES_AWAY_LIMIT).toList())
             .filterNot { unit.baseUnit.isRanged() && it.tileToAttack.isCityCenter() && it.tileToAttack.getCity()!!.health == 1 } // occurs fairly often probably because AI dumb
+            .filterNot { raiding && it.tileToAttack.isCityCenter() } // a raider marches on no city it will never storm
             .filter { unit.getDamageFromTerrain(it.tileToAttackFrom) <= 0 }  // Don't attack from a mountain or near enemy citadels
             .filter {
             // Ignore units that would 1-shot you if you attacked

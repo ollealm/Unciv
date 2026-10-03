@@ -419,8 +419,9 @@ object NextTurnAutomation {
 
         val posture = RulerOverrides.postures[civInfo.civID]
         val aim = posture?.warAim
-        // A defending host lays no siege: the routine would otherwise gather it around any enemy city with enough of ours near and keep it under the walls' guns, stance or no stance
-        val citiesRequiringManualPlacement = if (posture?.stance == "defend") emptyList() else civInfo.getKnownCivs().filter { it.isAtWarWith(civInfo) }
+        // A defending host lays no siege: the routine would otherwise gather it around any enemy city with enough of ours near and keep it under the walls' guns, stance or no stance.
+        // A raiding host lays none either - it promised never to assault a city (audit 2026-10-03)
+        val citiesRequiringManualPlacement = if (posture?.stance == "defend" || posture?.stance == "raid") emptyList() else civInfo.getKnownCivs().filter { it.isAtWarWith(civInfo) }
             .flatMap { it.cities }
             .filter {
                 var count = 0
@@ -480,8 +481,9 @@ object NextTurnAutomation {
 
     /** All units will continue after this to the regular automation, so units not moved in this function will still move */
     private fun automateCityConquer(civInfo: Civilization, city: City){
+        // An outclassed soldier of a ruled civ joins no siege; nor does one under the ruler's own order (a garrison was walked out of Sparta two turns running), nor the home reserve
         @Readonly fun ourUnitsInRange(range: Int) = city.getCenterTile().getTilesInDistance(range)
-            .mapNotNull { it.militaryUnit }.filter { it.civ == civInfo && (!it.baseUnit.isMelee() || it.health > 30) && !RulerOverrides.outclassed(it) }.toList() // an outclassed soldier of a ruled civ joins no siege
+            .mapNotNull { it.militaryUnit }.filter { it.civ == civInfo && (!it.baseUnit.isMelee() || it.health > 30) && !RulerOverrides.outclassed(it) && !RulerOverrides.isUnderOrders(it) && !RulerOverrides.inReserve(it) }.toList()
         
         
         fun attackIfPossible(unit: MapUnit, tile: Tile){
@@ -731,7 +733,9 @@ object NextTurnAutomation {
             else -> {
                 val threatLevel = Automation.threatAssessment(civInfo, offendingCiv)
                 if ((threatLevel < ThreatLevel.High // don't piss them off for no reason please.
-                    || demand == Demand.DoNotAttackUs) && com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, "demands")) { // a court may bar its officials' demands
+                    || demand == Demand.DoNotAttackUs) && com.unciv.logic.automation.RulerOverrides.mayPropose(civInfo, "demands") // a court may bar its officials' demands
+                    // a ruled civ's officials never make this one: a refusal of it is a declaration of war on us, and war is the ruler's alone to bring (audit 2026-10-03)
+                    && !(demand == Demand.DoNotAttackUs && civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs)) {
                     offendingCiv.popupAlerts.add(PopupAlert(demand.demandAlert, civInfo.civID))
                     if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) com.unciv.logic.automation.RulerOverrides.demandMade?.invoke(civInfo, offendingCiv, demand)
                 }

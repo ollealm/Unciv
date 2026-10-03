@@ -39,6 +39,27 @@ object RulerOverrides {
     class Posture(val warAim: String? = null, val stance: String = "attack", val reserve: Int = 0)
     val postures = ConcurrentHashMap<String, Posture>()
 
+    /** The home reserve of a ruled civ at war: the land soldiers nearest its cities, as many as the posture keeps back. They hold home ground whatever
+     *  the stance, and no siege takes them (the siege routine took a reserve garrison out of Sparta two turns running, audit 2026-10-03) */
+    @yairm210.purity.annotations.Readonly
+    fun inReserve(unit: MapUnit): Boolean {
+        val posture = postures[unit.civ.civID] ?: return false
+        if (posture.reserve <= 0 || !unit.isMilitary() || !unit.baseUnit.isLandUnit || !unit.civ.isAtWar()) return false
+        return unit.civ.units.getCivUnits().filter { it.isMilitary() && it.baseUnit.isLandUnit }
+            .sortedBy { soldier -> unit.civ.cities.minOfOrNull { it.getCenterTile().aerialDistanceTo(soldier.getTile()) } ?: 99 }
+            .take(posture.reserve).any { it.id == unit.id }
+    }
+
+    /** A war as the engine declares it (DeclareWar.declareWar), every civ's: [declarer] is the power whose war it now is - under a defensive pact that is
+     *  the partner pulled in, not the manager's owner - [target] the power it fights from now, [ally] the power it joins or avenges where the kind
+     *  names one. The host builds the world's events and the council's news from these, so a join is never told as a declaration */
+    class War(val declarer: Civilization, val target: Civilization, val type: com.unciv.logic.civilization.diplomacy.WarType, val ally: Civilization?)
+    @Volatile var warDeclared: ((War) -> Unit)? = null
+    fun noteWar(civ: Civilization, other: Civilization, reason: com.unciv.logic.civilization.diplomacy.DeclareWarReason) {
+        val pactPartnerJoins = reason.warType == com.unciv.logic.civilization.diplomacy.WarType.DefensivePactWar // the aggressor's manager declares on the partner it pulled in
+        warDeclared?.invoke(War(if (pactPartnerJoins) other else civ, if (pactPartnerJoins) civ else other, reason.warType, reason.allyCiv))
+    }
+
     /** civID -> when a ruled civ's officials may re-arm units with gold on their own (a standing order of the ruler): "always", "war" (the default), "never" */
     val rearming = ConcurrentHashMap<String, String>()
     /** May the officials re-arm this civ's units now? Under "war", only while at war with a major power - city-states and barbarians do not count. Unruled civs always may */
