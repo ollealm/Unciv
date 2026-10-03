@@ -145,12 +145,24 @@ object RulerHost {
             diplomacy.whoAnswers(other).replaceFirstChar { it.uppercase() } + "; a demand is resented whatever the answer.") }
         // Every war the engine declares, whoever's: the world's events say who drew the sword and who was pulled in, and the council is framed from it
         RulerOverrides.warDeclared = { war -> noteWar(war) }
-        RulerOverrides.underOrders = { unit -> unit.civ.civID in RulerOverrides.ruledCivs && units.underOrders(unit) }
         RulerOverrides.tradeAnswered = { request, receiver, outcome -> diplomacy.settle(request, receiver, outcome) }
         RulerOverrides.nearWinner = { other -> diplomacy.nearVictory(other) != null }
         RulerOverrides.faithSpent = { civ, faith, what -> faithSpending.getOrPut(civ.civName) { ArrayList() } += Pair(faith, what) }
         RulerOverrides.freeTechTaken = { civ, tech, goal -> freeTechs.getOrPut(civ.civName) { ArrayList() } += Pair(tech, goal) }
-        RulerOverrides.unitDisbanded = { civ, unit, why -> if (civ.civID in RulerOverrides.ruledCivs) disbandedFor.getOrPut(civ.civName) { HashMap() }[unit.id] = why }
+        RulerOverrides.unitDisbanded = { civ, unit, why -> disbandedFor.getOrPut(civ.civName) { HashMap() }.putIfAbsent(unit.id, why ?: "") } // the routine's reason first, the sink's word only when none was given
+        RulerOverrides.unitDestroyed = { civ, unit, where -> destroyed.getOrPut(civ.civName) { HashMap() }[unit.id] = where }
+        RulerOverrides.buildingSold = { civ, city, building, gold, why -> log(civ, "The officials sold the $building in ${city.name} for $gold gold, $why.") }
+        RulerOverrides.beliefsChosen = { civ, what, beliefs -> log(civ, "The officials $what with the belief${if (beliefs.size == 1) "" else "s"} ${beliefs.joinToString("; ") { beliefInWords(it) }}.") }
+        // A nuclear blow, to every court it touched: the attacker's as its own, each struck power's by the attacker's name - the cities in the blast and the units killed
+        RulerOverrides.nuked = { fall ->
+            val courts = (listOf(fall.attacker) + fall.cities.map { it.city.civ } + fall.killed.map { it.civ }).distinct().filter { it.civID in RulerOverrides.ruledCivs }
+            for (civ in courts) {
+                val whose = { owner: Civilization -> if (owner == civ) "our" else RulerCampaigns.possessive(owner.civName) }
+                val cities = fall.cities.map { hit -> "${whose(hit.city.civ)} ${hit.city.name} " + (if (hit.razed) "razed" else "at ${hit.city.health} of ${com.unciv.logic.battle.CityCombatant(hit.city).getMaxHealth()} health") }
+                val killed = fall.killed.groupBy { it.civ }.map { (owner, units) -> "${whose(owner)} ${units.joinToString(", ") { it.name }} killed" }
+                log(civ, "${whose(fall.attacker).replaceFirstChar { it.uppercase() }} ${fall.weapon} fell on ${RulerCampaigns.placeOf(civ, fall.target)}: " + (cities + killed).joinToString("; ").ifEmpty { "nothing of anyone's stood in the blast" } + ".")
+            }
+        }
         RulerOverrides.struck = { strike ->
             if (strike.attacker.civID in RulerOverrides.ruledCivs) strikes.getOrPut(strike.attacker.civName) { ArrayList() } += strike
             if (strike.targetCivName in orders) blows.getOrPut(strike.targetCivName) { ArrayList() } += strike
@@ -244,10 +256,13 @@ object RulerHost {
         RulerOverrides.worldVoteOf?.let { f -> RulerOverrides.worldVoteOf = { civ -> hook<String?>("worldVoteOf", null) { f(civ) } } }
         RulerOverrides.promised?.let { f -> RulerOverrides.promised = { civ -> hook("promised", emptyMap()) { f(civ) } } }
         RulerOverrides.demandMade?.let { f -> RulerOverrides.demandMade = { civ, other, demand -> hook("demandMade", Unit) { f(civ, other, demand) } } }
-        RulerOverrides.underOrders?.let { f -> RulerOverrides.underOrders = { unit -> hook("underOrders", false) { f(unit) } } }
         RulerOverrides.tradeAnswered?.let { f -> RulerOverrides.tradeAnswered = { request, receiver, outcome -> hook("tradeAnswered", Unit) { f(request, receiver, outcome) } } }
         RulerOverrides.nearWinner?.let { f -> RulerOverrides.nearWinner = { other -> hook("nearWinner", false) { f(other) } } }
         RulerOverrides.unitDisbanded?.let { f -> RulerOverrides.unitDisbanded = { civ, unit, why -> hook("unitDisbanded", Unit) { f(civ, unit, why) } } }
+        RulerOverrides.unitDestroyed?.let { f -> RulerOverrides.unitDestroyed = { civ, unit, where -> hook("unitDestroyed", Unit) { f(civ, unit, where) } } }
+        RulerOverrides.buildingSold?.let { f -> RulerOverrides.buildingSold = { civ, city, building, gold, why -> hook("buildingSold", Unit) { f(civ, city, building, gold, why) } } }
+        RulerOverrides.beliefsChosen?.let { f -> RulerOverrides.beliefsChosen = { civ, what, beliefs -> hook("beliefsChosen", Unit) { f(civ, what, beliefs) } } }
+        RulerOverrides.nuked?.let { f -> RulerOverrides.nuked = { fall -> hook("nuked", Unit) { f(fall) } } }
         RulerOverrides.struck?.let { f -> RulerOverrides.struck = { strike -> hook("struck", Unit) { f(strike) } } }
         RulerOverrides.unitExpended?.let { f -> RulerOverrides.unitExpended = { civ, unit, why -> hook("unitExpended", Unit) { f(civ, unit, why) } } }
         RulerOverrides.faithSpent?.let { f -> RulerOverrides.faithSpent = { civ, faith, what -> hook("faithSpent", Unit) { f(civ, faith, what) } } }
@@ -1077,13 +1092,18 @@ object RulerHost {
     private fun chanceryLog(civ: Civilization, since: Int, until: Int = Int.MAX_VALUE) =
         (chancery[civ.civName] ?: emptyList()).filter { (it["turn"] as Int) > since && (it["turn"] as Int) <= until }
 
-    /** Units the officials disbanded for a reason of their own this turn, by realm and unit number: the reason, for the bookkeeping's line */
+    /** Units the officials disbanded this turn, by realm and unit number: the reason, for the bookkeeping's line - empty when the routine gave none and only the sink spoke */
     private val disbandedFor = HashMap<String, HashMap<Int, String>>()
+    /** Units of each civ destroyed during the turn being played, whatever took them, by unit number: where they stood (RulerOverrides.noteDestroyed, the sink every
+     *  end passes through). Read after every cause a routine claimed, so a death nothing claimed is still told as a death where it stood */
+    private val destroyed = HashMap<String, HashMap<Int, Tile>>()
     private val noise = listOf("has no work to do", "will end in", "will end next turn", "can be promoted", "assigned you a new quest", "no longer needs your help",
         // the engine's bare word on a trade request: our own line says which proposal and how it ended, and the deals line says what came into force
         "has accepted your trade request", "has denied your trade request",
         // a city-state's end: the host's own line (recordPublicEvents) says who took its city, to every court that knew it
-        "The City-State of [")
+        "The City-State of [",
+        // a unit disbanded for want of gold: the roll-call's own line says which, where it stood and why (RulerOverrides.noteDisbanded)
+        "Cannot provide unit upkeep for")
     /** The engine's notice of a blow on us ("An enemy [Pikeman] ([-40] HP) has attacked [Onondaga] ([-26] HP)"): the turn's blows are folded into one line per attacker and place instead */
     private val blowNotice = Regex("^(An enemy|Enemy city) \\[[^\\]]+\\]( \\(\\[-\\d+\\] HP\\))? (has attacked|has captured|has destroyed|has raided|was destroyed while attacking) (?!our tile improvement)")
     /** The engine's notices in the chancery's own voice: the realm speaks as "we", a blow's arithmetic is struck ("(-40 HP)"), its templates' residue
@@ -1242,10 +1262,11 @@ object RulerHost {
             // The host knows whose hand spent a unit: the ruler's use order says so as it is carried out, anything else was the officials' once it was left to them
             val byWhom = if (units.usedByOrder.remove(id)) "by your order" else "by the officials once it was left to them"
             val went = expended[civ.civName]?.remove(id)
+            val gone = destroyed[civ.civName]?.remove(id)
             // No unit number: a unit gone from the rolls is nothing the advisor can order, and the line may reach the ruler's letter
-            log(civ, if (disbandedWhy != null && !civ.isDefeated()) "Our ${unit.first} ${RulerCampaigns.atPlaceOf(civ, unit.second)} was disbanded by the officials $disbandedWhy."
+            log(civ, if (disbandedWhy != null && !civ.isDefeated()) "Our ${unit.first} ${RulerCampaigns.atPlaceOf(civ, unit.second)} was disbanded by the officials${if (disbandedWhy.isEmpty()) "" else " $disbandedWhy"}."
                 else if (fell != null) "Our ${unit.first} was ${if (fell.captured) "captured" else "lost in action"} ${RulerCampaigns.atPlaceOf(civ, fell.where)}" +
-                    (fell.enemy?.let { enemy -> ", ${if (fell.captured) "taken" else "killed"} by ${if (enemy.isBarbarian) "a barbarian" else enemy.civName + "'s"} ${fell.enemyUnit ?: "soldiers"}" } ?: "") + "."
+                    (fell.enemy?.let { enemy -> ", ${if (fell.captured) "taken" else "killed"} by ${if (enemy.isBarbarian) "a barbarian" else RulerCampaigns.possessive(enemy.civName)} ${fell.enemyUnit ?: "soldiers"}" } ?: "") + "."
                 // A realm that fell takes what was left of its host with it: no officials disbanded them (the Maya at T210, Run 20)
                 else if (civ.isDefeated()) "Our ${unit.first} ${RulerCampaigns.atPlaceOf(civ, unit.second)} was lost with the fall of ${civ.civName}."
                 else if (spent) "Our ${unit.first} ${RulerCampaigns.atPlaceOf(civ, unit.second)} did its work and was used up, as such boats are: the fishing grounds it set up stay."
@@ -1254,9 +1275,12 @@ object RulerHost {
                 else if (civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.SelfDestructs) == true) "Our ${unit.first} was spent on its strike, launched ${RulerCampaigns.atPlaceOf(civ, unit.second)}."
                 // A part that reached the capital is not lost: it is aboard
                 else if (civ.gameInfo.ruleset.units[unit.first]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.SpaceshipPart) == true && civ.victoryManager.currentsSpaceshipParts[unit.first] > 0) "Our ${unit.first} was added to the ship in the capital."
+                // A death no routine claimed, from the sink every end passes through: told as a death where it stood, and no more
+                else if (gone != null) "Our ${unit.first} was destroyed ${RulerCampaigns.atPlaceOf(civ, gone)}; the officials did not say by what."
                 // Only what is known: no reason reached the host (every known cause has its own line above), so none is guessed - "a missionary spent" was once said of a warrior
                 else "Our ${unit.first} ${RulerCampaigns.atPlaceOf(civ, unit.second)} is gone from our rolls; the officials did not say why.")
         }
+        destroyed.remove(civ.civName) // what is left was re-armed or taken and made anew under its number: alive, and not asked after
         // Our own blows, which the engine tells only to the one struck: one line per target this turn - a city by name, a power's soldiers in the field together,
         // its ships at sea together (a blow on a barbarian Caravel once read "soldiers in the field")
         for ((_, blows) in (strikes.remove(civ.civName) ?: emptyList<RulerOverrides.Strike>()).groupBy { it.targetCity ?: (it.targetCivName + if (it.targetTile?.isWater == true) " at sea" else "") }) {

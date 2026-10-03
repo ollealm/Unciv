@@ -69,8 +69,12 @@ object RulerOverrides {
         else -> civ.getKnownCivs().any { it.isMajorCiv() && civ.isAtWarWith(it) }
     }
 
-    /** Strategic resources a ruled civ's own pending proposals offer (name -> amount): the officials' re-arming must not spend them out from under the deal */
+    /** Strategic resources a ruled civ's own pending proposals offer (name -> amount): the officials' re-arming and their construction choices must not spend
+     *  them out from under the deal (a Horseman queued while a Horses-for-Copper proposal waited would void it, audit 2026-10-04) */
     @Volatile var promised: ((Civilization) -> Map<String, Int>)? = null
+    /** What a civ's pending proposals promise of [resource]: nothing for an unruled civ */
+    @yairm210.purity.annotations.Readonly
+    fun promisedOf(civ: Civilization, resource: String): Int = if (civ.civID in ruledCivs) promised?.invoke(civ)?.get(resource) ?: 0 else 0
     /** Would re-arming this unit take a resource [promised] holds, leaving less than the proposal offers? Judged on every newer arm it could take */
     fun spendsPromised(unit: MapUnit, promised: Map<String, Int>): Boolean = promised.isNotEmpty() && unit.baseUnit.getUpgradeUnits(unit.cache.state)
         .mapNotNull { unit.civ.gameInfo.ruleset.units[it] }.map { unit.civ.getEquivalentUnit(it) }
@@ -149,20 +153,30 @@ object RulerOverrides {
     val noProposals = ConcurrentHashMap<String, Set<String>>()
     /** civID -> faith the officials leave untouched (a ruler's standing order, as goldReserve is for gold) */
     val faithReserve = ConcurrentHashMap<String, Int>()
+    /** The faith a civ's officials may spend on their own: what lies above the ruler's reserve for a ruled civ, all of it for any other. Every faith spender
+     *  of the officials' measures its price against this - a purchase, and the pantheon, which was bought past the reserve till audit 2026-10-04 */
+    @yairm210.purity.annotations.Readonly
+    fun faithAboveReserve(civ: Civilization): Int = civ.religionManager.storedFaith - (if (civ.civID in ruledCivs) faithReserve[civ.civID] ?: 0 else 0)
     /** Set by the host: told of every faith purchase the officials make for a ruled civ - (civ, faith, "Great Scientist in Persepolis") */
     @Volatile var faithSpent: ((Civilization, Int, String) -> Unit)? = null
+    fun noteFaithSpent(civ: Civilization, faith: Int, what: String) { if (civ.civID in ruledCivs) faithSpent?.invoke(civ, faith, what) }
+    /** Set by the host: the beliefs the officials chose for a ruled civ - (civ, what they did with them: "founded our pantheon", "founded Buddhism",
+     *  "enhanced Buddhism", "added to Buddhism", the beliefs). The engine tells the other players of a founding, never the founder */
+    @Volatile var beliefsChosen: ((Civilization, String, List<com.unciv.models.ruleset.Belief>) -> Unit)? = null
+    fun noteBeliefs(civ: Civilization, what: String, beliefs: List<com.unciv.models.ruleset.Belief>) { if (civ.civID in ruledCivs) beliefsChosen?.invoke(civ, what, beliefs) }
     /** Set by the host: told of a free technology taken for a ruled civ - (civ, technology, the goal it was taken toward or null) */
     @Volatile var freeTechTaken: ((Civilization, String, String?) -> Unit)? = null
+    /** Set by the host: a building the officials sold for a ruled civ - (civ, city, building, the gold it fetched, why: "to free its Aluminum for the spaceship") */
+    @Volatile var buildingSold: ((Civilization, com.unciv.logic.city.City, String, Int, String) -> Unit)? = null
 
     /** The officials' faith purchase for any civ: a ruled civ's keeps above its faith reserve and off its never-build list, and is told to the host
      *  (Persia's officials spent 1,600 faith in a turn with no line, audit 2026-10-03). Unruled civs buy as the engine always has */
     fun officialsBuyWithFaith(city: com.unciv.logic.city.City, construction: com.unciv.models.ruleset.INonPerpetualConstruction): Boolean {
         val civ = city.civ
         val cost = construction.getStatBuyCost(city, com.unciv.models.stats.Stat.Faith) ?: return false
-        val ruled = civ.civID in ruledCivs
-        if (ruled && (civ.religionManager.storedFaith - cost < (faithReserve[civ.civID] ?: 0) || forbidden?.invoke(civ, construction) == true)) return false
+        if (cost > faithAboveReserve(civ) || city.isDisabledForAutomation(construction)) return false
         val bought = city.cityConstructions.purchaseConstruction(construction, -1, true, com.unciv.models.stats.Stat.Faith)
-        if (bought && ruled) faithSpent?.invoke(civ, cost, "${construction.name} in ${city.name}")
+        if (bought) noteFaithSpent(civ, cost, "${construction.name} in ${city.name}")
         return bought
     }
 
@@ -210,10 +224,22 @@ object RulerOverrides {
         return purpose.isNotEmpty() && purpose.all { it.type == UniqueType.EnablesConstructionOfSpaceshipParts || it.type == UniqueType.SpaceshipPart || "Spaceship part" in it.params }
     }
 
-    /** Set by the host: is this unit of a ruled civ under the ruler's own order? Routines that draft units of their own (the settler escort) pass it by */
+    /** Set by the host: is this unit of a ruled civ under the ruler's own order, of any kind - a march as much as a garrison? The officials' routines that
+     *  draft units of their own (the settler escort, the siege, the retreat's swap) leave it where its order has it */
     @Volatile var hasOrder: ((MapUnit) -> Boolean)? = null
     @yairm210.purity.annotations.Readonly
     fun isUnderOrders(unit: MapUnit) = unit.civ.civID in ruledCivs && hasOrder?.invoke(unit) == true
+
+    /** A ruled civ at war under the defend posture: its soldiers and planes keep to home ground and out of every enemy city's guns, wherever the automation
+     *  would otherwise send them. The one test behind every "defending" site (it was written three times) */
+    @yairm210.purity.annotations.Readonly
+    fun defending(civ: Civilization) = postures[civ.civID]?.stance == "defend" && civ.isAtWar()
+
+    /** A soldier of a ruled civ that stays home: under the ruler's own order whatever the season, or at war in a defending host, in the home reserve, or
+     *  outclassed. No routine of the officials' sends it abroad - not the siege, the settler escort, a ruin's lure - and its own turn holds home ground
+     *  (UnitAutomation). The one test behind the posture sites, which each had their own trio before audit 2026-10-04 */
+    @yairm210.purity.annotations.Readonly
+    fun staysHome(unit: MapUnit) = isUnderOrders(unit) || unit.isMilitary() && unit.civ.isAtWar() && (defending(unit.civ) || inReserve(unit) || outclassed(unit))
 
     /** A step toward a tile that may not open after all (the path reckoning and the march disagree): taken if it can be, else the unit stands where it is.
      *  For the moves this fork added to the officials' routines - an unreachable step there once stopped the whole turn (Run 20, T187) */
@@ -245,13 +271,23 @@ object RulerOverrides {
         }
     }
 
-    /** Called with (civ, unit, why) when a ruled civ's automation disbands a unit for a reason of its own, before it goes */
-    @Volatile var unitDisbanded: ((com.unciv.logic.civilization.Civilization, MapUnit, String) -> Unit)? = null
+    /** Called with (civ, unit, why) when a ruled civ's unit is disbanded by the engine's own hand: the routines that know their reason say it before the
+     *  disbanding ("to free its Uranium for the spaceship"), and the sink every disbanding passes through ([MapUnit.disband]) says what it can of the rest
+     *  (null: no more than that it was disbanded). The host keeps the first word it hears of a unit, so a reason given is never overwritten by the sink's */
+    @Volatile var unitDisbanded: ((com.unciv.logic.civilization.Civilization, MapUnit, String?) -> Unit)? = null
+    fun noteDisbanded(unit: MapUnit, why: String?) { if (unit.civ.civID in ruledCivs) unitDisbanded?.invoke(unit.civ, unit, why) }
 
     /** Called with (civ, unit, why) when a ruled civ's unit goes by neither battle nor disbanding - used up by its own work ([MapUnit.consume]) or killed by the
      *  ground it stood on - before it goes: the host otherwise could only guess at "disbanded or used up". [why] finishes "Our X #id <where> ..." */
     @Volatile var unitExpended: ((Civilization, MapUnit, String) -> Unit)? = null
     fun noteExpended(unit: MapUnit, why: String) { if (unit.civ.civID in ruledCivs) unitExpended?.invoke(unit.civ, unit, why) }
+
+    /** Called with (civ, unit, where it stood) for every unit of a ruled civ that is destroyed, from the one sink every end passes through ([MapUnit.destroy]):
+     *  a battle, a capture, a disbanding, work done, a nuclear blast, an air wing drowned with its carrier, a unit with no tile left to stand on. The sources
+     *  that know the cause tell it by noteLoss, noteExpended or noteDisbanded; the host reads those first and this last, so a death no source claimed is told
+     *  as a death where it stood, never guessed at. A unit re-armed or captured is destroyed and made anew under its number: the host's roll-call never asks after those */
+    @Volatile var unitDestroyed: ((Civilization, MapUnit, Tile) -> Unit)? = null
+    fun noteDestroyed(unit: MapUnit, where: Tile) { if (unit.civ.civID in ruledCivs) unitDestroyed?.invoke(unit.civ, unit, where) }
 
     /** A blow struck by a ruled civ's unit or city, or on one: the engine tells only the defender of it, and in its own words. [targetCity] when the blow fell on a city
      *  (its walls' health after), else [targetUnit], the unit struck (by number in [targetUnitId], so two of a name are told apart); [fell] when the blow destroyed or
@@ -283,9 +319,6 @@ object RulerOverrides {
      */
     @Volatile var unitHandler: ((MapUnit) -> Boolean)? = null
 
-    /** True when the ruler gave this unit its own orders: the officials' retreat must not swap it out of its place */
-    @Volatile var underOrders: ((MapUnit) -> Boolean)? = null
-
     /**
      *  What became of a trade request a ruled civ laid before another: accepted | countered | declined | invalid (the officials could not
      *  honour it and dropped it) | voided (one side could no longer supply). Told to the host with the request itself, so a proposal is
@@ -302,5 +335,19 @@ object RulerOverrides {
     /** [civ] is passed apart from the unit because a captured unit already belongs to its captor by the time this is called */
     fun noteLoss(civ: Civilization, unit: MapUnit, where: Tile, enemy: ICombatant?, captured: Boolean = false) {
         unitLost?.invoke(UnitLoss(civ, unit, where, enemy?.getCivInfo(), enemy?.getName(), captured))
+    }
+
+    /** A nuclear blow told whole, as the engine never tells it (each victim hears of its own tile, the attacker of nothing): who launched which weapon at
+     *  where, the cities in its blast with the walls' health after or razed, and every unit it killed by owner. Each unit killed is also a loss by noteLoss,
+     *  the weapon named as the killer, so the roll-call and the trail have it as any death in battle */
+    class NukeFall(val attacker: Civilization, val weapon: String, val target: Tile) {
+        class CityHit(val city: com.unciv.logic.city.City, val razed: Boolean)
+        val cities = ArrayList<CityHit>()
+        val killed = ArrayList<MapUnit>()
+    }
+    @Volatile var nuked: ((NukeFall) -> Unit)? = null
+    /** Told when the attacker or any power struck is a ruled civ */
+    fun noteNuke(fall: NukeFall) {
+        if (fall.attacker.civID in ruledCivs || fall.cities.any { it.city.civ.civID in ruledCivs } || fall.killed.any { it.civ.civID in ruledCivs }) nuked?.invoke(fall)
     }
 }

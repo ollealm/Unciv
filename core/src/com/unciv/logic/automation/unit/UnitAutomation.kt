@@ -63,12 +63,14 @@ object UnitAutomation {
 
         // Note that not all nukes have to be air units
         if (unit.isNuclearWeapon()) {
+            // A ruled civ's defend posture grounds its nuclear weapons: the launch came before the posture's test till audit 2026-10-04
+            if (com.unciv.logic.automation.RulerOverrides.defending(unit.civ)) return
             return AirUnitAutomation.automateNukes(unit)
         }
 
         if (unit.baseUnit.isAirUnit()) {
             // A ruled civ's defend posture grounds the air arm too: it flies only against what stands on or beside our own land
-            if (com.unciv.logic.automation.RulerOverrides.postures[unit.civ.civID]?.stance == "defend" && unit.civ.isAtWar())
+            if (com.unciv.logic.automation.RulerOverrides.defending(unit.civ))
                 return AirUnitAutomation.automateHomeDefence(unit)
             if (unit.canIntercept())
                 return AirUnitAutomation.automateFighter(unit)
@@ -79,10 +81,11 @@ object UnitAutomation {
             return AirUnitAutomation.automateBomber(unit)
         }
 
-        // Accompany settlers
-        if (tryAccompanySettlerOrGreatPerson(unit)) return
+        // Accompany settlers - not a soldier of a ruled civ that stays home: the settler and the ruin ahead of the posture took the reserve abroad (audit 2026-10-04)
+        val staysHome = com.unciv.logic.automation.RulerOverrides.staysHome(unit)
+        if (!staysHome && tryAccompanySettlerOrGreatPerson(unit)) return
 
-        if (tryGoToRuin(unit) && !unit.hasMovement()) return
+        if (!staysHome && tryGoToRuin(unit) && !unit.hasMovement()) return
 
         if (unit.health < 50 && (tryRetreat(unit) || tryHealUnit(unit))) return // do nothing but heal
 
@@ -91,25 +94,21 @@ object UnitAutomation {
 
         if (tryHeadTowardsOurSiegedCity(unit)) return
 
-        // A ruled civ's posture: on "defend" no soldier leaves home ground; on "raid" the host pillages but never assaults a city
-        val posture = com.unciv.logic.automation.RulerOverrides.postures[unit.civ.civID] // a ruled civ that never set one fights as under attack
-            ?: com.unciv.logic.automation.RulerOverrides.Posture().takeIf { unit.civ.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs }
-        if (posture != null && unit.isMilitary() && unit.civ.isAtWar()) {
-            // the home reserve: the soldiers nearest our cities, as many as the ruler asked to keep back, never march out - whatever the stance
-            val inReserve = com.unciv.logic.automation.RulerOverrides.inReserve(unit)
-            // A soldier far behind our best arms is no part of an attack: it holds home ground as a defending host does
-            val outclassed = com.unciv.logic.automation.RulerOverrides.outclassed(unit)
-            if (posture.stance == "defend" || inReserve || outclassed) {
-                // A defending host holds its own ground: out of any enemy city's guns first, then only an enemy on or beside our land is fought, and a
-                // soldier left abroad walks home. The reserve of an attacking or raiding host holds it the same way (it once fought whatever was within reach, audit 2026-10-03)
-                if (tryLeaveEnemyCityRange(unit)) return
-                if (tryAttacking(unit, homeGroundTargets(unit))) return
-                if (tryGarrisoningLandUnit(unit)) return
-                if (unit.health < 100 && tryHealUnit(unit)) return
-                if (unit.getTile().getOwner() != unit.civ) { if (!tryRetreat(unit)) tryHeadHome(unit); return }
-                tryPrepare(unit); return
-            }
-            if (posture.stance == "raid") {
+        // A ruled civ's posture: on "defend" no soldier leaves home ground; on "raid" the host pillages but never assaults a city. A soldier that stays home
+        // (RulerOverrides.staysHome: a defending host, the home reserve - the soldiers nearest our cities, as many as the ruler asked to keep back, whatever
+        // the stance - or one far behind our best arms) holds its own ground: out of any enemy city's guns first, then only an enemy on or beside our land
+        // is fought, and a soldier left abroad walks home (the reserve once fought whatever was within reach, audit 2026-10-03)
+        if (staysHome) {
+            if (tryLeaveEnemyCityRange(unit)) return
+            if (tryAttacking(unit, homeGroundTargets(unit))) return
+            if (tryGarrisoningLandUnit(unit)) return
+            if (unit.health < 100 && tryHealUnit(unit)) return
+            if (unit.getTile().getOwner() != unit.civ) { if (!tryRetreat(unit)) tryHeadHome(unit); return }
+            tryPrepare(unit); return
+        }
+        if (unit.isMilitary() && unit.civ.isAtWar()) {
+            val posture = com.unciv.logic.automation.RulerOverrides.postures[unit.civ.civID]
+            if (posture?.stance == "raid") {
                 // A raider fights what is in the field and never storms a city: no city centre is among its targets, nor is one marched on
                 if (tryAttacking(unit, raidTargets(unit), keepOutOfCityGuns = false)) return
                 if (tryPillageImprovement(unit)) return
@@ -367,12 +366,14 @@ object UnitAutomation {
         return unit.currentTile.getTilesInDistance(reach).filter { it in unit.civ.viewableTiles && !it.isCityCenter() }.toList()
     }
 
-    /** A ruled civ at war under the defend posture: its soldiers keep out of every enemy city's guns, wherever the automation would otherwise send them */
-    private fun keepsOutOfCityGuns(unit: MapUnit) = com.unciv.logic.automation.RulerOverrides.postures[unit.civ.civID]?.stance == "defend" && unit.civ.isAtWar()
-
     /** True when an enemy city can bombard this tile (its bombard range, two tiles by the standard rules) */
     internal fun underEnemyCityGuns(civ: Civilization, tile: Tile) = civ.getKnownCivs().filter { civ.isAtWarWith(it) }.flatMap { it.cities }
         .any { it.getCenterTile().aerialDistanceTo(tile) <= it.getBombardRange() }
+
+    /** A tile this unit may step to and stand on: one it can move to, and for a defending host (RulerOverrides.defending) not one an enemy city can bombard -
+     *  it would stand there to be shot, turn upon turn. The tile choosers each wrote the pair by hand before audit 2026-10-04 */
+    private fun openTo(unit: MapUnit, tile: Tile) = unit.movement.canMoveTo(tile)
+        && !(com.unciv.logic.automation.RulerOverrides.defending(unit.civ) && underEnemyCityGuns(unit.civ, tile))
 
     /** Under defend a soldier standing within an enemy city's guns walks out of them, toward home: the city's volley a turn and its garrison's sallies
      *  are what killed the host before Weldiya for turns on end. Our own city centres are kept - the walls shelter their garrison */
@@ -422,12 +423,12 @@ object UnitAutomation {
         }
 
         val ourDistanceToClosestEnemy = unit.civ.threatManager.getDistanceToClosestEnemyUnit(unit.getTile(),4, false)
-        val keepsOut = keepsOutOfCityGuns(unit)
+        val defending = com.unciv.logic.automation.RulerOverrides.defending(unit.civ)
         // Lets check all tiles and swap with the first one
         for (retreatTile in sortedTilesToRetreatTo) {
             val tileDistanceToClosestEnemy = unit.civ.threatManager.getDistanceToClosestEnemyUnit(retreatTile,4,false)
             if (ourDistanceToClosestEnemy >= tileDistanceToClosestEnemy) continue
-            if (keepsOut && underEnemyCityGuns(unit.civ, retreatTile)) continue // a defending host does not retreat into a city's guns
+            if (defending && underEnemyCityGuns(unit.civ, retreatTile)) continue // a defending host does not retreat into a city's guns
 
             val otherUnit = retreatTile.militaryUnit
             if (otherUnit == null) {
@@ -438,7 +439,7 @@ object UnitAutomation {
             } else if (otherUnit.civ == unit.civ) {
                 // The tile is taken, lets see if we want to swap retreat to it
                 if (otherUnit.health <= 80) continue
-                if (com.unciv.logic.automation.RulerOverrides.underOrders?.invoke(otherUnit) == true) continue // a garrison the ruler placed stays put
+                if (com.unciv.logic.automation.RulerOverrides.isUnderOrders(otherUnit)) continue // a soldier under the ruler's order - a garrison placed, a march under way - stays where its order has it
                 if (otherUnit.baseUnit.isRanged()) {
                     // Don't swap ranged units closer than they have to be
                     val range = otherUnit.baseUnit.range
@@ -473,7 +474,7 @@ object UnitAutomation {
 
         val dangerousTiles = unit.civ.threatManager.getDangerousTiles(unit, 3)
         // The threat manager marks a city's guns only when the city stands within three tiles; a defending host must not walk under them from farther off
-        if (keepsOutOfCityGuns(unit)) dangerousTiles += unitDistanceToTiles.keys.filter { underEnemyCityGuns(unit.civ, it) }
+        if (com.unciv.logic.automation.RulerOverrides.defending(unit.civ)) dangerousTiles += unitDistanceToTiles.keys.filter { underEnemyCityGuns(unit.civ, it) }
 
         // If the unit can heal on this tile in two turns, just heal here
         if (unit.currentTile !in dangerousTiles 
@@ -565,10 +566,10 @@ object UnitAutomation {
     fun tryPillageImprovement(unit: MapUnit, onlyPillageToHeal: Boolean = false): Boolean {
         if (unit.isCivilian()) return false
         val unitDistanceToTiles = unit.movement.getDistanceToTiles()
-        val keepsOut = keepsOutOfCityGuns(unit) // a defending host does not walk under a city's guns for the sake of a farm to loot and heal on
+        // a defending host does not walk under a city's guns for the sake of a farm to loot and heal on (openTo)
         val tilesThatCanWalkToAndThenPillage = unitDistanceToTiles
             .filter { it.value.totalMovement < unit.currentMovement }.keys
-            .filter { unit.movement.canMoveTo(it) && UnitActionsPillage.canPillage(unit, it) && !(keepsOut && underEnemyCityGuns(unit.civ, it))
+            .filter { openTo(unit, it) && UnitActionsPillage.canPillage(unit, it)
                     && (it.canPillageTileImprovement()
                     || (!onlyPillageToHeal && it.canPillageRoad() && it.getRoadOwner() != null && unit.civ.isAtWarWith(it.getRoadOwner()!!))) }
 
@@ -637,11 +638,11 @@ object UnitAutomation {
             .sortedBy { unit.getTile().aerialDistanceTo(it.getCenterTile()) }
 
         // Move to the closest city with a tile we can enter nearby
-        val keepsOut = keepsOutOfCityGuns(unit) // a defending host takes no place by its city that the enemy's city can bombard: it would stand there to be shot, turn upon turn
+        // a defending host takes no place by its city that the enemy's city can bombard (openTo)
         for (city in citiesToDefend) {
             if (unit.getTile().aerialDistanceTo(city.getCenterTile()) <= 2) return true
             val tileToMoveTo = city.getCenterTile().getTilesInDistance(2)
-                .firstOrNull { unit.movement.canMoveTo(it) && unit.movement.canReach(it) && !(keepsOut && underEnemyCityGuns(unit.civ, it)) } ?: continue
+                .firstOrNull { openTo(unit, it) && unit.movement.canReach(it) } ?: continue
             unit.movement.headTowards(tileToMoveTo)
             return true
         }
@@ -673,13 +674,12 @@ object UnitAutomation {
         if (siegedCities.any { it.getCenterTile().aerialDistanceTo(unit.getTile()) <= 2 })
             return false
 
-        val keepsOut = keepsOutOfCityGuns(unit) // a defending host takes no place in the ring that an enemy city can bombard: it would stand there to be shot, turn upon turn
+        // a defending host takes no place in the ring that an enemy city can bombard (openTo)
         val reachableTileNearSiegedCity = siegedCities
                 .flatMap { it.getCenterTile().getTilesAtDistance(2) }
                 .sortedBy { it.aerialDistanceTo(unit.currentTile) }
-                .firstOrNull { unit.movement.canMoveTo(it) && unit.movement.canReach(it)
-                        && unit.getDamageFromTerrain(it) <= 0 // Avoid ending up on damaging terrain
-                        && !(keepsOut && underEnemyCityGuns(unit.civ, it)) }
+                .firstOrNull { openTo(unit, it) && unit.movement.canReach(it)
+                        && unit.getDamageFromTerrain(it) <= 0 } // Avoid ending up on damaging terrain
 
         if (reachableTileNearSiegedCity != null) {
             unit.movement.headTowards(reachableTileNearSiegedCity)

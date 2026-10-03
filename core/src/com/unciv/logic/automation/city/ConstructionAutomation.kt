@@ -59,14 +59,14 @@ class ConstructionAutomation(val cityConstructions: CityConstructions) {
     private val buildableBuildings = hashMapOf<String, Boolean>()
     private val buildableUnits = hashMapOf<String, Boolean>()
     private val buildings = city.getRuleset().buildings.values.asSequence()
-        .filterNot { (civInfo.isHuman() && it.name in city.disabledConstructions) || shouldAvoidConstruction(it) }
+        .filterNot { city.isDisabledForAutomation(it) || shouldAvoidConstruction(it) }
 
     private val nonWonders = buildings.filterNot { it.isAnyWonder() }
         .filterNot { buildableBuildings[it.name] == false } // if we already know that this building can't be built here then don't even consider it
 
     private val units = city.getRuleset().units.values.asSequence()
         .filterNot { buildableUnits[it.name] == false || // if we already know that this unit can't be built here then don't even consider it
-            (civInfo.isHuman() && it.name in city.disabledConstructions) || shouldAvoidConstruction(it) }
+            city.isDisabledForAutomation(it) || shouldAvoidConstruction(it) }
 
     private val civUnits = civInfo.units.getCivUnits()
     private val militaryUnits = civUnits.count { it.baseUnit.isMilitary }
@@ -102,7 +102,7 @@ class ConstructionAutomation(val cityConstructions: CityConstructions) {
         return this.filter {
             val cache = if (it is Building) buildableBuildings else buildableUnits
             if (cache[it.name] == null) {
-                cache[it.name] = it.isBuildable(cityConstructions) && com.unciv.logic.automation.RulerOverrides.forbidden?.invoke(civInfo, it) != true
+                cache[it.name] = it.isBuildable(cityConstructions) // the never-build gate is on buildings and units above, City.isDisabledForAutomation
             }
             cache[it.name]!!
         }

@@ -948,6 +948,7 @@ class MapUnit : IsPartOfGameInfoSerialization {
         currentMovement = 0f
         civ.units.removeUnit(this)
         if (::currentTile.isInitialized) {
+            com.unciv.logic.automation.RulerOverrides.noteDestroyed(this, currentTile) // the one sink every end passes through: a ruled civ's host hears of it here, whatever the cause
             val currentPosition = getTile().position
             civ.attacksSinceTurnStart.addAll(attacksSinceTurnStart.asSequence().map { Civilization.HistoricalAttackMemory(this.name, currentPosition, it.toHexCoord()) })
             removeFromTile()
@@ -1124,6 +1125,8 @@ class MapUnit : IsPartOfGameInfoSerialization {
     fun disband() {
         // Safeguard against running on already destroyed instances
         if (isDestroyed) return
+        // A ruled civ's host hears of every disbanding here; a routine that knows its reason has said it already, and the host keeps that word
+        com.unciv.logic.automation.RulerOverrides.noteDisbanded(this, if (isTransported) "with the carrier it was aboard, which had nowhere to set it down" else null)
 
         // evacuation of transported units before disbanding, if possible. toListed because we're modifying the unit list.
         for (unit in currentTile.getUnits()

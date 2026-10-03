@@ -313,6 +313,7 @@ class TurnManager(val civInfo: Civilization) {
                     .sortedWith(priorities)
                     .firstOrNull()
                     ?: break
+                RulerOverrides.noteDisbanded(unitToDisband, "because the treasury could not pay its upkeep")
                 unitToDisband.disband()
                 val unitName = unitToDisband.shortDisplayName()
                 civInfo.addNotification("Cannot provide unit upkeep for $unitName - unit has been disbanded!", NotificationCategory.Units, unitName, NotificationIcon.Death)

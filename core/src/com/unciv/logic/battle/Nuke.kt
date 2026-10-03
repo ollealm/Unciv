@@ -1,5 +1,6 @@
 package com.unciv.logic.battle
 
+import com.unciv.logic.automation.RulerOverrides
 import com.unciv.logic.city.City
 import com.unciv.logic.civilization.*
 import com.unciv.logic.civilization.diplomacy.DiplomaticModifiers
@@ -76,10 +77,13 @@ object Nuke {
 
         attacker.unit.attacksSinceTurnStart.add(targetTile.position)
 
+        // The blow told whole to a ruled civ's host, attacker's or victim's: the engine's own notices tell each victim of its tile and the attacker of nothing
+        val fall = RulerOverrides.NukeFall(attackingCiv, attacker.getName(), targetTile)
         for (tile in hitTiles) {
             // Handle complicated effects
-            doNukeExplosionForTile(attacker, tile, nukeStrength, targetTile == tile)
+            doNukeExplosionForTile(attacker, tile, nukeStrength, targetTile == tile, fall)
         }
+        RulerOverrides.noteNuke(fall)
 
 
         // Instead of postBattleAction() just destroy the unit, all other functions are not relevant
@@ -196,7 +200,8 @@ object Nuke {
         attacker: MapUnitCombatant,
         tile: Tile,
         nukeStrength: Int,
-        isGroundZero: Boolean
+        isGroundZero: Boolean,
+        fall: RulerOverrides.NukeFall
     ) {
         // https://forums.civfanatics.com/resources/unit-guide-modern-future-units-g-k.25628/
         // https://www.carlsguides.com/strategy/civilization5/units/aircraft-nukes.ph
@@ -220,6 +225,7 @@ object Nuke {
             val attackContext = GameContext(attacker.getCivInfo(), ourCombatant = attacker, theirCombatant = CityCombatant(city), tile = tile)
             buildingModifier = city.getAggregateModifier(UniqueType.GarrisonDamageFromNukes)
             doNukeExplosionDamageToCity(city, nukeStrength, damageModifierFromMissingResource, attackContext)
+            fall.cities += RulerOverrides.NukeFall.CityHit(city, razed = city !in city.civ.cities)
             Battle.postBattleNotifications(attacker, CityCombatant(city), city.getCenterTile())
             Battle.destroyIfDefeated(city.civ, attacker.getCivInfo(), city.location.toHexCoord())
         }
@@ -241,6 +247,7 @@ object Nuke {
             } else {
                 defender.takeDamage(damage)
             }
+            if (unit.isDestroyed) { RulerOverrides.noteLoss(unit.civ, unit, tile, attacker); fall.killed += unit } // a death in battle, the weapon the killer
             Battle.postBattleNotifications(attacker, defender, defender.getTile())
             Battle.destroyIfDefeated(defender.getCivInfo(), attacker.getCivInfo())
         }

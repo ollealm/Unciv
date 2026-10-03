@@ -389,7 +389,7 @@ object NextTurnAutomation {
             val unitToDisband = civInfo.units.getCivUnits()
                 .filter { it.requiresResource(resource) && !it.hasUnique(UniqueType.SpaceshipPart) }
                 .minByOrNull { it.getForceEvaluation() }
-            if (unitToDisband != null && civInfo.civID in RulerOverrides.ruledCivs) RulerOverrides.unitDisbanded?.invoke(civInfo, unitToDisband, "to free its $resource for the spaceship")
+            if (unitToDisband != null) RulerOverrides.noteDisbanded(unitToDisband, "to free its $resource for the spaceship")
             unitToDisband?.disband()
             sellBuildingForResource(civInfo, resource)
         }
@@ -407,7 +407,9 @@ object NextTurnAutomation {
                         && !civInfo.civConstructions.hasFreeBuilding(city, it)
                 }
                 .randomOrNull(rng) ?: continue
+            val fetched = city.getGoldForSellingBuilding(buildingToSell.name)
             city.sellBuilding(buildingToSell)
+            if (civInfo.civID in RulerOverrides.ruledCivs) RulerOverrides.buildingSold?.invoke(civInfo, city, buildingToSell.name, fetched, "to free its $resource for the spaceship")
             return
         }
     }
@@ -481,9 +483,9 @@ object NextTurnAutomation {
 
     /** All units will continue after this to the regular automation, so units not moved in this function will still move */
     private fun automateCityConquer(civInfo: Civilization, city: City){
-        // An outclassed soldier of a ruled civ joins no siege; nor does one under the ruler's own order (a garrison was walked out of Sparta two turns running), nor the home reserve
+        // A soldier of a ruled civ that stays home joins no siege: one outclassed, one under the ruler's own order (a garrison was walked out of Sparta two turns running), the home reserve
         @Readonly fun ourUnitsInRange(range: Int) = city.getCenterTile().getTilesInDistance(range)
-            .mapNotNull { it.militaryUnit }.filter { it.civ == civInfo && (!it.baseUnit.isMelee() || it.health > 30) && !RulerOverrides.outclassed(it) && !RulerOverrides.isUnderOrders(it) && !RulerOverrides.inReserve(it) }.toList()
+            .mapNotNull { it.militaryUnit }.filter { it.civ == civInfo && (!it.baseUnit.isMelee() || it.health > 30) && !RulerOverrides.staysHome(it) }.toList()
         
         
         fun attackIfPossible(unit: MapUnit, tile: Tile){
@@ -535,8 +537,9 @@ object NextTurnAutomation {
             .mapNotNull { it.militaryUnit }.filter {
                 it.civ == civInfo
                     && it.health >= 100
-                    // the ruler's own orders stand: a soldier on its way to garrison a city is not drafted away (Run 20: Spain's Swordsman, and a crash after)
-                    && !RulerOverrides.isUnderOrders(it)
+                    // the ruler's own orders stand: a soldier on its way to garrison a city is not drafted away (Run 20: Spain's Swordsman, and a crash after);
+                    // nor is the home reserve or a defending host's soldier (the escort took them abroad till audit 2026-10-04)
+                    && !RulerOverrides.staysHome(it)
                     // only draft a unit from the core of the empire, or it'll interfere with other anti-barb activities
                     && (it.currentTile.aerialDistanceTo(capitalTile) < tile.aerialDistanceTo(capitalTile))
                     && it.movement.canReach(tile) 

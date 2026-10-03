@@ -430,10 +430,16 @@ object ReligionAutomation {
         // Should probably be changed later, but it works for now.
         val chosenPantheon = pickBeliefOfType(civInfo, BeliefType.Pantheon)
             ?: return // panic!
+        val free = civInfo.religionManager.usingFreeBeliefs()
+        val cost = if (free) 0 else civInfo.religionManager.faithForPantheon()
+        // A ruled civ's officials found it within the ruler's faith reserve, as they buy within it (the pantheon was bought past the reserve till audit 2026-10-04)
+        if (cost > com.unciv.logic.automation.RulerOverrides.faithAboveReserve(civInfo)) return
         civInfo.religionManager.chooseBeliefs(
             listOf(chosenPantheon),
-            useFreeBeliefs = civInfo.religionManager.usingFreeBeliefs()
+            useFreeBeliefs = free
         )
+        if (cost > 0) com.unciv.logic.automation.RulerOverrides.noteFaithSpent(civInfo, cost, "pantheon")
+        com.unciv.logic.automation.RulerOverrides.noteBeliefs(civInfo, "founded our pantheon", listOf(chosenPantheon))
     }
 
     private fun foundReligion(civInfo: Civilization) {
@@ -453,21 +459,23 @@ object ReligionAutomation {
 
         val chosenBeliefs = chooseBeliefs(civInfo, civInfo.religionManager.getBeliefsToChooseAtFounding()).toList()
         civInfo.religionManager.chooseBeliefs(chosenBeliefs)
+        com.unciv.logic.automation.RulerOverrides.noteBeliefs(civInfo, "founded ${civInfo.religionManager.religion!!.getReligionDisplayName()}", chosenBeliefs)
     }
 
     private fun enhanceReligion(civInfo: Civilization) {
         if (civInfo.religionManager.religionState != ReligionState.EnhancingReligion) return
-        civInfo.religionManager.chooseBeliefs(
-            chooseBeliefs(civInfo, civInfo.religionManager.getBeliefsToChooseAtEnhancing()).toList()
-        )
+        val chosenBeliefs = chooseBeliefs(civInfo, civInfo.religionManager.getBeliefsToChooseAtEnhancing()).toList()
+        civInfo.religionManager.chooseBeliefs(chosenBeliefs)
+        com.unciv.logic.automation.RulerOverrides.noteBeliefs(civInfo, "enhanced ${civInfo.religionManager.religion!!.getReligionDisplayName()}", chosenBeliefs)
     }
 
     private fun chooseFreeBeliefs(civInfo: Civilization) {
         if (!civInfo.religionManager.hasFreeBeliefs()) return
-        civInfo.religionManager.chooseBeliefs(
-            chooseBeliefs(civInfo, civInfo.religionManager.freeBeliefsAsEnums()).toList(),
-            useFreeBeliefs = true
-        )
+        val hadReligion = civInfo.religionManager.religion != null
+        val chosenBeliefs = chooseBeliefs(civInfo, civInfo.religionManager.freeBeliefsAsEnums()).toList()
+        civInfo.religionManager.chooseBeliefs(chosenBeliefs, useFreeBeliefs = true)
+        val religion = civInfo.religionManager.religion
+        com.unciv.logic.automation.RulerOverrides.noteBeliefs(civInfo, if (!hadReligion) "founded our pantheon" else if (religion == null || !religion.isMajorReligion()) "added to our pantheon" else "added to ${religion.getReligionDisplayName()}", chosenBeliefs)
     }
 
     @Readonly private fun chooseBeliefs(civInfo: Civilization, beliefsToChoose: Counter<BeliefType>): HashSet<Belief> {

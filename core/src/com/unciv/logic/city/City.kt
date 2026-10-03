@@ -22,6 +22,7 @@ import com.unciv.logic.map.tile.RoadStatus
 import com.unciv.logic.map.tile.Tile
 import com.unciv.models.Counter
 import com.unciv.models.ruleset.Building
+import com.unciv.models.ruleset.INonPerpetualConstruction
 import com.unciv.models.ruleset.tile.TileResource
 import com.unciv.models.ruleset.unique.GameContext
 import com.unciv.models.ruleset.unique.Unique
@@ -94,6 +95,11 @@ class City : IsPartOfGameInfoSerialization, INamed {
         if (civ.isHuman())
             disabledConstructions.addAll(civ.disabledCityConstructions)
     }
+    /** A construction the automation may not choose for this city under its player's standing orders: this city's disabled list, and for a ruled civ its
+     *  ruler's never-build list (RulerOverrides.forbidden, kept by the host). Every routine of the officials' that picks what to build or buy asks this -
+     *  the player's own queue, build and purchase orders are not bound by it. One gate: the military chooser had none (audit 2026-10-04) */
+    @Readonly fun isDisabledForAutomation(construction: INonPerpetualConstruction) =
+        civ.hasPlayerStanding() && (construction.name in disabledConstructions || com.unciv.logic.automation.RulerOverrides.forbidden?.invoke(civ, construction) == true)
 
     @Transient  // CityStats has no serializable fields
     var cityStats = CityStats(this)

@@ -230,6 +230,7 @@ object Automation {
         val militaryUnits = availableUnits
             .filter { it.isMilitary }
             .filterNot { removeShips && it.isWaterUnit }
+            .filterNot { city.isDisabledForAutomation(it) } // the player's disabled list and a ruler's never-build: tryTrainMilitaryUnit passes every unit of the ruleset, ungated
             .filter { allowSpendingResource(city.civ, it) }
             .filterNot {
                 // units that can't attack may be very strong meatshields, but current AI
@@ -337,6 +338,8 @@ object Automation {
             return true
 
         val civResources = civInfo.getCivResourcesByName()
+        // What a ruled civ's own pending proposals promise away is not the officials' to build with: the deal would be voided the turn the construction took it
+        @Readonly fun held(resource: String) = civResources[resource]!! - RulerOverrides.promisedOf(civInfo, resource)
 
         // Rule of thumb: reserve 2-3 for spaceship, then reserve half each for buildings and units
         // Assume that no buildings provide any resources
@@ -355,7 +358,7 @@ object Automation {
             }
 
             // Make sure we have some for space
-            if (resource in civInfo.gameInfo.spaceResources && civResources[resource]!! - amount - futureForBuildings - futureForUnits < 2) {
+            if (resource in civInfo.gameInfo.spaceResources && held(resource) - amount - futureForBuildings - futureForUnits < 2) {
                 return false
             }
 
@@ -375,12 +378,12 @@ object Automation {
 
             if (construction is Building) {
                 // Will more than half the total resources be used for buildings after this construction?
-                if (civResources[resource]!! + usedForUnits < usedForBuildings + amount + futureForBuildings) {
+                if (held(resource) + usedForUnits < usedForBuildings + amount + futureForBuildings) {
                     return false
                 }
             } else {
                 // Will more than half the total resources be used for units after this construction?
-                if (civResources[resource]!! + usedForBuildings < usedForUnits + amount + futureForUnits) {
+                if (held(resource) + usedForBuildings < usedForUnits + amount + futureForUnits) {
                     return false
                 }
             }
