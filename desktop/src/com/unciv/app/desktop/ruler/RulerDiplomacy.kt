@@ -660,11 +660,15 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
     fun dealsInForce(civ: Civilization): Set<String> =
         civ.diplomacy.values.flatMap { manager -> manager.trades.map { "${manager.otherCivName}: ${it.brief(civ.gameInfo).replace(DURATION, "")}" } }.toSet() // durations tick down, the deal is the same
 
+    /** The partners whose swept deals our own line has named, by realm, until the next bookkeeping: the engine's "X from Y has ended" notices for them are not told again */
+    val sweptTold = HashMap<String, MutableSet<String>>()
+
     /** The deals a declaration of war swept away - the engine clears them without a word, and between turns the turn's compare cannot see it - by partner,
      *  a Research Agreement marked for the gold already paid. Defensive pacts are left out: the declaration's own line names those (audit 2026-10-03) */
     fun lostToWar(civ: Civilization, before: Set<String>): String? {
         val gone = (before - dealsInForce(civ)).filter { Constants.defensivePact !in it }
         if (gone.isEmpty()) return null
+        sweptTold.getOrPut(civ.civName) { HashSet() } += gone.map { it.substringBefore(": ") }
         return gone.groupBy({ it.substringBefore(": ") }, { it.substringAfter(": ") }).entries.joinToString("; ") { (partner, terms) ->
             "with $partner - " + terms.joinToString("; ") { it.replace(RESEARCH_PAID, "a Research Agreement ($1 gold from each side, paid and now lost)") } }
     }
@@ -1039,7 +1043,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
     }
 
     /** Forget everything of one game */
-    fun reset() { renewals.clear(); pending.clear(); officialsPending.clear(); peaceOfferedOn.clear(); dealOfferedOn.clear(); demandOfferedOn.clear(); friendshipOfferedOn.clear(); friendshipsAsked.clear(); oursOut.clear(); counters.clear(); gone.clear() }
+    fun reset() { renewals.clear(); pending.clear(); officialsPending.clear(); peaceOfferedOn.clear(); dealOfferedOn.clear(); demandOfferedOn.clear(); friendshipOfferedOn.clear(); friendshipsAsked.clear(); oursOut.clear(); counters.clear(); gone.clear(); sweptTold.clear() }
 
     /** What a restart would otherwise lose: which proposals are ours to settle, and when each waiting offer was first seen */
     fun toMap() = mapOf(

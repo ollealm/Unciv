@@ -1145,10 +1145,13 @@ object RulerHost {
         val takenWith = HashMap<String, MutableList<String>>()
         // The engine tells each power's joining a war as its own notice - seven city-states, seven lines: folded into one per side and foe, as the world's events are
         val joinNotice = Regex("^\\[(.+?)\\] has joined (?:\\[(.+?)\\]|us) in the war against (?:\\[(.+)\\]|us)!$")
+        val sweptNotice = Regex("^\\[.+?\\] from \\[(.+)\\] has ended$")
         val joins = notifications.mapNotNull { n -> joinNotice.find(n.text)?.let { m -> Triple(m.groupValues[1], m.groupValues[2].ifEmpty { "us" }, m.groupValues[3].ifEmpty { "us" }) } }
         for (notification in notifications) {
             if (noise.any { it in notification.text }) continue
             if (joinNotice.containsMatchIn(notification.text)) continue // told folded, below
+            // A deal the war swept away, already named in our own line with the declaration
+            if (diplomacy.sweptTold[civ.civName]?.let { partners -> sweptNotice.find(notification.text)?.groupValues?.get(1) in partners } == true) continue
             val came = Regex("^\\[(.+)\\] has been built in \\[(.+)\\]$").find(notification.text)?.takeIf { it.groupValues[2] in takenNow }
             if (came != null) { takenWith.getOrPut(came.groupValues[2]) { ArrayList() } += came.groupValues[1]; continue }
             if (flipped.any { "[$it]" in notification.text && ("allied with" in notification.text || "lost our alliance" in notification.text) }) continue
@@ -1169,6 +1172,7 @@ object RulerHost {
                     val target = Regex("has \\w+\\s+(?:the defence of )?(?:our )?\\[([^\\]]+)\\]").find(notification.text)?.groupValues?.get(1) ?: "one of ours"
                     shipRaids.getOrPut(civ.civName) { HashMap() }[ship.id] = ShipRaid(turn, ship.civ.civName, target, RulerUnits.where(civ, from)) } }
         }
+        diplomacy.sweptTold.remove(civ.civName)
         shipRaids[civ.civName]?.values?.removeAll { turn - it.turn > 5 }
         // A ruler's queue binds until it has run out
         // (a queue that ran out mid-turn is refilled by the officials at once, so "empty" is not enough of a test:
