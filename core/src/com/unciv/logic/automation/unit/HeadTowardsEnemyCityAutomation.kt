@@ -43,8 +43,7 @@ object HeadTowardsEnemyCityAutomation {
             .sortedBy { it.aerialDistanceTo(unit.currentTile) }
             .firstOrNull { unit.movement.canMoveTo(it) && unit.movement.canReach(it) }
             ?: return false
-        unit.movement.headTowards(ringTile)
-        return true
+        return com.unciv.logic.automation.RulerOverrides.tryHeadTowards(unit, ringTile)
     }
 
     @Readonly

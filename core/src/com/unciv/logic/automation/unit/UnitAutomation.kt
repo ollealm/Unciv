@@ -158,7 +158,7 @@ object UnitAutomation {
         if (unit.isEmbarked() && unit.baseUnit.isLandUnit) {
             val ashore = unit.getTile().getTilesInDistance(10).filter { it.isLand && unit.movement.canMoveTo(it) }
                 .sortedWith(compareBy({ it.getOwner() != unit.civ }, { it.aerialDistanceTo(unit.getTile()) })).take(8).firstOrNull { unit.movement.canReach(it) }
-            if (ashore != null) { unit.movement.headTowards(ashore); return }
+            if (ashore != null && com.unciv.logic.automation.RulerOverrides.tryHeadTowards(unit, ashore)) return
             if (tryHeadHome(unit)) return
         }
 
@@ -382,7 +382,7 @@ object UnitAutomation {
             .filter { !underGuns(it) && unit.getDamageFromTerrain(it) <= 0 && unit.movement.canMoveTo(it) }
             .minWithOrNull(compareBy({ it.getOwner() != unit.civ }, { home?.let { h -> it.aerialDistanceTo(h) } ?: 0 }))
         if (shelter != null) unit.movement.moveToTile(shelter)
-        else if (home != null) unit.movement.headTowards(home) // every tile in reach is under the guns: at least walk the way home
+        else if (home != null) com.unciv.logic.automation.RulerOverrides.tryHeadTowards(unit, home) // every tile in reach is under the guns: at least walk the way home, if it opens (France's Cannon, Run 20 T187)
         return true
     }
 
@@ -391,8 +391,7 @@ object UnitAutomation {
         for (city in unit.civ.cities.sortedBy { it.getCenterTile().aerialDistanceTo(unit.currentTile) }.take(2)) {
             val tile = city.getCenterTile().getTilesInDistance(2).sortedBy { it.aerialDistanceTo(unit.currentTile) }
                 .firstOrNull { unit.movement.canMoveTo(it) && unit.movement.canReach(it) } ?: continue
-            unit.movement.headTowards(tile)
-            return true
+            if (com.unciv.logic.automation.RulerOverrides.tryHeadTowards(unit, tile)) return true
         }
         return false
     }

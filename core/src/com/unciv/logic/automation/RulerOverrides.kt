@@ -121,6 +121,22 @@ object RulerOverrides {
     @yairm210.purity.annotations.Readonly
     fun isUnderOrders(unit: MapUnit) = unit.civ.civID in ruledCivs && hasOrder?.invoke(unit) == true
 
+    /** A step toward a tile that may not open after all (the path reckoning and the march disagree): taken if it can be, else the unit stands where it is.
+     *  For the moves this fork added to the officials' routines - an unreachable step there once stopped the whole turn (Run 20, T187) */
+    fun tryHeadTowards(unit: MapUnit, tile: Tile): Boolean =
+        try { unit.movement.headTowards(tile); true } catch (_: com.unciv.logic.map.mapunit.movement.UnitMovement.UnreachableDestinationException) { false }
+
+    /** Called with (civ, unit, why) when a ruled civ's unit could not be moved by the officials this turn: the turn goes on without it */
+    @Volatile var unitNotMoved: ((Civilization, MapUnit, String) -> Unit)? = null
+    /** A ruled civ's unit moved by [move]: whatever goes wrong costs that unit its turn, never the turn itself. Other civs keep the engine's habit */
+    fun guarded(unit: MapUnit, move: () -> Unit) {
+        if (unit.civ.civID !in ruledCivs) return move()
+        try { move() } catch (ex: Exception) {
+            System.err.println("The officials could not move ${unit.civ.civName}'s ${unit.name} #${unit.id}: $ex")
+            unitNotMoved?.invoke(unit.civ, unit, if (ex is com.unciv.logic.map.mapunit.movement.UnitMovement.UnreachableDestinationException) "the way the officials chose for it would not open" else "the officials' routine failed on it")
+        }
+    }
+
     /** Called with (civ, unit, why) when a ruled civ's automation disbands a unit for a reason of its own, before it goes */
     @Volatile var unitDisbanded: ((com.unciv.logic.civilization.Civilization, MapUnit, String) -> Unit)? = null
 

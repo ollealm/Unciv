@@ -121,6 +121,7 @@ object RulerHost {
             false
         } }
         RulerOverrides.hasOrder = { unit -> unit.id in units.orders }
+        RulerOverrides.unitNotMoved = { civ, unit, why -> log(civ, "Our ${unit.name} #${unit.id} could not be moved this turn: $why. It stands ${describeWhere(civ, unit.getTile())}, and the officials try again next turn.") }
         units.researchRefill = { civ -> applyResearchGoals(civ) }
         RulerOverrides.rulersFirst = { civ -> units.rearmDue(civ) }
         RulerOverrides.worldVoteOf = { civ -> castWorldVote(civ) }

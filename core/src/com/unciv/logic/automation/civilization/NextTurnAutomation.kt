@@ -422,9 +422,9 @@ object NextTurnAutomation {
         for (unit in sortedUnits) {
             // settlers need to move before automateSettlerEscorting(),
             // move spaceship parts before that to make sure we're not blocking them
-            if (unit.hasUnique(UniqueType.SpaceshipPart) || unit.hasUnique(UniqueType.FoundCity)) {
-                if (RulerOverrides.unitHandler?.invoke(unit) == true) continue // the ruler gave this unit its own orders
-                UnitAutomation.automateUnitMoves(unit)
+            if (unit.hasUnique(UniqueType.SpaceshipPart) || unit.hasUnique(UniqueType.FoundCity)) RulerOverrides.guarded(unit) {
+                if (RulerOverrides.unitHandler?.invoke(unit) != true) // the ruler gave this unit its own orders
+                    UnitAutomation.automateUnitMoves(unit)
             }
         }
 
@@ -434,9 +434,9 @@ object NextTurnAutomation {
 
         for (unit in sortedUnits) {
             // spaceship parts and settlers have already moved
-            if (!unit.hasUnique(UniqueType.SpaceshipPart) && !unit.hasUnique(UniqueType.FoundCity)) {
-                if (RulerOverrides.unitHandler?.invoke(unit) == true) continue
-                UnitAutomation.automateUnitMoves(unit)
+            if (!unit.hasUnique(UniqueType.SpaceshipPart) && !unit.hasUnique(UniqueType.FoundCity)) RulerOverrides.guarded(unit) {
+                if (RulerOverrides.unitHandler?.invoke(unit) != true)
+                    UnitAutomation.automateUnitMoves(unit)
             }
         }
     }
