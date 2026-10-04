@@ -2153,7 +2153,7 @@ object RulerHost {
             // Income and expenses by source were never cited; what the officials spent is (compaction 2026-10-03)
             "officialsSpentLastTurn" to officialsSpent[civ.civName]?.takeIf { it.isNotEmpty() },
             "happiness" to civ.getHappiness(),
-            "happinessBreakdown" to civ.stats.getHappinessBreakdown().filter { it.value != 0f }.mapValues { it.value.toInt() },
+            // happinessBreakdown and techsKnown were cut after the removal league (Run 31, 2026-10-04): mood was managed from happiness and the warnings, and the known techs cost two refusals in 108 turns - the research reply says "already known"
             // Warnings the advisor acknowledged fold to their first clause while they stand
             *warnings(civ, sites).partition { ackKey(it) in (orders[civ.civName]?.acknowledged ?: emptyList<String>()) }.let { (acknowledged, shown) ->
                 arrayOf("warnings" to shown, "warningsAcknowledged" to acknowledged.map { firstClause(it) }.ifEmpty { null }) },
@@ -2163,7 +2163,6 @@ object RulerHost {
             "researching" to civ.tech.currentTechnologyName(),
             "researchQueue" to civ.tech.techsToResearch,
             "techsResearched" to civ.tech.techsResearched.size,
-            "techsKnown" to civ.tech.techsResearched.sorted().joinToString(", "),
             "spaceship" to told(civ, "spaceship"),
             "policies" to civ.policies.getAdoptedPolicies().toList(),
             "culture" to mapOf("stored" to civ.policies.storedCulture, "neededForNextPolicy" to civ.policies.getCultureNeededForNextPolicy(),
@@ -2483,7 +2482,7 @@ object RulerHost {
     private fun warnings(civ: Civilization, citySites: List<String>? = null): List<String> {
         val warnings = ArrayList<String>()
         if (civ.getHappiness() < 0) warnings += "The people are unhappy (${civ.getHappiness()}): ${if (civ.getHappiness() <= -10) "no city grows at all" else "every city's growth is cut by three quarters"} while the mood is below zero, and production suffers - farming for food does little until the mood is mended. " +
-            "The mood is a sum, and happinessBreakdown shows its parts: every citizen costs one and every city a few; each distinct luxury gives four, and buildings, policies and wonders what they say (the build lists mark a building's mood as +N). A wide, populous realm settles a little below zero and growth is its brake; what raises it is a luxury not yet ours, a mood building not yet raised, a policy or wonder that gives it, a belief of our religion, or fewer and smaller cities."
+            "The mood is a sum: every citizen costs one and every city a few; each distinct luxury gives four, and buildings, policies and wonders what they say (the build lists mark a building's mood as +N). A wide, populous realm settles a little below zero and growth is its brake; what raises it is a luxury not yet ours, a mood building not yet raised, a policy or wonder that gives it, a belief of our religion, or fewer and smaller cities."
         if (civ.tech.currentTechnologyName() == null) warnings += "Research is idle - give research goals."
         val standing = orders[civ.civName]
         val goalsLeft = standing?.research?.count { !reached(civ, it) } ?: 0
