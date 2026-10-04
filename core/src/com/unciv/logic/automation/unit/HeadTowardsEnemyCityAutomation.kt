@@ -85,11 +85,20 @@ object HeadTowardsEnemyCityAutomation {
         // reach and walks. Unruled civs go as upstream has them
         if (com.unciv.logic.automation.RulerOverrides.goesBySea(unit, shortestPath)) {
             // Ashore with a way there by land, it walks it: the pathfinder's hop along the coast would embark it, and the landing bring it back -
-            // landed, at sea, landed, or held at its landing for good (review of the landings, 2026-10-05). Without one, it goes by sea to a landing that has
-            if (!unit.isEmbarked()) keptAshore(unit) { unit.movement.getShortestPath(closestReachableEnemyCity).takeIf { it.isNotEmpty() }?.let { headTowardsEnemyCity(unit, closestReachableEnemyCity, it) } }
-                ?.let { return it }
+            // landed, at sea, landed, or held at its landing for good (review of the landings, 2026-10-05). Without one, it goes by sea to a landing that has.
+            // A way planned with no embarking can still cross water (that bars ending a move at sea, not passing through): such a way is none. The walk is
+            // its own routine, never this one again - calling this one recursed without end and stopped Run 32 at T169
+            if (!unit.isEmbarked()) keptAshore(unit) {
+                unit.movement.getShortestPath(closestReachableEnemyCity).takeIf { way -> way.isNotEmpty() && way.none { it.isWater } }
+                    ?.let { way -> walkTowardsEnemyCity(unit, closestReachableEnemyCity, way) }
+            }?.let { return it }
             return headForLanding(unit, closestReachableEnemyCity)
         }
+        return walkTowardsEnemyCity(unit, closestReachableEnemyCity, shortestPath)
+    }
+
+    /** Upstream's march on an enemy city along [shortestPath]: straight on when far, to the landing grounds round it while it cannot be taken soon */
+    private fun walkTowardsEnemyCity(unit: MapUnit, closestReachableEnemyCity: Tile, shortestPath: List<Tile>): Boolean {
         val unitDistanceToTiles = unit.movement.getDistanceToTiles()
 
         val unitRange = unit.getRange()
@@ -149,8 +158,8 @@ object HeadTowardsEnemyCityAutomation {
                 if (next !in reached && next.isLand && !next.isImpassible() && next.aerialDistanceTo(cityTile) <= 10 && (next.getOwner() == null || next.canCivPassThrough(unit.civ)))
                     { reached += next; queue += next }
         }
-        fun landing(tile: Tile) = tile.isLand && tile.getContinent() == landmass && tile in byLand && (tile !in peril || tile == start) && tile.aerialDistanceTo(cityTile) in minDistanceFromCityToConsiderForLandingArea..10 &&
-            unit.getDamageFromTerrain(tile) <= 0 && (tile == start || unit.movement.canMoveTo(tile))
+        fun landing(tile: Tile) = tile.isLand && tile.getContinent() == landmass && tile in byLand && (tile !in peril || tile == start) &&
+            tile.aerialDistanceTo(cityTile) in minDistanceFromCityToConsiderForLandingArea..10 && unit.getDamageFromTerrain(tile) <= 0 && (tile == start || unit.movement.canMoveTo(tile))
         // The ways by sea out of reach: water not within reach, and our own side's land to walk along to the shore; a landing ends a way
         val came = HashMap<Tile, Tile>().apply { put(start, start) }
         val depth = HashMap<Tile, Int>().apply { put(start, 0) }
@@ -167,14 +176,26 @@ object HeadTowardsEnemyCityAutomation {
                 came[next] = tile; depth[next] = depth[tile]!! + 1; queue.addLast(next)
             }
         }
-        val target = landings.minWithOrNull(compareBy({ it.aerialDistanceTo(cityTile) }, { depth[it] }))
+        // The landing it was bound for last turn, while it still stands: a host whose landings flicker as the enemy moves turns about at sea for good
+        val heading = com.unciv.logic.automation.RulerOverrides.headingFor[unit.id]?.let { unit.civ.gameInfo.tileMap.getIfTileExistsOrNull(it.x, it.y) }
+        val target = heading?.takeIf { it in landings } ?: landings.minWithOrNull(compareBy({ it.aerialDistanceTo(cityTile) }, { depth[it] }))
         val open = unit.movement.getDistanceToTiles().keys.filter { (it == start || unit.movement.canMoveTo(it)) && !(it.isWater && it in peril) }.toHashSet()
         val step = if (target == null) {
+            // No shore out of reach: it keeps out of reach, and the court sees it hold (the posture's hostAtSea, and the log once)
             if (start in peril) open.minByOrNull { tile -> unit.civ.cities.minOfOrNull { it.getCenterTile().aerialDistanceTo(tile) } ?: 0 } else null
         } else {
-            // The farthest tile along the way that this turn's movement reaches
-            generateSequence(target) { tile -> came[tile]?.takeIf { it != tile } }.firstOrNull { it in open }
+            // The reachable tile nearest the landing by the way's own waters: a host strung out along a narrow channel stood each on the next one's
+            // way and none moved (Siam, Run 32); round a tile taken by one of our own it goes alongside
+            val toLanding = HashMap<Tile, Int>().apply { put(target, 0) }
+            val back = ArrayDeque(listOf(target))
+            while (back.isNotEmpty()) {
+                val tile = back.removeFirst()
+                for (next in tile.neighbors) if (next !in toLanding && next in depth) { toLanding[next] = toLanding[tile]!! + 1; back.addLast(next) }
+            }
+            open.filter { it in toLanding }.minByOrNull { toLanding[it]!! }?.takeIf { toLanding[it]!! < (toLanding[start] ?: Int.MAX_VALUE) }
         }
+        if (target != null) com.unciv.logic.automation.RulerOverrides.headingFor[unit.id] = target.position else com.unciv.logic.automation.RulerOverrides.headingFor.remove(unit.id)
+        if (target != start && unit.isEmbarked()) com.unciv.logic.automation.RulerOverrides.noteLanding(unit, target, cityTile)
         if (step != null && step != start) unit.movement.moveToTile(step)
         return true
     }

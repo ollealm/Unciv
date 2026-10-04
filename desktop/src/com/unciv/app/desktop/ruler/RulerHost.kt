@@ -217,8 +217,10 @@ object RulerHost {
     private val faults = (System.getenv("RULER_FAULT") ?: "").split(",").map { it.trim() }.filter { it.isNotEmpty() }.toMutableSet()
     private fun fault(site: String, civ: String? = null) {
         if (faults.isEmpty()) return
-        val hit = faults.firstOrNull { it == site || (civ != null && it == "$site:$civ") } ?: return
+        // "overflow:<site>" plants a routine that recursed without end (the landings at Run 32's T169) in place of an ordinary failure
+        val hit = faults.firstOrNull { it.removePrefix("overflow:").let { planted -> planted == site || (civ != null && planted == "$site:$civ") } } ?: return
         faults.remove(hit)
+        if (hit.startsWith("overflow:")) throw StackOverflowError("RULER_FAULT $hit")
         throw IllegalStateException("RULER_FAULT $hit")
     }
 
@@ -493,6 +495,7 @@ object RulerHost {
         Memory("warsDeclared", true, { warsDeclared.clear() }, { warsDeclared.map { it.toString() } }, { json -> json?.asStringArray()?.forEach { warsDeclared += WarRecord.parse(it) } }),
         Memory("trail", true, { trail.clear() }, { trail.toMap() }, { json -> trail.load(json) }),
         Memory("ages", true, { ages.clear() }, { ages.toMap() }, { json -> ages.load(json) }),
+        Memory("hostAtSea", false, { hostAtSea.clear(); holdingTold.clear(); RulerOverrides.landings.clear(); RulerOverrides.headingFor.clear() }),
         Memory("atomicSeen", true, { atomicSeen = false }, { atomicSeen }, { json -> atomicSeen = json?.asBoolean() ?: false }),
         Memory("lockedCities", true, { RulerOverrides.lockedCities.clear() }, { RulerOverrides.lockedCities.toList() }, { json -> json?.asStringArray()?.let { RulerOverrides.lockedCities += it } }),
         Memory("focusedCities", true, { RulerOverrides.focusedCities.clear() }, { RulerOverrides.focusedCities.toList() }, { json -> json?.asStringArray()?.let { RulerOverrides.focusedCities += it } }),
@@ -1359,6 +1362,7 @@ object RulerHost {
         val turn = civ.gameInfo.turns
         val enemies = RulerCampaigns.enemiesOf(civ)
         units.noteStanding(civ)
+        noteHostAtSea(civ)
         // The game's own notifications first - they cover research, buildings, combat, diplomacy. The turn's entry in the log holds what was
         // on the desk when our turn ended; what later powers did on their turns is still in the live list. Both are read now, in one window,
         // less what the last bookkeeping already read (the same objects, since moved into the log)
@@ -1861,6 +1865,28 @@ object RulerHost {
         }
     }
 
+    /** Where each ruled realm's host at sea is bound, as the last bookkeeping found it: one line per landing, shown with the posture */
+    private val hostAtSea = HashMap<String, List<String>>()
+    /** The cities each realm's host found no shore out of reach near last turn: a host holding at sea is told once, when it begins to */
+    private val holdingTold = HashMap<String, Set<String>>()
+    private fun noteHostAtSea(civ: Civilization) {
+        val plans = RulerOverrides.landings.remove(civ.civID).orEmpty().mapNotNull { (id, plan) -> civ.units.getUnitById(id)?.takeIf { it.isEmbarked() }?.let { it to plan } }
+        val cityOf = { plan: RulerOverrides.Landing -> plan.city.getCity()?.name ?: "the enemy" }
+        hostAtSea[civ.civName] = plans.groupBy { (_, plan) -> plan.landing to cityOf(plan) }.map { (key, group) ->
+            val (landing, city) = key
+            val longest = group.maxOf { units.turnsAtSea(it.first) }
+            RulerCampaigns.company(group.map { it.first.name }).replaceFirstChar { it.uppercase() } +
+                (if (landing == null) " holding at sea out of reach: no shore near $city lies out of reach of the enemy's guns"
+                    else " crossing to ${if (group.size == 1) "its" else "their"} landing at ${RulerCampaigns.placeOf(civ, landing)}, against $city") +
+                " (${RulerCampaigns.count(longest)} turn${Prose.plural(longest)} at sea)"
+        }
+        // A host with no shore out of reach holds at sea: said once, when it begins - the court may choose another aim, or wait
+        val holding = plans.filter { it.second.landing == null }.map { cityOf(it.second) }.toSet()
+        for (city in holding - (holdingTold[civ.civName] ?: emptySet()))
+            log(civ, "Our host holds at sea out of reach: no shore near $city lies out of reach of the enemy's guns, and it will not land under them.")
+        holdingTold[civ.civName] = holding
+    }
+
     /** GameInfo.turns only moves once every player has played, so whatever is logged during a turn - or by an order between turns - belongs to the turn about to be counted */
     private fun stamp() = if (settling) game().turns else game().turns + 1
 
@@ -2248,7 +2274,11 @@ object RulerHost {
             "tradeOffers" to diplomacy.tradeOffers(civ) + diplomacy.friendshipOffers(civ),
             "demands" to diplomacy.demands(civ),
             "dealsLedger" to diplomacy.ledger(civ, lookInTurns + 1),
-            "standingOrders" to orders[civ.civName]?.toMap(civ)
+            // The posture with where its host at sea is bound: the generals' own craft, told, no decision asked
+            "standingOrders" to orders[civ.civName]?.toMap(civ)?.let { standing ->
+                val posture = standing["posture"]
+                if (posture is Map<*, *> && !hostAtSea[civ.civName].isNullOrEmpty()) standing + ("posture" to posture + ("hostAtSea" to hostAtSea[civ.civName])) else standing
+            }
         )
     }
 

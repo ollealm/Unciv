@@ -143,6 +143,16 @@ object RulerOverrides {
         return cities.flatMap { city -> city.getCenterTile().getTilesInDistance(city.getBombardRange()) }.toHashSet() + enemyReach(unit)
     }
 
+    /** Where a ruled civ's host at sea is bound this turn: each unit's landing (null: no shore out of reach, it holds out of reach) and the city it goes
+     *  against. Written by the landing routine, read and cleared by the host's bookkeeping */
+    class Landing(val landing: Tile?, val city: Tile)
+    val landings = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ConcurrentHashMap<Int, Landing>>()
+    fun noteLanding(unit: MapUnit, landing: Tile?, city: Tile) {
+        landings.getOrPut(unit.civ.civID) { java.util.concurrent.ConcurrentHashMap() }[unit.id] = Landing(landing, city)
+    }
+    /** The landing each unit at sea was last bound for, by unit id: kept while it stands, so the host does not turn about as the enemy moves */
+    val headingFor = java.util.concurrent.ConcurrentHashMap<Int, com.unciv.logic.map.HexCoord>()
+
     /** Does this ruled civ's land unit go by sea to the city - at sea now, or with water on its way? Then it lands out of reach and walks (headForLanding) */
     @yairm210.purity.annotations.Readonly
     fun goesBySea(unit: MapUnit, path: List<Tile>): Boolean =
@@ -309,7 +319,11 @@ object RulerOverrides {
 
     fun guarded(unit: MapUnit, move: () -> Unit) {
         if (unit.civ.civID !in ruledCivs) return move()
-        try { fault?.invoke("move", unit.civ); move() } catch (ex: Exception) {
+        // A routine that recurses without end is caught too: it costs the unit its turn, not the game (Run 32 stopped at T169 on one)
+        try { fault?.invoke("move", unit.civ); move() } catch (ex: StackOverflowError) {
+            System.err.println("The officials could not move ${unit.civ.civName}'s ${unit.name} #${unit.id}: $ex")
+            unitNotMoved?.invoke(unit.civ, unit, "the officials' routine failed on it")
+        } catch (ex: Exception) {
             System.err.println("The officials could not move ${unit.civ.civName}'s ${unit.name} #${unit.id}: $ex")
             unitNotMoved?.invoke(unit.civ, unit, if (ex is com.unciv.logic.map.mapunit.movement.UnitMovement.UnreachableDestinationException) "the way the officials chose for it would not open" else "the officials' routine failed on it")
         }
@@ -320,7 +334,10 @@ object RulerOverrides {
     /** A block of the officials' work for a ruled civ ([what]: "escorting our settlers"): whatever goes wrong skips that block for the turn, never the turn itself */
     fun guardedBlock(civ: Civilization, what: String, block: () -> Unit) {
         if (civ.civID !in ruledCivs) return block()
-        try { block() } catch (ex: Exception) {
+        try { block() } catch (ex: StackOverflowError) {
+            System.err.println("The officials could not finish $what for ${civ.civName}: $ex")
+            blockFailed?.invoke(civ, what, "their routine failed")
+        } catch (ex: Exception) {
             System.err.println("The officials could not finish $what for ${civ.civName}: $ex")
             blockFailed?.invoke(civ, what, if (ex is com.unciv.logic.map.mapunit.movement.UnitMovement.UnreachableDestinationException) "a way they chose would not open" else "their routine failed")
         }

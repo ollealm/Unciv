@@ -137,6 +137,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         }
         stillSince.keys.retainAll(civ.gameInfo.civilizations.flatMap { c -> c.units.getCivUnits().map { it.id } }.toSet())
     }
+    /** How many turns, this one counted, a land unit of ours has been at sea */
+    fun turnsAtSea(unit: MapUnit) = embarkedSince[unit.id]?.let { unit.civ.gameInfo.turns - it + 1 } ?: 0
     fun turnsStill(unit: MapUnit) = stillSince[unit.id]?.let { unit.civ.gameInfo.turns - it.second } ?: 0
 
     fun handle(unit: MapUnit): Boolean {

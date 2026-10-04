@@ -29,6 +29,9 @@ object TargetHelper {
         val tilesWithEnemies: HashSet<Tile> = HashSet()
         val tilesWithoutEnemies: HashSet<Tile> = HashSet()
         for ((reachableTile, movementLeft) in tilesToAttackFrom) {  // tiles we'll still have energy after we reach there
+            // A ruled civ's soldier does not put to sea to strike: it would end its turn embarked under the city it struck, where Siam's host died in
+            // the harbours of Hamburg and Quebec City, moved there by the assault routine (Run 32). Ships and soldiers already at sea are as they were
+            if (reachableTile.isWater && reachableTile != unit.currentTile && unit.baseUnit.isLandUnit && unit.civ.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) continue
             // If we are a melee unit that is escorting, we only want to be able to attack from this
             // tile if the escorted unit can also move into the tile we are attacking if we kill the enemy unit.
             if (unit.baseUnit.isMelee() && unit.isEscorting()) {
