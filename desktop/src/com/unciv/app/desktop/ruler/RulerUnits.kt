@@ -569,9 +569,10 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         val order = orders[unit.id]
         val state = when {
             order != null -> "under orders: ${order.action}" + (order.to?.let { " to $it" } ?: "") + (if (order.x != null) " at (${order.x},${order.y})" else "")
-            unit.action?.startsWith("Fortify") == true -> "fortified"
-            unit.action == "Sleep" -> "sleeping"
-            unit.action?.contains("explore", ignoreCase = true) == true -> "exploring"
+            // Whose doing it is: an order of ours reads "under orders"; these are the officials'
+            unit.action?.startsWith("Fortify") == true -> "fortified by the officials"
+            unit.action == "Sleep" -> "asleep, by the officials"
+            unit.action?.contains("explore", ignoreCase = true) == true -> "exploring, by the officials"
             else -> "automated"
         }
         val health = if (unit.health < 100) ", ${unit.health} hp" else ""

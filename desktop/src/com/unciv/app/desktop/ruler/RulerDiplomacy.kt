@@ -190,6 +190,14 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
     private fun nearVictoryNote(other: Civilization?, offers: List<TradeOffer> = emptyList()) = other?.let { nearVictory(it) }?.let { fact ->
         " (note: $fact" + (if (offers.any { it.name == Constants.researchAgreement }) "; a research agreement adds to its learning" else "") + ")" } ?: ""
 
+    /** [other]'s arms against ours, in the words of a comparison: "stronger than ours, clearly", "about as strong as ours" */
+    fun armsAgainstOurs(civ: Civilization, other: Civilization): String {
+        val ours = civ.getStatForRanking(com.unciv.ui.screens.victoryscreen.RankingType.Force).coerceAtLeast(1).toDouble()
+        val theirs = other.getStatForRanking(com.unciv.ui.screens.victoryscreen.RankingType.Force).coerceAtLeast(1).toDouble()
+        val ratio = maxOf(ours, theirs) / minOf(ours, theirs)
+        return if (ratio < 1.15) "about as strong as ours" else "${if (theirs > ours) "stronger" else "weaker"} than ours, ${Prose.lead(ratio)}"
+    }
+
     /** Who answers what is put to [other], in one wording wherever it is said: an advised court's advisor at its look-in, or the officials on their turn */
     fun whoAnswers(other: Civilization): String =
         if (other.civID in RulerOverrides.ruledCivs) "${other.civName} is an advised court: its advisor answers at its next look-in" else "they answer on their turn"
@@ -607,7 +615,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
             val theirs = other.getDiplomacyManager(civ)
             val entry = linkedMapOf<String, Any?>(
                 "civ" to other.civName,
-                "status" to ours.diplomaticStatus.name,
+                // The engine's enum in words: "Peace", "War", "a defensive pact" - not "DefensivePact"
+                "status" to when (ours.diplomaticStatus) { DiplomaticStatus.DefensivePact -> "a defensive pact"; else -> ours.diplomaticStatus.name.lowercase() },
                 "theirAttitude" to theirs?.relationshipLevel()?.name,
             )
             if (other.isCityState) {
@@ -623,7 +632,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
                 if (civ.hasUnique(UniqueType.CityStateCanBeBoughtForGold)) entry["marriage"] = marriageState(civ, other)
             } else {
                 entry["cities"] = other.cities.size
-                entry["militaryStrength"] = other.getStatForRanking(com.unciv.ui.screens.victoryscreen.RankingType.Force)
+                // The engine's score is no measure a reader can hold (87723 against 47825 read as "twice their strength" while the crossing bled): against ours, in words
+                entry["militaryStrength"] = armsAgainstOurs(civ, other)
                 // What the bare figure hides: the age of their arms (how hard each city hits back is in warEstimate)
                 entry["era"] = other.getEra().name
                 entry["techs"] = other.tech.techsResearched.size
@@ -633,7 +643,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
                 entry["openBordersForUs"] = theirs?.hasOpenBorders ?: false
                 entry["denounced"] = listOfNotNull(ours.takeIf { it.hasFlag(DiplomacyFlags.Denunciation) }?.let { "we denounced them (${it.getFlag(DiplomacyFlags.Denunciation)} turns left)" },
                     theirs?.takeIf { it.hasFlag(DiplomacyFlags.Denunciation) }?.let { "they denounced us (${it.getFlag(DiplomacyFlags.Denunciation)} turns left)" }).joinToString("; ").ifEmpty { null }
-                entry["theirGrievances"] = theirs?.diplomaticModifiers?.filter { it.value < 0 }?.keys?.map { key ->
+                // The engine's own words for what they hold against us, which speak from their side ("You took the alliance we had...")
+                entry["theirGrievancesInTheirWords"] = theirs?.diplomaticModifiers?.filter { it.value < 0 }?.keys?.map { key ->
                     val grievance = com.unciv.logic.civilization.diplomacy.DiplomaticModifiers.safeValueOf(key)
                     (grievance?.text?.removeSuffix("!")?.removeSuffix(".") ?: key) + when (grievance) {
                         com.unciv.logic.civilization.diplomacy.DiplomaticModifiers.UnacceptableDemands -> " (a demand between us, ours of them or our answer to theirs)"
