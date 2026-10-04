@@ -267,7 +267,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 // The first Great Scientist's boost finished the only technology the engine's queue held, and the second found no research under way (Run 19): the goals' next path is set before the boost
                 if (UnitActionType.HurryResearch in wanted && civ.tech.currentTechnologyName() == null) researchRefill(civ)
                 val used = wanted.firstOrNull { UnitActions.invokeUnitAction(unit, it) }
-                if (used != null) { usedByOrder += unit.id; log(civ, "Our ${unit.name} used its ability (${used.name}) ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}${if (used == UnitActionType.SpreadReligion) promiseBroken(civ, unit.getTile(), "religion").orEmpty() else ""}.") }
+                if (used != null) { usedByOrder += unit.id; log(civ, "Our ${unit.name} used its ability (${abilityWord(used)}) ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}${if (used == UnitActionType.SpreadReligion) promiseBroken(civ, unit.getTile(), "religion").orEmpty() else ""}.") }
                 else {
                     order.turnsStuck += 1
                     if (order.turnsStuck == 1) log(civ, "Our ${unit.name} #${unit.id} could not use its ability ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}${order.ability?.let { " ($it)" } ?: ""}: ${abilitiesHere(unit)}. Name one with the order and stand where it applies. It tries again for two more turns, then the order is dropped.")
@@ -749,6 +749,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             "religion" to listOf(UnitActionType.FoundReligion, UnitActionType.EnhanceReligion, UnitActionType.SpreadReligion),
             "golden age" to listOf(UnitActionType.TriggerUnique))
         private fun abilitiesNamed(word: String) = ABILITY_WORDS[word.lowercase().trim()] ?: emptyList()
+        /** An ability as the order names it ("trade mission", "golden age"), never the engine's own name ("ConductTradeMission", "TriggerUnique") */
+        fun abilityWord(action: UnitActionType) = ABILITY_WORDS.entries.firstOrNull { action in it.value }?.key ?: action.name.replace(Regex("(?<=[a-z])(?=[A-Z])"), " ").lowercase()
         /** What makes a unit have each way at all, whatever the tile it stands on */
         private val ABILITY_UNIQUES = mapOf(
             "improvement" to listOf(UniqueType.ConstructImprovementInstantly),
