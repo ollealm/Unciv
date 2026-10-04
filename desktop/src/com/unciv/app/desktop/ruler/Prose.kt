@@ -23,6 +23,12 @@ object Prose {
     /** How far one figure leads another, in the words every comparison uses: by a wide margin (3 times or more), clearly (1.5), by some way (1.15), narrowly */
     fun lead(ratio: Double): String = when { ratio >= 3 -> "by a wide margin"; ratio >= 1.5 -> "clearly"; ratio >= 1.15 -> "by some way"; else -> "narrowly" }
     fun ordinal(place: Int): String = listOf("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth").getOrNull(place - 1) ?: "${place}th"
+    /** A part of a whole in words, never a figure: "a third", "half", "nearly all" */
+    fun share(part: Int, whole: Int): String {
+        val r = if (whole <= 0) 0.0 else part.toDouble() / whole
+        return when { r >= 0.9 -> "nearly all"; r >= 0.7 -> "three quarters"; r >= 0.58 -> "two thirds"; r >= 0.42 -> "half"; r >= 0.3 -> "a third"
+            r >= 0.22 -> "a quarter"; r >= 0.15 -> "a fifth"; else -> "a few" }
+    }
     /** "a Pikeman", "an Archer": the article by the sound of the name's first letter */
     fun article(name: String): String = if (name.firstOrNull()?.lowercaseChar()?.let { it in "aeiou" } == true) "an $name" else "a $name"
 }

@@ -396,13 +396,16 @@ object RulerOverrides {
      *  where, the cities in its blast with the walls' health after or razed, and every unit it killed by owner. Each unit killed is also a loss by noteLoss,
      *  the weapon named as the killer, so the roll-call and the trail have it as any death in battle */
     class NukeFall(val attacker: Civilization, val weapon: String, val target: Tile) {
-        class CityHit(val city: com.unciv.logic.city.City, val razed: Boolean)
+        /** [people] before the blast and [lost] in it (all of them when [razed]) */
+        class CityHit(val city: com.unciv.logic.city.City, val razed: Boolean, val people: Int, val lost: Int)
         val cities = ArrayList<CityHit>()
         val killed = ArrayList<MapUnit>()
+        /** Fallout fell on land the blast reached that had none */
+        var poisoned = false
     }
     @Volatile var nuked: ((NukeFall) -> Unit)? = null
-    /** Told when the attacker or any power struck is a ruled civ */
+    /** Told of every detonation: the world hears of each, the courts it touched in full */
     fun noteNuke(fall: NukeFall) {
-        if (fall.attacker.civID in ruledCivs || fall.cities.any { it.city.civ.civID in ruledCivs } || fall.killed.any { it.civ.civID in ruledCivs }) nuked?.invoke(fall)
+        nuked?.invoke(fall)
     }
 }

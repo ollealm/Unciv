@@ -153,14 +153,37 @@ object RulerHost {
         RulerOverrides.unitDestroyed = { civ, unit, where -> destroyed.getOrPut(civ.civName) { HashMap() }[unit.id] = where }
         RulerOverrides.buildingSold = { civ, city, building, gold, why -> log(civ, "The officials sold the $building in ${city.name} for $gold gold, $why.") }
         RulerOverrides.beliefsChosen = { civ, what, beliefs -> log(civ, "The officials $what with the belief${if (beliefs.size == 1) "" else "s"} ${beliefs.joinToString("; ") { beliefInWords(it) }}.") }
-        // A nuclear blow, to every court it touched: the attacker's as its own, each struck power's by the attacker's name - the cities in the blast and the units killed
+        // A nuclear blow, told with its weight: to every court it touched in full (the attacker's as its own, each struck power's by the attacker's name),
+        // to the world as one public event, and to every other ruled court in the world's words. The engine's own notices of it are struck (noise)
         RulerOverrides.nuked = { fall ->
-            val courts = (listOf(fall.attacker) + fall.cities.map { it.city.civ } + fall.killed.map { it.civ }).distinct().filter { it.civID in RulerOverrides.ruledCivs }
-            for (civ in courts) {
+            val first = !atomicSeen && game().civilizations.none { c -> c.diplomacy.values.any { it.hasModifier(com.unciv.logic.civilization.diplomacy.DiplomaticModifiers.UsedNuclearWeapons) } }
+            atomicSeen = true
+            val firstNote = if (first) ", the first atomic weapon the world has seen" else ""
+            val poison = if (fall.poisoned) " The land around it is poisoned for a generation." else ""
+            fun fate(hit: RulerOverrides.NukeFall.CityHit, name: String, health: Boolean) = when {
+                hit.razed -> "$name was razed"
+                hit.lost > 0 -> "$name lost ${Prose.share(hit.lost, hit.people)} of its people"
+                else -> "$name stood"
+            } + (if (health && !hit.razed) ", its walls at ${hit.city.health} of ${com.unciv.logic.battle.CityCombatant(hit.city).getMaxHealth()}" else "")
+            // The world's words: whose cities by their people's names, the units killed by whose they were
+            val worldCities = fall.cities.map { hit -> fate(hit, if (hit.city.civ.civName == hit.city.name) hit.city.name else "${RulerCampaigns.possessive(hit.city.civ.civName)} ${hit.city.name}", false) }
+            val worldKilled = fall.killed.groupBy { it.civ }.map { (owner, units) -> "${RulerCampaigns.people(owner.civName).replaceFirstChar { it.uppercase() }} lost ${RulerCampaigns.company(units.map { it.name })}" }
+            val aim = fall.cities.firstOrNull { it.city.getCenterTile() == fall.target }?.city
+            val near = aim ?: game().getCities().minByOrNull { it.getCenterTile().aerialDistanceTo(fall.target) }
+            val at = when { near == null -> "far from any city"; aim != null -> "at"; else -> "near" }.let { word ->
+                if (near == null) word else "$word ${if (near.civ.civName == near.name) near.name else "${RulerCampaigns.possessive(near.civ.civName)} ${near.name}"}" }
+            val worldText = "${RulerCampaigns.people(fall.attacker.civName).replaceFirstChar { it.uppercase() }} launched ${Prose.article(fall.weapon)} $at$firstNote: " +
+                (worldCities + worldKilled).joinToString("; ").ifEmpty { "nothing of anyone's stood in the blast" } + "." + poison
+            addPublicEvent(worldText)
+            ages.noteNuke(stamp(), worldText)
+            val touched = (listOf(fall.attacker) + fall.cities.map { it.city.civ } + fall.killed.map { it.civ }).distinct()
+            for (civ in game().civilizations.filter { it.civID in RulerOverrides.ruledCivs && it.isAlive() }) {
+                if (civ !in touched) { log(civ, worldText); continue }
                 val whose = { owner: Civilization -> if (owner == civ) "our" else RulerCampaigns.possessive(owner.civName) }
-                val cities = fall.cities.map { hit -> "${whose(hit.city.civ)} ${hit.city.name} " + (if (hit.razed) "razed" else "at ${hit.city.health} of ${com.unciv.logic.battle.CityCombatant(hit.city).getMaxHealth()} health") }
-                val killed = fall.killed.groupBy { it.civ }.map { (owner, units) -> "${whose(owner)} ${units.joinToString(", ") { it.name }} killed" }
-                log(civ, "${whose(fall.attacker).replaceFirstChar { it.uppercase() }} ${fall.weapon} fell on ${RulerCampaigns.placeOf(civ, fall.target)}: " + (cities + killed).joinToString("; ").ifEmpty { "nothing of anyone's stood in the blast" } + ".")
+                val cities = fall.cities.map { hit -> fate(hit, if (hit.city.civ == civ || hit.city.civ.civName == hit.city.name) hit.city.name else "${whose(hit.city.civ)} ${hit.city.name}", true) }
+                val killed = fall.killed.groupBy { it.civ }.map { (owner, units) -> "${if (owner == civ) "we" else RulerCampaigns.people(owner.civName).replaceFirstChar { it.uppercase() }} lost ${RulerCampaigns.company(units.map { it.name })}" }
+                log(civ, "${whose(fall.attacker).replaceFirstChar { it.uppercase() }} ${fall.weapon} fell on ${RulerCampaigns.placeOf(civ, fall.target)}$firstNote: " +
+                    (cities + killed).joinToString("; ").ifEmpty { "nothing of anyone's stood in the blast" } + "." + poison)
             }
         }
         RulerOverrides.struck = { strike ->
@@ -233,6 +256,7 @@ object RulerHost {
             when {
                 Regex("[\\[\\]{}]").containsMatchIn(text) -> selfCheck("words", civ.civName, "brackets or braces: $text")
                 Regex("\\(-?\\d+,\\s?-?\\d+\\)").containsMatchIn(text) -> selfCheck("words", civ.civName, "coordinates: $text")
+                Regex("\\b[Aa]\\(n\\)").containsMatchIn(text) -> selfCheck("words", civ.civName, "the engine's A(n): $text")
                 Regex("#\\d+").containsMatchIn(text) && !asksForOrders.containsMatchIn(text) -> selfCheck("words", civ.civName, "a unit's number in prose: $text")
             }
         }
@@ -469,6 +493,7 @@ object RulerHost {
         Memory("warsDeclared", true, { warsDeclared.clear() }, { warsDeclared.map { it.toString() } }, { json -> json?.asStringArray()?.forEach { warsDeclared += WarRecord.parse(it) } }),
         Memory("trail", true, { trail.clear() }, { trail.toMap() }, { json -> trail.load(json) }),
         Memory("ages", true, { ages.clear() }, { ages.toMap() }, { json -> ages.load(json) }),
+        Memory("atomicSeen", true, { atomicSeen = false }, { atomicSeen }, { json -> atomicSeen = json?.asBoolean() ?: false }),
         Memory("lockedCities", true, { RulerOverrides.lockedCities.clear() }, { RulerOverrides.lockedCities.toList() }, { json -> json?.asStringArray()?.let { RulerOverrides.lockedCities += it } }),
         Memory("focusedCities", true, { RulerOverrides.focusedCities.clear() }, { RulerOverrides.focusedCities.toList() }, { json -> json?.asStringArray()?.let { RulerOverrides.focusedCities += it } }),
         Memory("cadence", true, { ageTurns = 12; lookInTurns = 4 }, { mapOf("ageTurns" to ageTurns, "lookInTurns" to lookInTurns) },
@@ -1254,6 +1279,8 @@ object RulerHost {
     /** A ship that attacked one of our cities or units, as the attack's notice placed it: kept a few turns for the threats list */
     private class ShipRaid(val turn: Int, val owner: String, val target: String, val from: String)
     private val shipRaids = HashMap<String, HashMap<Int, ShipRaid>>()
+    /** An atomic weapon has fallen in this game: the next is not the world's first */
+    private var atomicSeen = false
 
     /** The notifications each civ's last bookkeeping read: the same objects move from the live list into the log at the turn's end, and are not read twice */
     private val notificationsSeen = HashMap<String, MutableSet<com.unciv.logic.civilization.Notification>>()
@@ -1278,6 +1305,8 @@ object RulerHost {
         "has accepted your trade request", "has denied your trade request",
         // a city-state's end: the host's own line (recordPublicEvents) says who took its city, to every court that knew it
         "The City-State of [",
+        // a detonation: the host's own line (the nuked hook) tells it with its weight, to every ruled court
+        "has been detonated by [", "has exploded in our territory",
         // a unit disbanded for want of gold: the roll-call's own line says which, where it stood and why (RulerOverrides.noteDisbanded)
         "Cannot provide unit upkeep for")
     /** The engine's notice of a blow on us ("An enemy [Pikeman] ([-40] HP) has attacked [Onondaga] ([-26] HP)"): the turn's blows are folded into one line per attacker and place instead */
@@ -1442,6 +1471,11 @@ object RulerHost {
             val byWhom = if (units.usedByOrder.remove(id)) "by your order" else "by the officials once it was left to them"
             val went = expended[civ.civName]?.remove(id)
             val gone = destroyed[civ.civName]?.remove(id)
+            // A nuclear blow's dead and its spent weapon are told in the blow's own line (the nuked hook): eleven loss lines followed one bomb on Medina.
+            // A unit under the ruler's own order is still told by name
+            val nuclear = { name: String? -> civ.gameInfo.ruleset.units[name]?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.NuclearWeapon) == true }
+            if (fell != null && !fell.captured && nuclear(fell.enemyUnit) && units.orders[id] == null) continue
+            if (fell == null && disbandedWhy == null && went == null && !civ.isDefeated() && nuclear(unit.first)) continue
             // No unit number: a unit gone from the rolls is nothing the advisor can order, and the line may reach the ruler's letter
             log(civ, if (disbandedWhy != null && !civ.isDefeated()) "Our ${unit.first} ${RulerCampaigns.atPlaceOf(civ, unit.second)} was disbanded by the officials${if (disbandedWhy.isEmpty()) "" else " $disbandedWhy"}."
                 else if (fell != null) "Our ${unit.first}${units.orders[id]?.let { " under your ${it.action} order" } ?: ""} was ${if (fell.captured) "captured" else "lost in action"} ${RulerCampaigns.atPlaceOf(civ, fell.where)}" +

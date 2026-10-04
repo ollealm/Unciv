@@ -41,10 +41,16 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
         trail.stands.firstEntry()?.key?.let { oldest -> outclassed.removeAll { it.turn < oldest } }
     }
 
-    fun clear() = outclassed.clear()
-    fun toMap() = mapOf("outclassed" to outclassed.map { listOf(it.turn, it.loser, it.unit, it.era, it.victor, it.by, it.byEra, it.place) })
+    /** Every detonation in the world's words, by the turn it belongs to: what every realm saw in its age */
+    private val nukes = ArrayList<Pair<Int, String>>()
+    fun noteNuke(turn: Int, text: String) { nukes += turn to text }
+
+    fun clear() { outclassed.clear(); nukes.clear() }
+    fun toMap() = mapOf("outclassed" to outclassed.map { listOf(it.turn, it.loser, it.unit, it.era, it.victor, it.by, it.byEra, it.place) },
+        "nukes" to nukes.map { listOf(it.first, it.second) })
     fun load(json: JsonValue?) {
-        outclassed.clear()
+        outclassed.clear(); nukes.clear()
+        json?.get("nukes")?.forEach { nukes += it.getInt(0) to it.getString(1) }
         json?.get("outclassed")?.forEach { outclassed += Outclassed(it.getInt(0), it.getString(1), it.getString(2), it.getString(3), it.getString(4), it.getString(5), it.getString(6), it.getString(7)) }
     }
 
@@ -181,6 +187,7 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
             (exploration["citiesFoundTold"] as String).takeIf { it.isNotEmpty() }?.let { " Cities first seen: $it." }.orEmpty()
         for (e in explorers) lines += "Our ${e["what"]} ranged as far as ${e["reached"]}."
         if (met.isNotEmpty()) lines += "We met ${met.joinToString { RulerCampaigns.people(it) }}."
+        for ((turn, text) in nukes) if (turn in from..to) lines += text
         if (lines.isEmpty()) lines += "No company marched beyond its home fields, nothing new was seen, and no one new was met."
 
         return mapOf("from" to from, "to" to to, "fromYear" to yearText(from), "toYear" to yearText(to),

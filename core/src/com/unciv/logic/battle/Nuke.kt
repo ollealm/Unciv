@@ -79,10 +79,12 @@ object Nuke {
 
         // The blow told whole to a ruled civ's host, attacker's or victim's: the engine's own notices tell each victim of its tile and the attacker of nothing
         val fall = RulerOverrides.NukeFall(attackingCiv, attacker.getName(), targetTile)
+        val falloutBefore = hitTiles.count { it.terrainFeatures.contains("Fallout") }
         for (tile in hitTiles) {
             // Handle complicated effects
             doNukeExplosionForTile(attacker, tile, nukeStrength, targetTile == tile, fall)
         }
+        fall.poisoned = hitTiles.count { it.terrainFeatures.contains("Fallout") } > falloutBefore
         RulerOverrides.noteNuke(fall)
 
 
@@ -224,8 +226,10 @@ object Nuke {
         if (city != null && tile.position.toHexCoord() == city.location.toHexCoord()) {
             val attackContext = GameContext(attacker.getCivInfo(), ourCombatant = attacker, theirCombatant = CityCombatant(city), tile = tile)
             buildingModifier = city.getAggregateModifier(UniqueType.GarrisonDamageFromNukes)
+            val people = city.population.population
             doNukeExplosionDamageToCity(city, nukeStrength, damageModifierFromMissingResource, attackContext)
-            fall.cities += RulerOverrides.NukeFall.CityHit(city, razed = city !in city.civ.cities)
+            val razed = city !in city.civ.cities
+            fall.cities += RulerOverrides.NukeFall.CityHit(city, razed, people, if (razed) people else people - city.population.population)
             Battle.postBattleNotifications(attacker, CityCombatant(city), city.getCenterTile())
             Battle.destroyIfDefeated(city.civ, attacker.getCivInfo(), city.location.toHexCoord())
         }
