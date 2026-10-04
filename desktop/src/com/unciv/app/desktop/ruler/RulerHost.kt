@@ -673,7 +673,7 @@ object RulerHost {
 
     private fun Civilization.city(name: String): City = cities.firstOrNull { it.name == name } ?: throw ApiError(400, "No city named $name")
     private fun Civilization.construction(name: String): INonPerpetualConstruction =
-        (gameInfo.ruleset.buildings[name] ?: gameInfo.ruleset.units[name]) ?: throw ApiError(400, "Unknown building or unit $name" + didYouMean(name, gameInfo.ruleset.buildings.keys + gameInfo.ruleset.units.keys))
+        (gameInfo.ruleset.buildings[name] ?: gameInfo.ruleset.units[name]) ?: throw ApiError(400, "Unknown building or unit $name" + didYouMean(name, gameInfo.ruleset.buildings.keys + gameInfo.ruleset.units.keys) + " in this world; get_options.buildable lists what each city can build")
     /** Every reason the engine would refuse it - the ones the game hides from its own build menu included, in plain words, since a queue order that is silently dropped is worse than a refusal */
     private fun whyNot(city: City, construction: INonPerpetualConstruction, earlier: List<String> = emptyList()): List<String> = reasonsWhyNot(city, construction, earlier).map { it.second }
 
@@ -821,7 +821,7 @@ object RulerHost {
             val kept = goals.asStringArray().map { goal -> if (goal in ruleset.technologies) goal else onlyMatch(goal, ruleset.technologies.keys)?.also { taken += "$goal -> $it" }
                 // A building, wonder or unit named as a goal means the technology that unlocks it
                 ?: (ruleset.buildings[goal] ?: ruleset.units[goal])?.requiredTech?.also { taken += "$goal -> $it (the technology it needs)" } ?: goal }.filter { goal ->
-                if (goal !in ruleset.technologies) rejected += "No technology is called '$goal'" + (if (goal in ruleset.policies) " - that is a policy; put it in policyBranches" else didYouMean(goal, ahead).ifEmpty { " in this world; get_options.futureTechs lists every technology still ahead of us" }) + ". The other research goals were kept."
+                if (goal !in ruleset.technologies) rejected += "No technology is called '$goal'" + (if (goal in ruleset.policies) " - that is a policy; put it in policyBranches" else didYouMean(goal, ahead) + " in this world; get_options.futureTechs lists every technology still ahead of us") + ". The other research goals were kept."
                 if (goal in ruleset.technologies && reached(civ, goal)) alreadyKnown += goal
                 goal in ruleset.technologies
             }
