@@ -1759,6 +1759,17 @@ object RulerHost {
         publicEvents += mapOf("turn" to stamp(), "year" to yearText(stamp()), "text" to text)
     }
 
+    /** Wars that ended between two snapshots, both sides still standing: one line each */
+    private fun recordPeace(before: WorldSnapshot, after: WorldSnapshot) {
+        val ended = (before.wars - after.wars).filter { war -> war.all { it in after.alive } }.map { it.toList() }
+        val isCityState = { name: String -> game().civilizations.firstOrNull { it.civName == name }?.isCityState == true }
+        // City-states make peace with a power as their ally does, eight at once: one line per power, as their joining a war is (the joins are folded too)
+        val withCityStates = ended.filter { pair -> pair.count(isCityState) == 1 }.groupBy({ pair -> pair.first { !isCityState(it) } }, { pair -> pair.first(isCityState) })
+        for (war in ended.filter { pair -> pair.count(isCityState) != 1 }) addPublicEvent("${war.joinToString(" and ")} have made peace.")
+        for ((power, cityStates) in withCityStates)
+            addPublicEvent(if (cityStates.size == 1) "$power and ${cityStates[0]} have made peace." else "$power and the city-states ${andList(cityStates)} have made peace.")
+    }
+
     private fun recordPublicEvents(before: WorldSnapshot, after: WorldSnapshot) {
         for (war in after.wars - before.wars) {
             // History needs to know who drew the sword: without it the Chronicler guesses, and blames the victim
@@ -1776,8 +1787,7 @@ object RulerHost {
                 else -> "War has broken out between $first and $second (drawn in at an ally's side)."
             })
         }
-        for (war in before.wars - after.wars)
-            if (war.all { it in after.alive }) addPublicEvent("${war.joinToString(" and ")} have made peace.")
+        recordPeace(before, after)
         val ended = HashSet<String>() // city-states whose end was told with their city's taking
         for ((city, owner) in after.cityOwners) {
             val previousOwner = before.cityOwners[city]
@@ -1892,6 +1902,9 @@ object RulerHost {
         val startTurn = game.turns
         // "Before" is the world as the last advance left it: a war declared by order between rounds is news to everyone else
         val roundStart = worldAtLastAdvance ?: WorldSnapshot(game)
+        // A peace made by order since the last advance - a held offer accepted, or an offer of peace answered - happened between the turns' snapshots, and
+        // the world never heard of it (Run 28: every war between two courts began in the chronicle and none ended). Wars by order are told as declared (noteWar)
+        worldAtLastAdvance?.let { last -> guardedStep("the world's events") { recordPeace(last, WorldSnapshot(game)) } }
         var stopReason: String? = null
         var council: Council? = null
         val ruledCivs = orders.keys.map { name -> game.civilizations.first { it.civName == name } }.filter { it.isAlive() }
