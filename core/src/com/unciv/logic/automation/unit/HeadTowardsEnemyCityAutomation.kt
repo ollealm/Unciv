@@ -83,7 +83,13 @@ object HeadTowardsEnemyCityAutomation {
     ): Boolean {
         // A ruled civ's land unit going by sea never holds, nor ends a turn, at sea within reach of the city or of the enemy near it: it lands out of
         // reach and walks. Unruled civs go as upstream has them
-        if (com.unciv.logic.automation.RulerOverrides.goesBySea(unit, shortestPath)) return headForLanding(unit, closestReachableEnemyCity)
+        if (com.unciv.logic.automation.RulerOverrides.goesBySea(unit, shortestPath)) {
+            // Ashore with a way there by land, it walks it: the pathfinder's hop along the coast would embark it, and the landing bring it back -
+            // landed, at sea, landed, or held at its landing for good (review of the landings, 2026-10-05). Without one, it goes by sea to a landing that has
+            if (!unit.isEmbarked()) keptAshore(unit) { unit.movement.getShortestPath(closestReachableEnemyCity).takeIf { it.isNotEmpty() }?.let { headTowardsEnemyCity(unit, closestReachableEnemyCity, it) } }
+                ?.let { return it }
+            return headForLanding(unit, closestReachableEnemyCity)
+        }
         val unitDistanceToTiles = unit.movement.getDistanceToTiles()
 
         val unitRange = unit.getRange()
@@ -118,6 +124,14 @@ object HeadTowardsEnemyCityAutomation {
         return true
     }
 
+    /** [body] with [unit] unable to embark, its paths reckoned afresh for it and again after - as [UnitMovement] lifts canEnterForeignTerrain for a moment */
+    private fun <T> keptAshore(unit: MapUnit, body: () -> T): T {
+        val couldNot = unit.cache.cannotEmbark
+        unit.cache.cannotEmbark = true
+        unit.movement.clearPathfindingCache()
+        try { return body() } finally { unit.cache.cannotEmbark = couldNot; unit.movement.clearPathfindingCache() }
+    }
+
     /** A ruled civ's land unit going by sea: the landing is a land tile on the city's landmass, at least three from it and out of every reach
      *  (RulerOverrides.perilAtSea), that can be come to by water out of reach - the one nearest the city, further along the coast when the near shore is
      *  under the guns (Munich's whole western shore was, across the strait from London, Run 32). Each turn the unit goes as far along that way as it can,
@@ -126,7 +140,16 @@ object HeadTowardsEnemyCityAutomation {
         val peril = com.unciv.logic.automation.RulerOverrides.perilAtSea(unit)
         val landmass = cityTile.getContinent()
         val start = unit.currentTile
-        fun landing(tile: Tile) = tile.isLand && tile.getContinent() == landmass && tile !in peril && tile.aerialDistanceTo(cityTile) in minDistanceFromCityToConsiderForLandingArea..10 &&
+        // The land the city can be walked to from, by terrain and borders: a shore cut off from it by mountains or closed borders is no landing.
+        // Soldiers in the way are not counted - they move; a landed host waits them out rather than putting to sea again, and an enemy come within
+        // reach of it does not send it back to sea either: reach is the danger at sea, ashore it stands and fights as any soldier does
+        val byLand = hashSetOf(cityTile).also { reached ->
+            val queue = ArrayDeque(listOf(cityTile))
+            while (queue.isNotEmpty()) for (next in queue.removeFirst().neighbors)
+                if (next !in reached && next.isLand && !next.isImpassible() && next.aerialDistanceTo(cityTile) <= 10 && (next.getOwner() == null || next.canCivPassThrough(unit.civ)))
+                    { reached += next; queue += next }
+        }
+        fun landing(tile: Tile) = tile.isLand && tile.getContinent() == landmass && tile in byLand && (tile !in peril || tile == start) && tile.aerialDistanceTo(cityTile) in minDistanceFromCityToConsiderForLandingArea..10 &&
             unit.getDamageFromTerrain(tile) <= 0 && (tile == start || unit.movement.canMoveTo(tile))
         // The ways by sea out of reach: water not within reach, and our own side's land to walk along to the shore; a landing ends a way
         val came = HashMap<Tile, Tile>().apply { put(start, start) }
