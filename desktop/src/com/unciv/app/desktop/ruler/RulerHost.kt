@@ -719,7 +719,28 @@ object RulerHost {
             com.unciv.models.ruleset.RejectionReasonType.ConsumesResources -> Regex("Need \\[?(\\d+)\\]? more \\[?([^\\]]+?)\\]?$").find(reason.errorMessage)
                 ?.let { "it needs ${it.groupValues[1]} more ${it.groupValues[2]} than we have to spare" } ?: engineWords(reason.errorMessage)
             else -> engineWords(reason.errorMessage)
-        })?.let { reason.type to it } }.distinctBy { it.second }.toList()
+        })?.let { text ->
+            // An "Only available" condition may mean never (religion off in this world, "before adopting" a policy we have): such an item is refused, not left
+            // to wait for ever; only conditions that time can bring (a building raised, a tech, a turn, a pantheon) let it wait
+            val kind = if (reason.type == com.unciv.models.ruleset.RejectionReasonType.ShouldNotBeDisplayed && !onlyNotYet(city, construction))
+                com.unciv.models.ruleset.RejectionReasonType.CannotBeBuilt else reason.type
+            kind to text } }.distinctBy { it.second }.toList()
+    }
+
+    /** The conditions time can bring: what an "Only available" item may wait for */
+    private val NOT_YET = setOf(com.unciv.models.ruleset.unique.UniqueType.ConditionalBuildingBuilt, com.unciv.models.ruleset.unique.UniqueType.ConditionalBuildingBuiltAll,
+        com.unciv.models.ruleset.unique.UniqueType.ConditionalBuildingBuiltAmount, com.unciv.models.ruleset.unique.UniqueType.ConditionalBuildingBuiltByAnybody,
+        com.unciv.models.ruleset.unique.UniqueType.ConditionalAfterTurns, com.unciv.models.ruleset.unique.UniqueType.ConditionalTech,
+        com.unciv.models.ruleset.unique.UniqueType.ConditionalAfterPolicyOrBelief, com.unciv.models.ruleset.unique.UniqueType.ConditionalAfterPantheon,
+        com.unciv.models.ruleset.unique.UniqueType.ConditionalWithResource)
+
+    /** Is every unmet "Only available" condition of [construction] one time can bring? */
+    private fun onlyNotYet(city: City, construction: INonPerpetualConstruction): Boolean {
+        val item = construction as com.unciv.models.ruleset.unique.IHasUniques
+        val unmet = (item.getMatchingUniques(com.unciv.models.ruleset.unique.UniqueType.OnlyAvailable, com.unciv.models.ruleset.unique.GameContext.IgnoreConditionals) +
+            item.getMatchingUniques(com.unciv.models.ruleset.unique.UniqueType.CanOnlyBeBuiltWhen, com.unciv.models.ruleset.unique.GameContext.IgnoreConditionals))
+            .flatMap { unique -> unique.modifiers.filter { !com.unciv.models.ruleset.unique.Conditionals.conditionalApplies(unique, it, city.state) } }.toList()
+        return unmet.isNotEmpty() && unmet.all { it.type in NOT_YET }
     }
 
     /** Why an "Only available" (or "Can only be built") condition holds an item back, in words: the conditions not met, brackets struck */
@@ -934,7 +955,7 @@ object RulerHost {
             if (perpetual != null) city.cityConstructions.addToQueue(perpetual)
             city.cityConstructions.currentConstructionIsUserSet = true
             RulerOverrides.lockedCities += city.id
-            val waitWords = if (waits.isEmpty()) "" else "; waiting to start once they can: ${waits.joinToString("; ") { (item, why) -> "$item ($why)" }}"
+            val waitWords = if (waits.isEmpty()) "" else "; waiting, each to go to the front of the queue once it can be built - ahead of whatever is building then: ${waits.joinToString("; ") { (item, why) -> "$item ($why)" }}"
             val now = "${city.name} queue is now: ${city.cityConstructions.constructionQueue.joinToString().ifEmpty { "(nothing that can be built yet)" }}$waitWords" +
                 (halfBuilt?.let { ". The half-built $it is left out of it; its work is kept, and it goes on where it stopped if you queue it again" } ?: "")
             log(civ, "By your order: ${city.name}'s queue is now ${city.cityConstructions.constructionQueue.joinToString().ifEmpty { "empty" }}" +
@@ -2705,19 +2726,24 @@ object RulerHost {
             threats += "Barbarian camp at ${RulerUnits.where(civ, tile)}"
         }
         val raids = shipRaids[civ.civName].orEmpty().filterValues { civ.gameInfo.turns - it.turn <= 5 }
+        val atPeace = LinkedHashMap<String, ArrayList<String>>() // a great power at peace: how many of its soldiers stand near which cities of ours, one line per power
         for (tile in civ.viewableTiles) {
             val unit = tile.militaryUnit ?: continue
-            // A power at peace with us is no threat, great or small (a friendly neighbour's lone Warrior was listed, Run 29): the barbarians and our enemies only
-            if (unit.civ == civ || !(unit.civ.isBarbarian || civ.isAtWarWith(unit.civ))) continue
+            // A city-state at peace with us is no threat (Budapest's never showed); a great power at peace is folded into a count below - an army massing
+            // at our border at peace is news, a lone Warrior (one line per soldier, Run 29) was not
+            if (unit.civ == civ || (unit.civ.isCityState && !civ.isAtWarWith(unit.civ))) continue
+            val peaceful = !unit.civ.isBarbarian && !civ.isAtWarWith(unit.civ)
             // A ship counts within its own reach of a coastal city - a turn's sail and a shot - and four tiles otherwise
             val ship = unit.baseUnit.isWaterUnit
             val nearest = civ.cities.filter { !ship || it.isCoastal() }.minByOrNull { it.getCenterTile().aerialDistanceTo(tile) } ?: continue
             val raid = raids[unit.id]
             if (nearest.getCenterTile().aerialDistanceTo(tile) > (if (ship) maxOf(RulerOverrides.NEAR, unit.getMaxMovement() + unit.getRange()) else RulerOverrides.NEAR) && raid == null) continue
+            if (peaceful) { atPeace.getOrPut(unit.civ.civName) { ArrayList() } += nearest.name; continue }
             val stance = if (unit.civ.isBarbarian) "hostile" else "AT WAR"
             threats += "${unit.civ.civName} ${unit.name}${if (ship) " #${unit.id} (a ship, " else " ("}strength ${RulerOverrides.might(unit)}, $stance) at ${RulerUnits.where(civ, tile)}" +
                 (raid?.let { " - it attacked ${it.target} ${turnsAgo(civ.gameInfo.turns - it.turn)}" } ?: "")
         }
+        for ((power, near) in atPeace) threats += "$power, at peace: ${near.size} soldier${plural(near.size)} near ${andList(near.distinct())}"
         // A ship that struck at us and has sailed out of sight since: it may be back (Run 18: a Trireme raided Pyongyang six turns running, never listed)
         for ((id, raid) in raids) {
             val ship = civ.gameInfo.civilizations.firstOrNull { it.civName == raid.owner }?.units?.getUnitById(id) ?: continue
@@ -2861,11 +2887,12 @@ object RulerHost {
                 "current" to RulerOverrides.personalities[civ.civID]?.let { p -> PersonalityValue.entries.associate { it.name to p[it] } },
                 "meaning" to mapOf(
                     "Production/Food/Gold/Science/Culture/Happiness/Faith" to "how much cities favour buildings and tiles that yield that stat when the officials choose",
+                    "Faith (also)" to "the share of the faith above your faithReserve that the officials spend on their own: 5 or more, all of it; below 5, that many fifths; 0, none - the faith then lies for you, and religion.faithBuysNow says what it could buy",
                     "Military" to "how large an army the officials keep and how often cities train units on their own",
                     "Aggressive" to "whether soldiers push out to attack or stay home and defend",
                     "Expansion" to "how eagerly cities train settlers on their own; 10 means settlers whenever affordable",
                     "Commerce" to "willingness to trade luxuries and make deals",
-                    "Diplomacy" to "effort spent on city-states and friendships",
+                    "Diplomacy" to "effort spent on city-states and friendships - and whether the officials court city-states with gold at all: 0, never (they never pay for an alliance another power holds beyond one gift's reach)",
                     "Loyal" to "how much they honour friendships",
                     "DeclareWar" to "how warlike their building and keeping is (the Great Wall, a standing army); they never declare war on their own - war is the ruler's")),
             "diplomacy" to diplomacy.tradeOptions(civ, leave),
