@@ -170,7 +170,15 @@ object RulerOverrides {
     /** The faith a civ's officials may spend on their own: what lies above the ruler's reserve for a ruled civ, all of it for any other. Every faith spender
      *  of the officials' measures its price against this - a purchase, and the pantheon, which was bought past the reserve till audit 2026-10-04 */
     @yairm210.purity.annotations.Readonly
-    fun faithAboveReserve(civ: Civilization): Int = civ.religionManager.storedFaith - (if (civ.civID in ruledCivs && civ.civID !in underFloor) faithReserve[civ.civID] ?: 0 else 0)
+    fun faithAboveReserve(civ: Civilization): Int =
+        if (civ.civID !in ruledCivs || civ.civID in underFloor) civ.religionManager.storedFaith
+        else ((civ.religionManager.storedFaith - (faithReserve[civ.civID] ?: 0)) * officialsFaithShare(civ)).toInt()
+
+    /** The share of the faith above the reserve that a ruled civ's officials spend on their own: the court's Faith weight read as a bias - at the neutral 5
+     *  or more, all of it, as the engine's own officials would; below, weight/5 of it; at 0, none, and the faith lies for the court to spend. Unruled: all */
+    @yairm210.purity.annotations.Readonly
+    fun officialsFaithShare(civ: Civilization): Float =
+        if (civ.civID !in ruledCivs) 1f else (civ.getPersonality()[com.unciv.models.ruleset.nation.PersonalityValue.Faith] / 5f).coerceIn(0f, 1f)
     /** The gold a civ's officials may spend on their own, as [faithAboveReserve] is for faith */
     @yairm210.purity.annotations.Readonly
     fun goldAboveReserve(civ: Civilization): Int = civ.gold - (if (civ.civID in ruledCivs && civ.civID !in underFloor) goldReserve[civ.civID] ?: 0 else 0)
@@ -183,7 +191,10 @@ object RulerOverrides {
     fun <T> underTheFloor(civ: Civilization, turn: () -> T): T {
         if (civ.civID !in ruledCivs) return turn()
         val gold = (goldReserve[civ.civID] ?: 0).coerceIn(0, civ.gold.coerceAtLeast(0))
-        val faith = (faithReserve[civ.civID] ?: 0).coerceIn(0, civ.religionManager.storedFaith.coerceAtLeast(0))
+        val stored = civ.religionManager.storedFaith.coerceAtLeast(0)
+        val reserve = (faithReserve[civ.civID] ?: 0).coerceIn(0, stored)
+        // The court's Faith weight keeps back what it does not give the officials of the faith above the reserve (officialsFaithShare)
+        val faith = reserve + ((stored - reserve) * (1f - officialsFaithShare(civ))).toInt()
         civ.addGold(-gold); civ.religionManager.storedFaith -= faith; underFloor += civ.civID
         try { return turn() } finally { underFloor -= civ.civID; civ.addGold(gold); civ.religionManager.storedFaith += faith }
     }

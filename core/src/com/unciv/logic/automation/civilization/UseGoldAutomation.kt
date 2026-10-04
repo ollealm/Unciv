@@ -199,6 +199,14 @@ object UseGoldAutomation {
         // Don't go into a gold gift race: be content with friendship for cheap, or use the gold on more productive uses,
         // for example upgrading an army to conquer the player who's contesting our city states
         if (influence < 10 || stopSpending) return
+        // A ruled civ's officials court a city-state with gold only as far as the court's Diplomacy weight wills it (0: never), and never for an alliance
+        // another power holds beyond the gift's reach (1,500 gold went to Cahokia, an alliance China held, Run 29). Unruled civs keep the engine's habit
+        if (civInfo.civID in com.unciv.logic.automation.RulerOverrides.ruledCivs) {
+            if (civInfo.getPersonality()[com.unciv.models.ruleset.nation.PersonalityValue.Diplomacy] <= 0f) return
+            val gift = if (civInfo.gold >= 1000) 1000 else 500
+            val ally = cityState.allyCiv?.takeIf { it != civInfo }
+            if (ally != null && influence + cityState.cityStateFunctions.influenceGainedByGift(civInfo, gift) <= (cityState.getDiplomacyManager(ally)?.getInfluence() ?: 0f)) return
+        }
         // Only make an investment if we got our Pledge to Protect influence at the highest level
         if (civInfo.gold >= 1000) cityState.cityStateFunctions.receiveGoldGift(civInfo, 1000)
         else cityState.cityStateFunctions.receiveGoldGift(civInfo, 500)

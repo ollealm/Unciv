@@ -31,9 +31,13 @@ object ReligionAutomation {
         }
         
         if (civInfo.religionManager.remainingFoundableReligions() == 0 ) {
+            val held = civInfo.religionManager.storedFaith
             buyGreatPerson(civInfo)
             tryBuyAnyReligiousBuilding(civInfo)
-            return
+            // A ruled civ whose officials found nothing of these to buy go on to spread the faith below, as far as the court's Faith weight leaves them faith
+            // (China held 7,578 faith with every religion founded: the routine stopped here every turn, Run 29). Unruled civs keep the engine's own habit
+            if (civInfo.civID !in com.unciv.logic.automation.RulerOverrides.ruledCivs || civInfo.religionManager.storedFaith < held
+                || civInfo.religionManager.religion?.isMajorReligion() != true) return
         }
 
         // If we don't have majority in all our own cities, build missionaries and inquisitors to solve this

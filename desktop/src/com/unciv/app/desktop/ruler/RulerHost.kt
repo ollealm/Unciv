@@ -133,7 +133,8 @@ object RulerHost {
         units.researchRefill = { civ -> applyResearchGoals(civ) }
         // A city's defender warning, acknowledged while a garrison march was on its way, shows in full again when that march fails (Grand River stood empty 13 turns under an acknowledged one, Run 23)
         units.garrisonMissed = { civ, city -> city.getCity()?.name?.lowercase()?.let { name -> orders[civ.civName]?.acknowledged?.removeIf { it.startsWith("$name has no defender") || it.startsWith("$name is only held by") } } }
-        RulerOverrides.rulersFirst = { civ -> units.rearmDue(civ) }
+        // The ruler's own deferred re-armings are charged inside the engine's turn, after the turn's snapshot: their gold is counted, as the renewals' is
+        RulerOverrides.rulersFirst = { civ -> val held = civ.gold; units.rearmDue(civ); (held - civ.gold).takeIf { it > 0 }?.let { rulersOwnGold.merge(civ.civName, it, Int::plus) } }
         RulerOverrides.worldVoteOf = { civ -> castWorldVote(civ) }
         RulerOverrides.promised = { civ -> diplomacy.promised(civ) }
         // The officials make demands of their own, and the chancery hears of each (a demand made of us waits on the desk instead - RulerDiplomacy.demands)
@@ -481,7 +482,7 @@ object RulerHost {
         Memory("orders in the engine", false, { RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.faithReserve.clear(); RulerOverrides.officialsOrders.clear(); RulerOverrides.noWonders.clear() }),
         // A turn's buckets, filled by the hooks and drained by the bookkeeping; and what the last turn left for the next briefing
         Memory("turn buckets", false, { spending.clear(); losses.clear(); strikes.clear(); blows.clear(); expended.clear(); disbandedFor.clear(); destroyed.clear()
-            faithSpending.clear(); freeTechs.clear(); hostAdopted.clear(); notificationsSeen.clear(); officialsSpent.clear(); lastFaithSpent.clear(); worldAtLastAdvance = null; tokensTold.clear() })
+            faithSpending.clear(); freeTechs.clear(); hostAdopted.clear(); notificationsSeen.clear(); officialsSpent.clear(); lastFaithSpent.clear(); worldAtLastAdvance = null; tokensTold.clear(); rulersOwnGold.clear() })
     ) }
 
     /** A copy of the world after every stretch of turns, so a test game can be wound back (the last dozen are kept) */
@@ -728,6 +729,9 @@ object RulerHost {
     }
 
     /** Every field an order may carry: an order with none of them is no order (a model that wrapped its fields in "arguments" sent nothing) */
+    /** Gold the ruler's own deferred orders spent at the start of the civ's turn (re-armings that waited for a unit that had marched) */
+    private val rulersOwnGold = HashMap<String, Int>()
+
     private val ORDER_FIELDS get() = STANDING_FIELDS + IMMEDIATE_FIELDS + ORCHESTRATOR_FIELDS
     /** Kept until changed */
     private val STANDING_FIELDS = listOf("personality", "research", "policyBranches", "neverBuild", "officials", "goldReserve", "faithReserve", "garrisonEveryCity", "posture", "worldVote", "acknowledge")
@@ -911,11 +915,18 @@ object RulerHost {
         json.get("rearm")?.let { list ->
             val entries = list.asStringArray().map { it.trim() }
             entries.filter { !it.equals("all", ignoreCase = true) && it.removePrefix("#").toIntOrNull() == null }.forEach { failed += "rearm takes unit numbers or \"all\"; not '$it'" }
+            val named = entries.mapNotNull { it.removePrefix("#").toIntOrNull() }.toSet()
             val wanted = entries.flatMap { entry -> if (entry.equals("all", ignoreCase = true)) units.rearmable(civ).map { it.id } else listOfNotNull(entry.removePrefix("#").toIntOrNull()) }.distinct()
+            // A unit named by its number is answered alone; the rest of "all" that could not be re-armed is one line, by reason (296 refusals in Run 28)
+            val couldNot = LinkedHashMap<String, ArrayList<String>>()
             for (id in wanted) {
                 val result = units.rearm(civ, id, standing.goldReserve ?: 0)
-                if (result.first) done += result.second else failed += result.second
+                if (result.first) done += result.second
+                else if (id in named) failed += result.second
+                else Regex("^(.+?) cannot be re-armed[^:]*: (.+)$").find(result.second)?.let { couldNot.getOrPut(it.groupValues[2]) { ArrayList() } += it.groupValues[1] } ?: run { failed += result.second }
             }
+            if (couldNot.isNotEmpty()) failed += "${couldNot.values.sumOf { it.size }} could not be re-armed: " +
+                couldNot.entries.joinToString("; ") { (why, who) -> "${who.size} because $why (${who.joinToString()})" }
             if (wanted.isEmpty() && entries.any { it.equals("all", ignoreCase = true) }) done += "No soldier of ours can be re-armed with newer arms we know."
         }
         // Unit orders, diplomacy
@@ -1030,6 +1041,18 @@ object RulerHost {
         if (leftOfOurs.isNotEmpty() || now.isEmpty()) return ""
         return " The queue of ${city.name} was left empty, so the officials put ${now.joinToString()} in it."
     }
+
+    /** What faith buys in each city of ours: the item, its price, the city, and [bar], why it cannot be bought there now - null when it can */
+    private class FaithOffer(val item: String, val price: Int, val city: String, val bar: String?)
+
+    /** The one test both faith lists read (faithBuysNow and greatPeopleForFaith once disagreed: one said a Great Prophet was open in Beijing, the other that
+     *  nothing could be bought, Run 29): the price, and for a unit whether the city's centre can take it - a unit bought is born there */
+    private fun faithOffers(civ: Civilization): List<FaithOffer> = civ.cities.flatMap { city ->
+        (civ.gameInfo.ruleset.buildings.values + civ.gameInfo.ruleset.units.values).mapNotNull { item -> faithPrice(city, item)?.let { price ->
+            val bar = (item as? com.unciv.models.ruleset.unit.BaseUnit)?.takeIf { !city.canPlaceNewUnit(it) }?.let { unit ->
+                val holder = if (unit.isCivilian()) city.getCenterTile().civilianUnit else city.getCenterTile().militaryUnit
+                "${holder?.let { article(it.name).replaceFirstChar { c -> c.uppercase() } } ?: "Another unit"} stands on ${city.name}'s centre" }
+            FaithOffer(item.name, price, city.name, bar) } } }
 
     private fun faithPrice(city: City, construction: INonPerpetualConstruction): Int? = construction.getStatBuyCost(city, Stat.Faith)
         ?.takeIf { construction.canBePurchasedWithStat(city, Stat.Faith) && construction.isPurchasable(city.cityConstructions) }
@@ -1194,6 +1217,8 @@ object RulerHost {
         val turnsLeft = RulerHost.dealTurnsLeft(civ)
         val faith = civ.religionManager.storedFaith
         val policies = civ.policies.getAdoptedPolicies().toSet()
+        /** The gold the turn should bring in, as the engine reckons it before the turn: the gold check measures what is missing against it */
+        val income = civ.stats.statsForNextTurn.gold.toInt()
     }
 
     internal fun dealsOf(civ: Civilization) = diplomacy.dealsInForce(civ)
@@ -1441,10 +1466,13 @@ object RulerHost {
             (orders[civ.civName]?.faithReserve?.let { " (they leave $it untouched, by your reserve)" } ?: " (no faith reserve is set: they may spend it all)") + ".") }
         freeTechs.remove(civ.civName)?.forEach { (tech, goal) -> log(civ, if (goal != null) "A free technology: $tech, taken ${if (goal == tech) "as our research goal" else "on the way to $goal"}." else "A free technology: $tech, the officials' pick - no research goal named a step that could be taken.") }
         if (paid.isNotEmpty()) log(civ, "The treasury now holds ${civ.gold} gold.")
-        val unexplained = before.gold - civ.gold - paid.sumOf { it.first } - diplomacy.officialsDealGold.remove(civ.civName).let { it ?: 0 } - paidByRenewals.coerceAtLeast(0)
-        // Worth a line when it is more than a turn's income (never for trifles under 10): forty gold is a fortune in one age and small change in another
-        val income = civ.stats.statsForNextTurn.gold.toInt()
-        if (unexplained > maxOf(10, income)) { log(civ, "A further $unexplained gold left the treasury this turn without the officials' hand in it (upkeep, payments under our deals, or a deal struck)."); selfCheck("gold", civ.civName, "$unexplained gold left with no recorded cause") }
+        // What should be in the treasury - what was there, the turn's income, less every spending with its own line - against what is: a clean turn
+        // reads about 0 (it once left the income out, and so understated what was missing by a turn's income: Babylon's 360 read 288, Run 28)
+        val unexplained = before.gold + before.income - civ.gold - paid.sumOf { it.first } - diplomacy.officialsDealGold.remove(civ.civName).let { it ?: 0 } -
+            paidByRenewals.coerceAtLeast(0) - (rulersOwnGold.remove(civ.civName) ?: 0)
+        // Worth a line beyond a margin for the income's own drift (never for trifles under 20): forty gold is a fortune in one age and small change in another
+        val income = before.income
+        if (unexplained > maxOf(20, income / 2)) { log(civ, "A further $unexplained gold left the treasury this turn without the officials' hand in it (upkeep, payments under our deals, or a deal struck)."); selfCheck("gold", civ.civName, "$unexplained gold left with no recorded cause") }
         if (before.happiness >= 0 && civ.getHappiness() < 0) log(civ, "The people have become unhappy (${civ.getHappiness()}).")
     }
 
@@ -2459,11 +2487,12 @@ object RulerHost {
             "prophetsAndMissionaries" to missionaries.ifEmpty { null },
             "faithBuys" to "Faith buys Missionaries, Inquisitors and religious buildings where a city follows a founded religion, holy warriors where a belief allows, and from the Industrial era Great Prophets and the Great People below; the purchase order with faith (with: faith) buys, and get_options.buildable gives each city's price.",
             "greatPeopleForFaith" to greatPeopleForFaith(civ),
-            // A unit bought appears on the city's centre: a city whose centre holds one of the same kind already cannot take it (Rome's Great Merchants, Run 20)
-            "faithBuysNow" to civ.cities.flatMap { city -> (civ.gameInfo.ruleset.buildings.values + civ.gameInfo.ruleset.units.values).filter { item -> item !is com.unciv.models.ruleset.unit.BaseUnit || city.canPlaceNewUnit(item) }
-                .mapNotNull { item -> faithPrice(city, item)?.let { item.name to (it to city.name) } } }
-                .groupBy({ it.first }, { it.second }).map { (item, offers) -> "$item: ${offers.minOf { it.first }} faith (${offers.filter { it.first == offers.minOf { o -> o.first } }.joinToString { it.second }})" }
-                .ifEmpty { listOf("nothing faith can buy now (the note below says what it buys, and when)") },
+            "faithBuysNow" to faithOffers(civ).groupBy { it.item }.entries.partition { (_, offers) -> offers.any { it.bar == null } }.let { (open, barred) ->
+                open.map { (item, offers) -> offers.filter { it.bar == null }.let { here -> "$item: ${here.minOf { it.price }} faith (${here.filter { it.price == here.minOf { o -> o.price } }.joinToString { it.city }})" } } +
+                    // Priced but held back by the city centres alone: said once, with what stands on them
+                    listOfNotNull(barred.takeIf { it.isNotEmpty() }?.let { items -> "${andList(items.map { (item, offers) -> "$item (${offers.minOf { it.price }} faith)" })}: no city can take ${if (items.size == 1) "it" else "them"} now - " +
+                        items.flatMap { it.value }.mapNotNull { it.bar }.distinct().joinToString("; ") })
+            }.ifEmpty { listOf("nothing faith can buy now (the note below says what it buys, and when)") },
             "note" to "The officials spend faith on their own above your faithReserve, each purchase told in the log; founding, enhancing and spreading are done by a Great Prophet or Missionary of ours with the use order (ability religion), in the right city.")
     }
 
@@ -2484,7 +2513,8 @@ object RulerHost {
             val how = (opened.filter { it.first !is com.unciv.models.ruleset.tech.Era }.map { (source, unique) -> "with " + (if (source is com.unciv.models.ruleset.Policy) source.name.replace(" Complete", " complete") else "the ${source.name} belief") +
                     unique.modifiers.joinToString("") { ", " + RulerUnits.inWords(it.text) } } +
                 listOfNotNull(eras.minByOrNull { it.eraNumber }?.let { "from the ${it.name} on" })).joinToString("; or ")
-            val now = civ.cities.filter { city -> faithPrice(city, unit) != null }
+            val priced = faithOffers(civ).filter { it.item == person }
+            val now = priced.filter { it.bar == null }
             // What we lack, said plainly: the branch not yet complete, or the era not yet reached
             val lacking = opened.mapNotNull { (source, unique) -> when {
                 source is com.unciv.models.ruleset.Policy && !civ.policies.isAdopted(source.name) -> "${source.name.removeSuffix(" Complete")} is not complete"
@@ -2492,7 +2522,9 @@ object RulerHost {
                 !unique.conditionalsApply(civ.state) -> "we are in the ${civ.getEra().name}"
                 // Where it may be bought: "in all cities in which the majority religion is a major religion" - none of ours may be one (Run 22: Babylon and Greece held the faith and read no reason)
                 else -> unique.params.firstOrNull { it.startsWith("in ") && it != "in all cities" }?.let { where -> "it is bought only ${RulerUnits.inWords(where).replace("in all cities in which", "in a city in which").replace("in all cities", "in a city")}, and no city of ours is one now" } } }.distinct()
-            val line = "$person: $how ($price) - " + (if (now.isNotEmpty()) "open to us now, ${faithPrice(now.first(), unit)} faith in ${now.first().name}" else "not open to us now" + (lacking.takeIf { it.isNotEmpty() }?.let { ": " + it.joinToString(", ") } ?: ""))
+            val line = "$person: $how ($price) - " + (if (now.isNotEmpty()) "open to us now, ${now.first().price} faith in ${now.first().city}"
+                else if (priced.isNotEmpty()) "${priced.first().price} faith in ${priced.first().city}, but no city can take it now - ${priced.map { it.bar }.distinct().joinToString("; ")}"
+                else "not open to us now" + (lacking.takeIf { it.isNotEmpty() }?.let { ": " + it.joinToString(", ") } ?: ""))
             val near = now.isNotEmpty() || opened.any { (source, _) -> source is com.unciv.models.ruleset.Policy && source.branch.name in nearBranches }
             Triple(line, near, "$person (${how.removePrefix("with ")})")
         }
