@@ -76,8 +76,9 @@ object RulerOverrides {
         Luxuries("luxuries", false, true), OpenBorders("Open Borders", false, true), Embassy("Embassy", false, true), ResearchAgreement("Research Agreement", false, true),
         Gifts("gifts", false, true), Demands("demands", false, true),
         // Re-arming soldiers with gold above the reserve: in a war with a great power by default; at peace only when the court opens it
-        Rearm("re-arming", false, true), RearmAtPeace("re-arming at peace", false, false);
-        companion object { fun of(label: String) = entries.firstOrNull { it.label.equals(label.trim(), ignoreCase = true) } }
+        Rearm("re-arming in war", false, true), RearmAtPeace("re-arming at peace", false, false);
+        // "re-arming" was Rearm's label before "in war" was said (a court read "re-arming" open and "re-arming at peace" barred as a contradiction, Run 29)
+        companion object { fun of(label: String) = entries.firstOrNull { it.label.equals(label.trim(), ignoreCase = true) } ?: Rearm.takeIf { label.trim().equals("re-arming", ignoreCase = true) } }
     }
     /** civID -> the court's own word on its officials' acts, where it differs from [Act.byDefault] (a standing order of the ruler, kept by the host) */
     val officialsOrders = ConcurrentHashMap<String, Map<Act, Boolean>>()

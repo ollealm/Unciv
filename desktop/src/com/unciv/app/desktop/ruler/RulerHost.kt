@@ -1690,6 +1690,54 @@ object RulerHost {
         return culturalLastStep(civ)?.let { "${it.name}: a national wonder of ${it.getProductionCost(civ, null)} production that only a power with ${needed ?: "the"} branches complete may build${if (it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CannotBeHurried)) "; it cannot be hurried" else ""}. The power that finishes it wins" }
     }
 
+    /** Every road to victory in play, and where each great power we know stands on it, ours first: plain facts, one line per power and road, and a road
+     *  said shut where it is shut for us. No turns to a victory and no advice (three of four seats asked for the races side by side, Run 29) */
+    private fun raceView(civ: Civilization): Map<String, List<String>>? {
+        val game = civ.gameInfo
+        val inPlay = game.gameParameters.victoryTypes
+        if (inPlay.isEmpty()) return null
+        val powers = powersWeKnow(civ)
+        val unmet = game.civilizations.count { it.isMajorCiv() && it.isAlive() && it != civ && it !in powers }
+        val name = { power: Civilization -> if (power == civ) "us" else power.civName }
+        val race = LinkedHashMap<String, List<String>>()
+        for (road in listOf("Scientific", "Cultural", "Diplomatic")) {
+            if (road !in inPlay) continue
+            val lines = powers.mapNotNull { power -> diplomacy.victoryStandings(power).firstOrNull { it.road == road }?.let { "${name(power)}: ${it.have} of ${it.need}" } }
+            race[road] = when (road) {
+                "Scientific" -> lines.map { "$it spaceship parts" }
+                "Cultural" -> powers.map { power -> "${name(power)}: ${power.policies.completedBranches.size} of ${culturalBranchesNeeded(civ) ?: "?"} branches of policy complete" +
+                    (if ((culturalBranchesNeeded(civ) ?: 99) <= power.policies.completedBranches.size) ", only the ${culturalLastStep(civ)?.name ?: "last project"} to build" else "") } + listOfNotNull(shutBranches(civ))
+                else -> lines.map { "$it votes, in the city-states allied" }.ifEmpty { listOf("the United Nations is not built: nobody can be voted in yet") }
+            }
+        }
+        if ("Domination" in inPlay) {
+            // The original capitals: who holds each, by holder, and whether it lies across the sea from us
+            val ourLands = civ.cities.map { it.getCenterTile().getContinent() }.toSet()
+            val capitals = game.getCities().filter { it.isOriginalCapital && it.foundingCivObject?.isMajorCiv() == true && it.getCenterTile().isExplored(civ) }.toList()
+            val majors = game.civilizations.count { it.isMajorCiv() }
+            race["Domination"] = capitals.groupBy { it.civ }.entries.sortedByDescending { it.value.size }.map { (holder, held) ->
+                "${name(holder)}: ${held.size} of the $majors original capitals - " + andList(held.map { city ->
+                    city.name + (if (city.foundingCivObject != holder) " (${city.foundingCivObject!!.civName}'s)" else "") +
+                        (if (holder != civ && city.getCenterTile().getContinent() !in ourLands) ", across the sea from us" else "") })
+            } + listOfNotNull((majors - capitals.size).takeIf { it > 0 }?.let { "$it original capital${plural(it)} we have never seen" })
+        }
+        if (unmet > 0) race["powers we have not met"] = listOf("$unmet great power${plural(unmet)} we have not met: their standing is unknown to us")
+        return race
+    }
+
+    /** The branches of policy shut to us for good - their opening policy unavailable to us now that another is ours - and whether the cultural road is shut */
+    private fun shutBranches(civ: Civilization): String? {
+        val needed = culturalBranchesNeeded(civ) ?: return null
+        val branches = civ.gameInfo.ruleset.policyBranches.values
+        // Shut for good: "Only available <before adopting [Rationalism]>" with Rationalism ours (Piety), or unavailable outright
+        val shut = branches.filter { branch -> !civ.policies.isAdopted(branch.name) && (branch.hasUnique(com.unciv.models.ruleset.unique.UniqueType.Unavailable, civ.state) ||
+            branch.getMatchingUniques(com.unciv.models.ruleset.unique.UniqueType.OnlyAvailable, com.unciv.models.ruleset.unique.GameContext.IgnoreConditionals).any { only ->
+                only.modifiers.any { it.type == com.unciv.models.ruleset.unique.UniqueType.ConditionalBeforePolicyOrBelief && civ.policies.isAdopted(it.params[0]) } }) }
+        if (shut.isEmpty()) return null
+        val open = branches.size - shut.size
+        return "shut to us for good: ${andList(shut.map { it.name })}" + (if (open < needed) " - fewer than $needed branches are left open to us, so the cultural road is shut" else "")
+    }
+
     /** Each branch of policy we have opened: (branch, policies of it adopted, policies in it), the opening one counted */
     private fun ourBranches(civ: Civilization) = civ.gameInfo.ruleset.policyBranches.values.filter { civ.policies.isAdopted(it.name) }.map { branch ->
         val members = branch.policies.filter { it.policyBranchType == com.unciv.models.ruleset.Policy.PolicyBranchType.Member }
@@ -2087,7 +2135,7 @@ object RulerHost {
                 arrayOf("warnings" to shown, "warningsAcknowledged" to acknowledged.map { firstClause(it) }.ifEmpty { null }) },
             // waysToWin names the victories; the note that told them again was never cited in a league (compaction 2026-10-03)
             "victory" to civ.gameInfo.civilizations.firstOrNull { it.victoryManager.hasWon() }.let { winner -> mapOf("winner" to winner?.civName, "victoryType" to winner?.victoryManager?.getVictoryTypeAchieved(),
-                "diplomatic" to told(civ, "victory.diplomatic"), "cultural" to culturalFacts(civ)) },
+                "diplomatic" to told(civ, "victory.diplomatic"), "cultural" to culturalFacts(civ), "race" to raceView(civ)) },
             "researching" to civ.tech.currentTechnologyName(),
             "researchQueue" to civ.tech.techsToResearch,
             "techsResearched" to civ.tech.techsResearched.size,
