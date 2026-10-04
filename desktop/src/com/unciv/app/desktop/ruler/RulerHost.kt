@@ -97,8 +97,10 @@ object RulerHost {
             "personality" to personality,
             "neverBuild" to neverBuild,
             "research" to research.filter { civ == null || !civ.tech.isResearched(it) || civ.gameInfo.ruleset.technologies[it]?.isContinuallyResearchable() == true },
-            // A branch completed or a policy taken is no wish left (Monarchy, Tradition and Piety stood in the list long after)
-            "policyBranches" to policyBranches.filter { wish -> civ == null || !(civ.policies.isAdopted(wish) || civ.policies.completedBranches.any { it.name == wish }) })
+            // A branch completed or a single policy taken is no wish left (Monarchy, Tradition and Piety stood in the list long after). A branch opened is
+            // still a wish - opening it adopts a policy of the branch's own name, so isAdopted alone struck Babylon's Rationalism from the list unsaid (Run 30)
+            "policyBranches" to policyBranches.filter { wish -> civ == null || !(civ.policies.completedBranches.any { it.name == wish } ||
+                (wish !in civ.gameInfo.ruleset.policyBranches && civ.policies.isAdopted(wish))) })
     }
 
     @JvmStatic
@@ -1489,7 +1491,8 @@ object RulerHost {
             val city = hits.first().targetCity
             val died = hits.filter { it.attackerFell }.mapNotNull { it.attackerUnit }.takeIf { it.isNotEmpty() }?.let { "; their ${it.joinToString(" and ")} died in the attempt" } ?: ""
             log(civ, if (city != null) "$whose struck $city $times: " + (if (hits.any { it.fell }) (if (attacker == Constants.barbarians) "the walls were overrun and the city raided" else "the walls were stormed and the city is lost") else "the walls at ${hits.last().health} of ${hits.last().maxHealth} health") + died + "."
-                else "$whose struck our ${if (hits.first().targetTile?.isWater == true) "ships" else "soldiers"} ${RulerCampaigns.atPlace(place)} $times: " + listOfNotNull(
+                // Soldiers embarked are soldiers at sea, not ships (a ruler read "our ships at the harbour of Sippar" as a navy lost; it was Mechanized Infantry, Run 30)
+                else "$whose struck our ${if (hits.first().targetTile?.isWater != true) "soldiers" else if (hits.all { h -> h.targetUnit?.let { civ.gameInfo.ruleset.units[it]?.isWaterUnit } == true }) "ships" else "soldiers at sea"} ${RulerCampaigns.atPlace(place)} $times: " + listOfNotNull(
                     hits.filter { !it.fell && it.targetUnitId !in hits.filter { b -> b.fell }.map { b -> b.targetUnitId } }.groupBy { it.targetUnitId ?: it.targetUnit!! }.values
                         .map { blows -> "our ${blows.last().targetUnit} at ${blows.last().health} health" }.takeIf { it.isNotEmpty() }?.joinToString(", "),
                     hits.filter { it.fell }.map { it.targetUnit!! }.takeIf { it.isNotEmpty() }?.let { "our ${it.joinToString(" and ")} fell" }
