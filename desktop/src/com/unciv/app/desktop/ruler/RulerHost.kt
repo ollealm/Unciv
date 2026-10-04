@@ -471,6 +471,7 @@ object RulerHost {
         Memory("focusedCities", true, { RulerOverrides.focusedCities.clear() }, { RulerOverrides.focusedCities.toList() }, { json -> json?.asStringArray()?.let { RulerOverrides.focusedCities += it } }),
         Memory("cadence", true, { ageTurns = 12; lookInTurns = 4 }, { mapOf("ageTurns" to ageTurns, "lookInTurns" to lookInTurns) },
             { json -> json?.let { ageTurns = it.getInt("ageTurns", 12); lookInTurns = it.getInt("lookInTurns", 4) } }),
+        Memory("waiting", true, { waiting.clear() }, { waiting }, { json -> json?.forEach { city -> waiting[city.name] = ArrayList(city.asStringArray().toList()) } }),
         Memory("inPlay", true, { inPlaySeen.clear() }, { inPlaySeen.filterValues { it.isNotEmpty() }.mapValues { it.value.sorted() } },
             { json -> json?.forEach { civ -> inPlaySeen[civ.name] = civ.asStringArray().toHashSet() } }), // older files have none: latched afresh
         Memory("warningsWoken", true, { warningsWoken.clear() }, { warningsWoken.mapValues { it.value.sorted() } },
@@ -674,9 +675,19 @@ object RulerHost {
     private fun Civilization.construction(name: String): INonPerpetualConstruction =
         (gameInfo.ruleset.buildings[name] ?: gameInfo.ruleset.units[name]) ?: throw ApiError(400, "Unknown building or unit $name" + didYouMean(name, gameInfo.ruleset.buildings.keys + gameInfo.ruleset.units.keys))
     /** Every reason the engine would refuse it - the ones the game hides from its own build menu included, in plain words, since a queue order that is silently dropped is worse than a refusal */
-    private fun whyNot(city: City, construction: INonPerpetualConstruction, earlier: List<String> = emptyList()): List<String> {
+    private fun whyNot(city: City, construction: INonPerpetualConstruction, earlier: List<String> = emptyList()): List<String> = reasonsWhyNot(city, construction, earlier).map { it.second }
+
+    /** The reasons that only mean "not yet": a technology, a building here or elsewhere, a resource to spare, a condition, a size - an item held back by
+     *  these alone waits in its city's queue (waiting) and starts once it can; any other reason refuses it */
+    private val WAITS_FOR = setOf(com.unciv.models.ruleset.RejectionReasonType.RequiresTech, com.unciv.models.ruleset.RejectionReasonType.RequiresBuildingInThisCity,
+        com.unciv.models.ruleset.RejectionReasonType.RequiresBuildingInAllCities, com.unciv.models.ruleset.RejectionReasonType.RequiresBuildingInSomeCities,
+        com.unciv.models.ruleset.RejectionReasonType.RequiresBuildingInSomeCity, com.unciv.models.ruleset.RejectionReasonType.ConsumesResources,
+        com.unciv.models.ruleset.RejectionReasonType.ShouldNotBeDisplayed, com.unciv.models.ruleset.RejectionReasonType.PopulationRequirement)
+
+    /** Each reason in words, with the engine's kind of it */
+    private fun reasonsWhyNot(city: City, construction: INonPerpetualConstruction, earlier: List<String> = emptyList()): List<Pair<com.unciv.models.ruleset.RejectionReasonType, String>> {
         val ruleset = city.civ.gameInfo.ruleset
-        return construction.getRejectionReasons(city.cityConstructions).mapNotNull { reason -> when (reason.type) {
+        return construction.getRejectionReasons(city.cityConstructions).mapNotNull { reason -> (when (reason.type) {
             // A building it needs may stand ahead of it in the same queue: then the requirement is met and no reason is given (a met requirement
             // once fell through to the engine's own "Requires a [Shrine] in this city", 47 times in Run 29)
             com.unciv.models.ruleset.RejectionReasonType.RequiresBuildingInThisCity -> when (val needed = (construction as? com.unciv.models.ruleset.Building)?.requiredBuilding) {
@@ -704,8 +715,11 @@ object RulerHost {
             com.unciv.models.ruleset.RejectionReasonType.DisabledBySetting, com.unciv.models.ruleset.RejectionReasonType.WonderDisabledEra -> "it is not part of this world"
             com.unciv.models.ruleset.RejectionReasonType.CanOnlyBeBuiltInSpecificCities, com.unciv.models.ruleset.RejectionReasonType.MustBeOnTile, com.unciv.models.ruleset.RejectionReasonType.MustNotBeOnTile,
             com.unciv.models.ruleset.RejectionReasonType.MustBeNextToTile, com.unciv.models.ruleset.RejectionReasonType.MustNotBeNextToTile, com.unciv.models.ruleset.RejectionReasonType.MustOwnTile -> "${city.name} does not lie where it can be built" + (reason.errorMessage.takeIf { it != reason.type.errorMessage }?.let { " ($it)" } ?: "")
+            // "Need [1] more [Aluminum]": what the queued items and our units already take leaves too little
+            com.unciv.models.ruleset.RejectionReasonType.ConsumesResources -> Regex("Need \\[?(\\d+)\\]? more \\[?([^\\]]+?)\\]?$").find(reason.errorMessage)
+                ?.let { "it needs ${it.groupValues[1]} more ${it.groupValues[2]} than we have to spare" } ?: engineWords(reason.errorMessage)
             else -> engineWords(reason.errorMessage)
-        } }.distinct().toList()
+        })?.let { reason.type to it } }.distinctBy { it.second }.toList()
     }
 
     /** Why an "Only available" (or "Can only be built") condition holds an item back, in words: the conditions not met, brackets struck */
@@ -729,6 +743,33 @@ object RulerHost {
     }
 
     /** Every field an order may carry: an order with none of them is no order (a model that wrapped its fields in "arguments" sent nothing) */
+    /** city id -> what the ruler queued there before it could be built, in the order given: each starts once it can (startWaiting) */
+    private val waiting = HashMap<String, ArrayList<String>>()
+
+    /** Each turn, before the officials' turn: a waiting item that can now be built goes to the front of its city's queue, in the order given; one that can
+     *  never be built there now (a wonder raised elsewhere, made obsolete) is dropped, and both are told */
+    private fun startWaiting(civ: Civilization) {
+        for (city in civ.cities) {
+            val list = waiting[city.id]?.takeIf { it.isNotEmpty() } ?: continue
+            var front = 0
+            for (item in list.toList()) {
+                val construction = try { civ.construction(item) } catch (_: Exception) { list.remove(item); continue }
+                val reasons = reasonsWhyNot(city, construction, city.cityConstructions.constructionQueue.toList())
+                when {
+                    reasons.isEmpty() && !construction.isBuildable(city.cityConstructions) -> {} // what it needs is queued ahead of it, not yet built
+                    reasons.isEmpty() -> {
+                        list.remove(item); city.cityConstructions.constructionQueue.remove(item)
+                        city.cityConstructions.constructionQueue.add(front++, item)
+                        city.cityConstructions.currentConstructionIsUserSet = true; RulerOverrides.lockedCities += city.id
+                        log(civ, "By your order: $item, which waited in ${city.name}'s queue, can now be built and is put to work.")
+                    }
+                    !reasons.all { it.first in WAITS_FOR } -> { list.remove(item); log(civ, "$item no longer waits in ${city.name}'s queue: ${reasons.joinToString { it.second }}.") }
+                }
+            }
+        }
+        waiting.entries.removeIf { (id, list) -> list.isEmpty() || civ.gameInfo.getCities().none { it.id == id } }
+    }
+
     /** Gold the ruler's own deferred orders spent at the start of the civ's turn (re-armings that waited for a unit that had marched) */
     private val rulersOwnGold = HashMap<String, Int>()
 
@@ -864,22 +905,40 @@ object RulerHost {
             val constructions = (if (closing != null) items.dropLast(1) else items).map { civ.construction(it) }
             // Each item is judged with the items ahead of it in this same queue counted as built (a Temple behind its Shrine is fine);
             // one that cannot be built is left out, the rest is queued as ordered - never the whole queue dropped for one item
-            val leftOut = ArrayList<String>(); val good = ArrayList<INonPerpetualConstruction>()
+            val leftOut = ArrayList<String>(); val good = ArrayList<INonPerpetualConstruction>(); val waits = ArrayList<Pair<String, String>>()
             // A yield this city cannot turn production into is left out like any other item
             val perpetual = closing?.takeIf { it.isBuildable(city.cityConstructions) }
             if (closing != null && perpetual == null) leftOut += "${closing.name} (${conversionProblem(city, closing.name)})"
             for ((index, construction) in constructions.withIndex()) {
-                val reasons = whyNot(city, construction, items.take(index))
-                if (reasons.isNotEmpty()) leftOut += "${items[index]} (${reasons.joinToString()})" else good += construction
+                val reasons = reasonsWhyNot(city, construction, items.take(index))
+                when {
+                    reasons.isEmpty() && construction.isBuildable(city.cityConstructions) -> good += construction
+                    // Buildable only once what stands ahead of it in this queue is built (a Temple behind its Shrine): the engine takes no such item into a
+                    // queue, so it waits, and starts once its Shrine stands
+                    reasons.isEmpty() -> waits += construction.name to "once what it needs, queued ahead of it, stands"
+                    // Not yet unlocked: it waits in the city's queue and starts once it can (China lost a race by two turns to an item it could not queue, Run 28)
+                    reasons.all { it.first in WAITS_FOR } -> waits += construction.name to reasons.joinToString { it.second }
+                    else -> leftOut += "${items[index]} (${reasons.joinToString { it.second }})"
+                }
             }
-            if (good.isEmpty() && perpetual == null) throw ApiError(400, "${city.name} cannot build ${leftOut.joinToString("; ")}; its queue is unchanged")
+            if (good.isEmpty() && perpetual == null && waits.isEmpty()) throw ApiError(400, "${city.name} cannot build ${leftOut.joinToString("; ")}; its queue is unchanged")
+            // The item under way that the new queue leaves out: its work is kept by name, and it goes on where it stopped if queued again
+            val halfBuilt = city.cityConstructions.currentConstructionName().takeIf { current -> current.isNotEmpty() && current !in items &&
+                !com.unciv.models.ruleset.PerpetualConstruction.isNamePerpetual(current) && city.cityConstructions.getWorkDone(current) > 0 }
             city.cityConstructions.constructionQueue.clear()
-            for (construction in good) city.cityConstructions.addToQueue(construction)
+            waiting[city.id] = ArrayList(waits.map { it.first })
+            for (construction in good) {
+                city.cityConstructions.addToQueue(construction)
+                if (construction.name !in city.cityConstructions.constructionQueue) leftOut += "${construction.name} (the queue holds no more)"
+            }
             if (perpetual != null) city.cityConstructions.addToQueue(perpetual)
             city.cityConstructions.currentConstructionIsUserSet = true
             RulerOverrides.lockedCities += city.id
-            val now = "${city.name} queue is now: ${city.cityConstructions.constructionQueue.joinToString()}"
-            log(civ, "By your order: ${city.name}'s queue is now ${city.cityConstructions.constructionQueue.joinToString()}.")
+            val waitWords = if (waits.isEmpty()) "" else "; waiting to start once they can: ${waits.joinToString("; ") { (item, why) -> "$item ($why)" }}"
+            val now = "${city.name} queue is now: ${city.cityConstructions.constructionQueue.joinToString().ifEmpty { "(nothing that can be built yet)" }}$waitWords" +
+                (halfBuilt?.let { ". The half-built $it is left out of it; its work is kept, and it goes on where it stopped if you queue it again" } ?: "")
+            log(civ, "By your order: ${city.name}'s queue is now ${city.cityConstructions.constructionQueue.joinToString().ifEmpty { "empty" }}" +
+                (if (waits.isEmpty()) "" else ", and ${andList(waits.map { it.first })} ${if (waits.size == 1) "waits" else "wait"} to start once ${if (waits.size == 1) "it" else "they"} can") + ".")
             if (leftOut.isNotEmpty()) throw ApiError(400, "${city.name} cannot build ${leftOut.joinToString("; ")} - left out; the rest was queued as ordered. $now")
             now
         }
@@ -888,7 +947,13 @@ object RulerHost {
             val city = civ.city(order.getString("city"))
             val item = order.getString("item")
             val construction = civ.construction(item)
-            val reasons = whyNot(city, construction)
+            val typed = reasonsWhyNot(city, construction)
+            if (typed.isNotEmpty() && typed.all { it.first in WAITS_FOR }) {
+                waiting.getOrPut(city.id) { ArrayList() }.apply { remove(construction.name); add(0, construction.name) }
+                log(civ, "By your order: $item waits in ${city.name}'s queue and goes to its front once it can be built.")
+                return@tryEach "$item waits in ${city.name}'s queue and goes to its front once it can be built (${typed.joinToString { it.second }})"
+            }
+            val reasons = typed.map { it.second }
             if (reasons.isNotEmpty()) throw ApiError(400, "${city.name} cannot build $item: ${reasons.joinToString()}")
             city.cityConstructions.constructionQueue.remove(item)
             city.cityConstructions.addToQueue(construction, addToTop = true)
@@ -1110,6 +1175,7 @@ object RulerHost {
         val standing = orders[civ.civName] ?: return
         val ruleset = civ.gameInfo.ruleset
         applyResearchGoals(civ)
+        startWaiting(civ)
 
         val claimed = ArrayList<String>()
         if (standing.garrisonEveryCity) for (city in civ.cities) {
@@ -2033,6 +2099,9 @@ object RulerHost {
                     "puppet" to city.isPuppet.takeIf { it }, "beingRazed" to city.isBeingRazed.takeIf { it }, "coastal" to city.isCoastal().takeIf { it },
                     "buildings" to city.cityConstructions.getBuiltBuildings().map { it.name }.sorted(),
                     "buildQueue" to city.cityConstructions.constructionQueue,
+                    // Ordered before it could be built: each starts once it can
+                    "waiting" to waiting[city.id]?.mapNotNull { item -> runCatching { civ.construction(item) }.getOrNull()?.let {
+                        "$item - ${whyNot(city, it, city.cityConstructions.constructionQueue.toList()).ifEmpty { listOf("once what it needs, queued ahead of it, stands") }.joinToString()}" } },
                     "turnsLeft" to city.cityConstructions.currentConstructionName().let { current ->
                         if (current.isEmpty()) null
                         else if (com.unciv.models.ruleset.PerpetualConstruction.isNamePerpetual(current)) "ongoing (production turned into $current)"
