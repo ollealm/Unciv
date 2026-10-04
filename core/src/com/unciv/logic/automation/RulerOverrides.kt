@@ -134,6 +134,20 @@ object RulerOverrides {
             .flatMap { it.getTile().getTilesInDistance(it.getMaxMovement() - 1 + it.getRange()) }.toHashSet()
     }
 
+    /** Where a ruled civ's land unit at sea would be struck before it can land: within an enemy city's bombard reach, or within what the enemy soldiers
+     *  and ships near it could strike next turn (enemyReach). Every seaborne host died embarked under Munich's guns, a unit or two a turn (Run 32) */
+    fun perilAtSea(unit: MapUnit): Set<Tile> {
+        if (unit.civ.civID !in ruledCivs) return emptySet()
+        val cities = unit.civ.getKnownCivs().filter { unit.civ.isAtWarWith(it) }.flatMap { it.cities }
+            .filter { it.getCenterTile().aerialDistanceTo(unit.getTile()) <= 12 }
+        return cities.flatMap { city -> city.getCenterTile().getTilesInDistance(city.getBombardRange()) }.toHashSet() + enemyReach(unit)
+    }
+
+    /** Does this ruled civ's land unit go by sea to the city - at sea now, or with water on its way? Then it lands out of reach and walks (headForLanding) */
+    @yairm210.purity.annotations.Readonly
+    fun goesBySea(unit: MapUnit, path: List<Tile>): Boolean =
+        unit.civ.civID in ruledCivs && unit.baseUnit.isLandUnit && (unit.isEmbarked() || path.any { it.isWater })
+
     /** Where a ruled civ's civilian with enemy soldiers in reach of it keeps to: of the tiles it can step to that lie beyond their reach, the one nearest a city
      *  of ours - never the open field the engine's "furthest from danger" may choose. Null when none is open to it or none of the enemy can reach it */
     fun shelterNearHome(unit: MapUnit, open: Sequence<Tile>): Tile? {

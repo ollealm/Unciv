@@ -81,6 +81,9 @@ object HeadTowardsEnemyCityAutomation {
         closestReachableEnemyCity: Tile,
         shortestPath: List<Tile>
     ): Boolean {
+        // A ruled civ's land unit going by sea never holds, nor ends a turn, at sea within reach of the city or of the enemy near it: it lands out of
+        // reach and walks. Unruled civs go as upstream has them
+        if (com.unciv.logic.automation.RulerOverrides.goesBySea(unit, shortestPath)) return headForLanding(unit, closestReachableEnemyCity)
         val unitDistanceToTiles = unit.movement.getDistanceToTiles()
 
         val unitRange = unit.getRange()
@@ -112,6 +115,44 @@ object HeadTowardsEnemyCityAutomation {
 
         unit.movement.moveToTile(nextTileInPath) // go for it!
 
+        return true
+    }
+
+    /** A ruled civ's land unit going by sea: the landing is a land tile on the city's landmass, at least three from it and out of every reach
+     *  (RulerOverrides.perilAtSea), that can be come to by water out of reach - the one nearest the city, further along the coast when the near shore is
+     *  under the guns (Munich's whole western shore was, across the strait from London, Run 32). Each turn the unit goes as far along that way as it can,
+     *  never ending a turn at sea within reach, and lands; on its landing it walks as any soldier does. With no such landing, it keeps out of reach */
+    private fun headForLanding(unit: MapUnit, cityTile: Tile): Boolean {
+        val peril = com.unciv.logic.automation.RulerOverrides.perilAtSea(unit)
+        val landmass = cityTile.getContinent()
+        val start = unit.currentTile
+        fun landing(tile: Tile) = tile.isLand && tile.getContinent() == landmass && tile !in peril && tile.aerialDistanceTo(cityTile) in minDistanceFromCityToConsiderForLandingArea..10 &&
+            unit.getDamageFromTerrain(tile) <= 0 && (tile == start || unit.movement.canMoveTo(tile))
+        // The ways by sea out of reach: water not within reach, and our own side's land to walk along to the shore; a landing ends a way
+        val came = HashMap<Tile, Tile>().apply { put(start, start) }
+        val depth = HashMap<Tile, Int>().apply { put(start, 0) }
+        val queue = ArrayDeque(listOf(start))
+        val landings = ArrayList<Tile>()
+        while (queue.isNotEmpty()) {
+            val tile = queue.removeFirst()
+            if (landing(tile)) { landings += tile; continue }
+            if (tile != start && tile.isLand && tile.getContinent() == landmass) continue
+            for (next in tile.neighbors) {
+                if (next in came || next.aerialDistanceTo(start) > 30 || next.isImpassible()) continue
+                if (next.isWater && next in peril) continue
+                if (next.isLand && next.getContinent() == landmass && !landing(next)) continue
+                came[next] = tile; depth[next] = depth[tile]!! + 1; queue.addLast(next)
+            }
+        }
+        val target = landings.minWithOrNull(compareBy({ it.aerialDistanceTo(cityTile) }, { depth[it] }))
+        val open = unit.movement.getDistanceToTiles().keys.filter { (it == start || unit.movement.canMoveTo(it)) && !(it.isWater && it in peril) }.toHashSet()
+        val step = if (target == null) {
+            if (start in peril) open.minByOrNull { tile -> unit.civ.cities.minOfOrNull { it.getCenterTile().aerialDistanceTo(tile) } ?: 0 } else null
+        } else {
+            // The farthest tile along the way that this turn's movement reaches
+            generateSequence(target) { tile -> came[tile]?.takeIf { it != tile } }.firstOrNull { it in open }
+        }
+        if (step != null && step != start) unit.movement.moveToTile(step)
         return true
     }
 

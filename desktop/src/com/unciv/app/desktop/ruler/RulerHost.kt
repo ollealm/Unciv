@@ -1467,8 +1467,11 @@ object RulerHost {
             val theirs = whose + if (whose.endsWith("s")) "'" else "'s" // the Aztecs' soldiers, Japan's
             val times = when (blows.size) { 1 -> "once"; 2 -> "twice"; else -> "${blows.size} times" }
             val city = blows.first().targetCity
-            log(civ, if (city != null) "Our host struck $city ($whose) $times: " + (if (blows.any { it.fell }) "the walls were stormed and the city is taken." else "the walls at ${blows.last().health} of ${blows.last().maxHealth} health.")
-                else "Our host struck " + (if (blows.first().targetTile?.isWater == true) {
+            // Ships are named as ships: Triremes bombarding Munich read as a landed siege while every soldier stood at home (Run 32)
+            val atSea = blows.map { blow -> blow.attackerUnit?.let { civ.gameInfo.ruleset.units[it]?.isWaterUnit } ?: false }
+            val ours = when { atSea.all { it } -> "Our ships"; atSea.any { it } -> "Our host and ships"; else -> "Our host" }
+            log(civ, if (city != null) "$ours struck $city ($whose) $times: " + (if (blows.any { it.fell }) "the walls were stormed and the city is taken." else "the walls at ${blows.last().health} of ${blows.last().maxHealth} health.")
+                else "$ours struck " + (if (blows.first().targetTile?.isWater == true) {
                     // On the water, ships and embarked soldiers alike: in one harbour, said by name, or else at sea
                     val harbour = blows.mapNotNull { it.targetTile }.map { RulerCampaigns.placeOf(civ, it, emptySet()) }.distinct().singleOrNull()?.takeIf { it.startsWith("the harbour of") }
                     "$whose ${harbour?.let { "in $it" } ?: "at sea"}"
