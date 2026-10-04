@@ -622,7 +622,9 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
             if (other.isCityState) {
                 entry["cityState"] = other.cityStateType.name
                 entry["influence"] = theirs?.getInfluence()?.toInt()
-                entry["ally"] = other.allyCiv?.let { ally -> if (ally == civ) "us" else "${ally.civName}, with ${other.getDiplomacyManager(ally)?.getInfluence()?.toInt() ?: 0} influence" }
+                // A city-state fights its ally's wars: a peace with it lasts only while its ally is at peace with us too (Manila's collapsed in two turns, Run 28)
+                entry["ally"] = other.allyCiv?.let { ally -> if (ally == civ) "us - it fights our wars" else "${ally.civName}, with ${other.getDiplomacyManager(ally)?.getInfluence()?.toInt() ?: 0} influence - it fights ${ally.civName}'s wars" +
+                    (if (civ.isAtWarWith(ally)) ", and ${ally.civName} is at war with us" else "") }
                 // What a gift of ours would add now (the city-state screen's own sum), and how much our standing falls each turn
                 entry["ourGiftWouldAdd"] = listOf(250, 500, 1000).filter { civ.gold >= it }.associate { "$it gold" to other.cityStateFunctions.influenceGainedByGift(civ, it) }.ifEmpty { null }
                 entry["ourInfluenceFallsPerTurn"] = theirs?.getCityStateInfluenceDegrade()?.takeIf { it > 0f }?.let { (it * 10).toInt() / 10f }

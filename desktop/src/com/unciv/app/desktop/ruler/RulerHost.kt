@@ -2213,7 +2213,7 @@ object RulerHost {
         // At peace the reckoning is in get_options; it is not latched, a war ends
         Section("warEstimate", latch = false, exists = { true }, inPlay = { it.isAtWar() || orders[it.civName]?.warAim != null },
             oneLine = { mapOf("note" to "At peace: the chancery's reckoning of every rival city against our engines is in get_options.warEstimate - read it before any talk of war.") },
-            full = ::warEstimate)
+            full = { warEstimate(it) })
     ) }
 
     /** The latched sections that have mattered to each realm, by name: kept in host.json */
@@ -2259,7 +2259,8 @@ object RulerHost {
         unit.name == "Scout" || unit.baseUnit.isProbablySiegeUnit() || RulerOverrides.farBehind(unit)
 
     /** The chancery's own reckoning of every rival city we have seen, against what we could bring to it: the sober part of any talk of war */
-    private fun warEstimate(civ: Civilization): Map<String, Any?> {
+    /** [everyPower]: every power we know city by city (get_options, asked for on purpose); else only those we fight or aim at, one line for the rest */
+    private fun warEstimate(civ: Civilization, everyPower: Boolean = false): Map<String, Any?> {
         val soldiers = civ.units.getCivUnits().filter { it.isMilitary() && it.baseUnit.isLandUnit }.toList()
         val siege = soldiers.filter { it.baseUnit.isProbablySiegeUnit() }
         val melee = soldiers.filter { it.baseUnit.isMelee() }
@@ -2279,7 +2280,13 @@ object RulerHost {
             com.unciv.logic.battle.MapUnitCombatant(unit), com.unciv.logic.battle.CityCombatant(city), city.getCenterTile(), 0.5f)
         fun cityHits(unit: com.unciv.logic.map.mapunit.MapUnit, city: City) = com.unciv.logic.battle.BattleDamage.calculateDamageToDefender(
             com.unciv.logic.battle.CityCombatant(city), com.unciv.logic.battle.MapUnitCombatant(unit), unit.getTile(), 0.5f)
-        val cities = civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.flatMap { other -> other.cities.filter { it.getCenterTile().isExplored(civ) } }
+        // Each city in full only for a power we fight or whose city is our war aim; the rest one line per power (a fifth of a war run's briefing, Run 28)
+        val aimedAt = orders[civ.civName]?.warAim?.let { aim -> civ.gameInfo.getCities().firstOrNull { it.name == aim }?.civ }
+        val (inFull, inBrief) = civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.partition { everyPower || civ.isAtWarWith(it) || it == aimedAt }
+        val othersSeen = inBrief.mapNotNull { other -> other.cities.filter { it.getCenterTile().isExplored(civ) }.takeIf { it.isNotEmpty() }?.let { seen ->
+            "${other.civName} (${relationTo(civ, other)}): ${seen.size} cit${if (seen.size == 1) "y" else "ies"} we have seen, ${seen.count { c -> c.cityConstructions.builtBuildings.any { "Walls" in it || "Castle" in it } }} walled, " +
+                "the strongest defence ${seen.maxOf { com.unciv.logic.battle.CityCombatant(it).getCityStrength() }} (${seen.maxBy { com.unciv.logic.battle.CityCombatant(it).getCityStrength() }.name}) - each city in full in get_options.warEstimate" } }
+        val cities = inFull.flatMap { other -> other.cities.filter { it.getCenterTile().isExplored(civ) } }
             .map { city ->
                 val defence = com.unciv.logic.battle.CityCombatant(city).getCityStrength()
                 val acrossWater = city.getCenterTile().getContinent() !in ourLands
@@ -2366,6 +2373,7 @@ object RulerHost {
             "ourBestEngine" to bestEngine?.name, "ourBestFootSoldier" to bestFoot?.name, "siegeEngines" to siege.size, "footSoldiers" to (melee.size - inGarrison), "footSoldiersHoldingOurCities" to inGarrison.takeIf { it > 0 },
             "ranged" to soldiers.count { it.baseUnit.isRanged() && !it.baseUnit.isProbablySiegeUnit() }, "ourBombers" to aircraft, "ourWarships" to warships.size,
             "citiesWeHaveSeen" to cities,
+            "otherPowers" to othersSeen,
             "withoutEngines" to (if (bestEngine == null) "We have no siege engines: no city's walls can be broken until we do, so each city is given as we last saw it - an engine of ours brings the full reckoning of each" else null),
             "citiesNeverSeen" to unseen,
             // The same note the deals carry: a power a step from victory, a fact beside the walls and never a bar (one source, RulerDiplomacy.victoryStandings)
@@ -2791,7 +2799,7 @@ object RulerHost {
         ensureStanding(civ)
         val ruleset = civ.gameInfo.ruleset
         return mapOf(
-            "warEstimate" to warEstimate(civ),
+            "warEstimate" to warEstimate(civ, everyPower = true),
             "researchableNow" to ruleset.technologies.values.filter { civ.tech.canBeResearched(it.name) }
                 .map { mapOf("tech" to it.name, "turns" to civ.tech.turnsToTech(it.name)) },
             "researchGoals" to "Any technology name works as a research goal; the path to it is researched automatically.",
