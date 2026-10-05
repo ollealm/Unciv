@@ -145,13 +145,46 @@ object RulerOverrides {
 
     /** Where a ruled civ's host at sea is bound this turn: each unit's landing (null: no shore out of reach, it holds out of reach) and the city it goes
      *  against. Written by the landing routine, read and cleared by the host's bookkeeping */
-    class Landing(val landing: Tile?, val city: Tile)
+    class Landing(val landing: Tile?, val city: Tile, val mode: String = "crossing", val cover: List<String> = emptyList())
     val landings = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ConcurrentHashMap<Int, Landing>>()
-    fun noteLanding(unit: MapUnit, landing: Tile?, city: Tile) {
-        landings.getOrPut(unit.civ.civID) { java.util.concurrent.ConcurrentHashMap() }[unit.id] = Landing(landing, city)
+    /** [mode]: "crossing" to a shore out of reach; "waiting" out of reach off [landing], the least perilous shore, for one to come out of reach;
+     *  "holding" with no shore it can land on at all. [cover]: who covers the shores it lands on - "city:Osaka", "unit:Japan:Frigate", one entry each */
+    fun noteLanding(unit: MapUnit, landing: Tile?, city: Tile, mode: String = "crossing", cover: List<String> = emptyList()) {
+        landings.getOrPut(unit.civ.civID) { java.util.concurrent.ConcurrentHashMap() }[unit.id] = Landing(landing, city, mode, cover)
     }
+
+    /** Where a host with no shore out of reach waits, reckoned once for a realm and a city while it plays its turn: the least perilous shore with a land
+     *  way to the city ([shore]), who covers the shores near it ([cover], as in [Landing]), and every tile within some enemy's reach ([perilous]) */
+    class ShoreWait(val key: String, val shore: Tile, val cover: List<String>, val perilous: Set<Tile>)
+    /** Where each realm's host waits off each city, by "civID@x,y" */
+    val shoreWaits = ConcurrentHashMap<String, ShoreWait>()
+    /** The city each of a ruled civ's units at sea is bound for: who belongs to which host */
+    val boundFor = ConcurrentHashMap<Int, com.unciv.logic.map.HexCoord>()
     /** The landing each unit at sea was last bound for, by unit id: kept while it stands, so the host does not turn about as the enemy moves */
     val headingFor = java.util.concurrent.ConcurrentHashMap<Int, com.unciv.logic.map.HexCoord>()
+
+    /** Water a ruled civ's land unit ashore does not step onto at war, whatever the routine that moves it: within the reach (move and strike) of an enemy
+     *  ship or soldier it can see. Six Japanese and an English soldier embarked along their own coasts and were sunk by ships that came after them (Run 32,
+     *  T174-189), and a wounded Trebuchet put to sea by the retreat routine died to a Crossbowman on the shore; the landing rule covered only the march to
+     *  a city. One already at sea may move on - out of it, if it can. A city's guns stay with the landing rule, which may accept them */
+    @yairm210.purity.annotations.Readonly
+    fun underEnemyShips(unit: MapUnit, tile: Tile): Boolean {
+        if (!tile.isWater || unit.isEmbarked() || !unit.baseUnit.isLandUnit || unit.civ.civID !in ruledCivs || unit.civ.isBarbarian) return false
+        return tile in shipReach(unit.civ)
+    }
+    /** The water an enemy ship or soldier this civ can see could strike next turn; reckoned once for each civ while one power plays its turn (they stand still) */
+    @yairm210.purity.annotations.Cache private val shipReachSeen = ConcurrentHashMap<String, Pair<String, Set<Tile>>>()
+    @yairm210.purity.annotations.Readonly
+    fun shipReach(civ: Civilization): Set<Tile> {
+        val key = "${civ.gameInfo.turns}/${civ.gameInfo.currentPlayer}"
+        shipReachSeen[civ.civID]?.takeIf { it.first == key }?.let { return it.second }
+        val reach = HashSet<Tile>()
+        if (civ.isAtWar()) for (tile in civ.viewableTiles) for (ship in tile.getUnits())
+            if (ship.isMilitary() && civ.isAtWarWith(ship.civ))
+                reach += tile.getTilesInDistance(ship.getMaxMovement() - 1 + ship.getRange())
+        shipReachSeen[civ.civID] = key to reach
+        return reach
+    }
 
     /** Does this ruled civ's land unit go by sea to the city - at sea now, or with water on its way? Then it lands out of reach and walks (headForLanding) */
     @yairm210.purity.annotations.Readonly

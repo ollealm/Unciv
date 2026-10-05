@@ -727,6 +727,10 @@ class UnitMovement(val unit: MapUnit) {
         val canPassThroughReason = if (assumeCanPassThrough) null else cannotPassThroughReason(tile)
         if (canPassThroughReason != null) return canPassThroughReason
 
+        // A ruled civ's soldier ashore does not embark where an enemy warship can strike it (RulerOverrides.underEnemyShips); passing through is not ending there
+        if (com.unciv.logic.automation.RulerOverrides.underEnemyShips(unit, tile))
+            return CannotMoveToReason.CannotEmbark
+
         // even if they'll let us pass through, we can't enter their city - unless we just captured it
         if (isCityCenterCannotEnter(tile))
             return CannotMoveToReason.CannotEnterCityCenter

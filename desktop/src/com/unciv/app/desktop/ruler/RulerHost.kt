@@ -500,7 +500,7 @@ object RulerHost {
         Memory("trail", true, { trail.clear() }, { trail.toMap() }, { json -> trail.load(json) }),
         Memory("ages", true, { ages.clear() }, { ages.toMap() }, { json -> ages.load(json) }),
         Memory("turnNews", false, { turnNews.clear(); nukeRazed.clear() }),
-        Memory("hostAtSea", false, { hostAtSea.clear(); holdingTold.clear(); RulerOverrides.landings.clear(); RulerOverrides.headingFor.clear() }),
+        Memory("hostAtSea", false, { hostAtSea.clear(); holdingTold.clear(); RulerOverrides.landings.clear(); RulerOverrides.headingFor.clear(); RulerOverrides.shoreWaits.clear(); RulerOverrides.boundFor.clear() }),
         Memory("atomicSeen", true, { atomicSeen = false }, { atomicSeen }, { json -> atomicSeen = json?.asBoolean() ?: false }),
         Memory("lockedCities", true, { RulerOverrides.lockedCities.clear() }, { RulerOverrides.lockedCities.toList() }, { json -> json?.asStringArray()?.let { RulerOverrides.lockedCities += it } }),
         Memory("focusedCities", true, { RulerOverrides.focusedCities.clear() }, { RulerOverrides.focusedCities.toList() }, { json -> json?.asStringArray()?.let { RulerOverrides.focusedCities += it } }),
@@ -1809,7 +1809,8 @@ object RulerHost {
             val capitals = game.getCities().filter { it.isOriginalCapital && it.foundingCivObject?.isMajorCiv() == true && it.getCenterTile().isExplored(civ) }.toList()
             val majors = game.civilizations.count { it.isMajorCiv() }
             race["Domination"] = capitals.groupBy { it.civ }.entries.sortedByDescending { it.value.size }.map { (holder, held) ->
-                "${name(holder)}: ${held.size} of the $majors original capitals - " + andList(held.map { city ->
+                // A city-state may hold a capital it took (Quebec City held Tokyo, Run 32): named as one - it is in no race, but the capital is out of every power's hands
+                "${if (holder.isCityState) "the city-state of ${holder.civName}" else name(holder)}: ${held.size} of the $majors original capitals - " + andList(held.map { city ->
                     city.name + (if (city.foundingCivObject != holder) " (${city.foundingCivObject!!.civName}'s)" else "") +
                         (if (holder != civ && city.getCenterTile().getContinent() !in ourLands) ", across the sea from us" else "") })
             } + listOfNotNull((majors - capitals.size).takeIf { it > 0 }?.let { "$it original capital${plural(it)} we have never seen" })
@@ -1901,24 +1902,41 @@ object RulerHost {
 
     /** Where each ruled realm's host at sea is bound, as the last bookkeeping found it: one line per landing, shown with the posture */
     private val hostAtSea = HashMap<String, List<String>>()
-    /** The cities each realm's host found no shore out of reach near last turn: a host holding at sea is told once, when it begins to */
+    /** What each realm's host at sea was doing last turn, by "mode|city": each begins to be told once (a hold, a gathering, a landing under the guns) */
     private val holdingTold = HashMap<String, Set<String>>()
     private fun noteHostAtSea(civ: Civilization) {
-        val plans = RulerOverrides.landings.remove(civ.civID).orEmpty().mapNotNull { (id, plan) -> civ.units.getUnitById(id)?.takeIf { it.isEmbarked() }?.let { it to plan } }
+        val all = RulerOverrides.landings.remove(civ.civID).orEmpty().mapNotNull { (id, plan) -> civ.units.getUnitById(id)?.let { it to plan } }
+        val plans = all.filter { it.first.isEmbarked() }
         val cityOf = { plan: RulerOverrides.Landing -> plan.city.getCity()?.name ?: "the enemy" }
-        hostAtSea[civ.civName] = plans.groupBy { (_, plan) -> plan.landing to cityOf(plan) }.map { (key, group) ->
-            val (landing, city) = key
-            val longest = group.maxOf { units.turnsAtSea(it.first) }
-            RulerCampaigns.company(group.map { it.first.name }).replaceFirstChar { it.uppercase() } +
-                (if (landing == null) " holding at sea out of reach: no shore near $city lies out of reach of the enemy's guns"
-                    else " crossing to ${if (group.size == 1) "its" else "their"} landing at ${RulerCampaigns.placeOf(civ, landing)}, against $city") +
-                " (${RulerCampaigns.count(longest)} turn${Prose.plural(longest)} at sea)"
+        // Who covers the shores, in words: "the guns of Osaka and Japan's 2 Frigates"
+        val covered = { cover: List<String> ->
+            val guns = cover.filter { it.startsWith("city:") }.map { "the guns of ${it.removePrefix("city:")}" }
+            val arms = cover.filter { it.startsWith("unit:") }.map { it.split(":") }.groupBy { it[1] }
+                .map { (owner, units) -> "${RulerCampaigns.possessive(owner)} " + andList(units.map { it[2] }.groupingBy { it }.eachCount().map { (name, n) -> if (n == 1) name else "$n ${Prose.pluralOf(name)}" }) }
+            andList(guns + arms).ifEmpty { "the enemy's guns" }
         }
-        // A host with no shore out of reach holds at sea: said once, when it begins - the court may choose another aim, or wait
-        val holding = plans.filter { it.second.landing == null }.map { cityOf(it.second) }.toSet()
-        for (city in holding - (holdingTold[civ.civName] ?: emptySet()))
-            log(civ, "Our host holds at sea out of reach: no shore near $city lies out of reach of the enemy's guns, and it will not land under them.")
-        holdingTold[civ.civName] = holding
+        hostAtSea[civ.civName] = plans.groupBy { (_, plan) -> Triple(plan.landing, cityOf(plan), plan.mode) }.map { (key, group) ->
+            val (landing, city, mode) = key
+            val longest = group.maxOf { units.turnsAtSea(it.first) }
+            val place = landing?.let { RulerCampaigns.placeOf(civ, it) }
+            RulerCampaigns.company(group.map { it.first.name }).replaceFirstChar { it.uppercase() } + when {
+                place == null -> " holding at sea out of reach: no shore near $city leads to it by land"
+                mode == "waiting" -> " waiting out of reach off $place, against $city: every shore near it lies under ${covered(group[0].second.cover)}" +
+                    " - ships to clear that shore, or a weaker aim, would open a landing"
+                else -> " crossing to ${if (group.size == 1) "its" else "their"} landing at $place, against $city"
+            } + " (${RulerCampaigns.count(longest)} turn${Prose.plural(longest)} at sea)"
+        }
+        // Each begins to be told once: a host waiting off a shore under the guns, or holding with none to land on
+        val now = plans.filter { it.second.mode != "crossing" }.groupBy { "${it.second.mode}|${cityOf(it.second)}" }
+        for ((what, group) in now) {
+            if (what in (holdingTold[civ.civName] ?: emptySet())) continue
+            val plan = group[0].second
+            val city = cityOf(plan)
+            log(civ, if (plan.mode == "waiting") "Our host waits out of reach off ${plan.landing?.let { RulerCampaigns.placeOf(civ, it) }}: no shore near $city lies out of reach of " +
+                    "${covered(plan.cover)}, and it will not land under them. Ships to clear that shore, or a weaker aim, would open a landing."
+                else "Our host holds at sea out of reach: no shore near $city leads to the city by land.")
+        }
+        holdingTold[civ.civName] = now.keys
     }
 
     /** GameInfo.turns only moves once every player has played, so whatever is logged during a turn - or by an order between turns - belongs to the turn about to be counted */
@@ -2314,8 +2332,9 @@ object RulerHost {
         Thread { Thread.sleep(2000); System.err.println("Exiting after a failed turn ($brokenTurn); the keep loop restarts the host from the last save."); kotlin.system.exitProcess(3) }.apply { isDaemon = true }.start()
         resetHostState()
         load()
-        for (name in orders.keys) game().civilizations.firstOrNull { it.civName == name }?.let { civ ->
-            log(civ, "The turn could not be played (${ex.javaClass.simpleName}: ${ex.message}); the world stands as it was before it, and the host waits to be restarted.") }
+        // The operator's word, never a court's: the host's log and the self-check log carry it, and the advance's error answer reaches the orchestrator.
+        // In the chancery it read as news of the realm (Run 32, T169, every court; the words self-check flagged it)
+        selfCheck("turn", null, "the turn could not be played (${ex.javaClass.simpleName}: ${ex.message}); the world was reloaded as it stood before it")
         save()
     }
 
