@@ -388,6 +388,7 @@ object RulerHost {
             "GET /orders" -> civ().let { orders.getOrPut(it.civName) { StandingOrders() }.toMap(it) }
             "POST /orders" -> served(civ(), setOrders(civ(), json))
             "POST /grant" -> grant(civ(), json)
+            "POST /proclaim" -> proclaim(civ(), json)
             "GET /events" -> publicEvents.filter { (it["turn"] as Int) > since }
             // Any people's cities and their lie of the land, for the Chronicler's pictures (not a ruled civ's secret: the world knows where cities stand)
             "GET /cities" -> game().civilizations.firstOrNull { it.civName == query["civ"] }?.cities?.sortedByDescending { it.population.population }?.map { city ->
@@ -537,6 +538,20 @@ object RulerHost {
         if (freeTechs > 0) { civ.tech.freeTechs += freeTechs; log(civ, "The scholars were granted $freeTechs free technolog${if (freeTechs == 1) "y" else "ies"} by the keepers of this test game, to be taken in the next turn.") }
         save()
         return mapOf("gold" to civ.gold, "faith" to civ.religionManager.storedFaith, "freeTechs" to civ.tech.freeTechs)
+    }
+
+    /** A sovereign's proclamation, said aloud at a look-in: speech to the world, so a public event at once (the Chronicler reads it there), and every other
+     *  court hears it in its log - never the speaker's own, which said it. [by] names the speaker as the orchestrator knows them ("Ieyasu, the Shogun");
+     *  a ruler's remark leaked by an advisor never comes here: a leak is history's business, not a rival court's (decided 2026-10-05) */
+    private fun proclaim(civ: Civilization, json: JsonValue): Any? {
+        val words = json.getString("words", "").trim().ifEmpty { throw ApiError(400, "proclaim takes words: the sentence said aloud") }
+        val by = json.getString("by", "").trim()
+        val speaker = (if (by.isEmpty()) "" else "$by, ") + "sovereign of ${RulerCampaigns.people(civ.civName)}"
+        addPublicEvent("${speaker.replaceFirstChar { it.uppercase() }}, proclaimed: \u201c$words\u201d")
+        for (name in orders.keys) if (name != civ.civName) game().civilizations.firstOrNull { it.civName == name }?.takeIf { it.isAlive() }?.let { court ->
+            log(court, "Proclaimed by ${RulerCampaigns.possessive(civ.civName)} sovereign${if (by.isEmpty()) "" else ", $by"}: \u201c$words\u201d") }
+        save()
+        return mapOf("proclaimed" to words, "turn" to stamp())
     }
 
     /** Nations that may raise no world wonder in this game (a setup choice) */
