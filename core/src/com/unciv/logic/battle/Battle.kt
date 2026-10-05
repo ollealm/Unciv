@@ -50,7 +50,9 @@ object Battle {
      */
     fun movePreparingAttack(attacker: MapUnitCombatant, attackableTile: AttackableTile, tryHealPillage: Boolean = false): Boolean {
         val tilesMovedThrough = attacker.unit.movement.getDistanceToTiles().getPathToTile(attackableTile.tileToAttackFrom)
-        attacker.unit.movement.moveToTile(attackableTile.tileToAttackFrom)
+        // A ruled civ's melee ship moves in under the shore's guns to strike (com.unciv.logic.automation.RulerOverrides.shipUnderGuns): let through for this move only
+        if (attacker.unit.baseUnit.isWaterUnit && attacker.unit.baseUnit.isMelee()) com.unciv.logic.automation.RulerOverrides.withShipRuleWaived { attacker.unit.movement.moveToTile(attackableTile.tileToAttackFrom) }
+        else attacker.unit.movement.moveToTile(attackableTile.tileToAttackFrom)
         /**
          * When calculating movement distance, we assume that a hidden tile is 1 movement point,
          * which can lead to EXCEEDINGLY RARE edge cases where you think

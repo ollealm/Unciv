@@ -196,6 +196,50 @@ object RulerOverrides {
         return reach
     }
 
+    /** Water a ruled civ's warship at war does not end a move on: within an enemy city's guns, beside an enemy citadel, or within the reach of an enemy
+     *  soldier ashore it can see. England's ships sent to clear Osaka's shore ended their turns there and died to Cannon, Musketmen and a Citadel (three
+     *  Ironclads and two Privateers, Run 32, T233-238). A melee ship moving in to strike is let through for that move (Battle.movePreparingAttack); a ranged
+     *  one strikes from out of reach (TargetHelper); one left within reach with movement to spare withdraws (withdrawShip). Ship against ship is war at sea */
+    @yairm210.purity.annotations.Readonly
+    fun shipUnderGuns(unit: MapUnit, tile: Tile): Boolean {
+        if (!tile.isWater || !unit.baseUnit.isWaterUnit || !unit.isMilitary() || unit.civ.civID !in ruledCivs || shipRuleWaived) return false
+        return tile in landReach(unit.civ)
+    }
+    @Volatile private var shipRuleWaived = false
+    fun <T> withShipRuleWaived(body: () -> T): T {
+        shipRuleWaived = true
+        try { return body() } finally { shipRuleWaived = false }
+    }
+    /** The water an enemy city's guns, an enemy citadel or an enemy soldier ashore this civ can see could strike next turn; reckoned once while a power plays */
+    @yairm210.purity.annotations.Cache private val landReachSeen = ConcurrentHashMap<String, Pair<String, Set<Tile>>>()
+    @yairm210.purity.annotations.Readonly
+    fun landReach(civ: Civilization): Set<Tile> {
+        val key = "${civ.gameInfo.turns}/${civ.gameInfo.currentPlayer}"
+        landReachSeen[civ.civID]?.takeIf { it.first == key }?.let { return it.second }
+        val reach = HashSet<Tile>()
+        if (civ.isAtWar()) {
+            for (enemy in civ.getKnownCivs().filter { civ.isAtWarWith(it) }) for (city in enemy.cities) if (city.getCenterTile().isExplored(civ))
+                reach += city.getCenterTile().getTilesInDistance(city.getBombardRange())
+            for (tile in civ.viewableTiles) {
+                val owner = tile.getOwner()
+                if (owner != null && civ.isAtWarWith(owner) && tile.getUnpillagedTileImprovement()?.hasUnique(com.unciv.models.ruleset.unique.UniqueType.DamagesAdjacentEnemyUnits) == true)
+                    reach += tile.neighbors
+                for (soldier in tile.getUnits()) if (soldier.isMilitary() && soldier.baseUnit.isLandUnit && civ.isAtWarWith(soldier.civ))
+                    reach += tile.getTilesInDistance(soldier.getMaxMovement() - 1 + soldier.getRange())
+            }
+        }
+        landReachSeen[civ.civID] = key to reach
+        return reach
+    }
+    /** A ruled civ's warship left within reach (shipUnderGuns) with movement to spare: to the nearest tile out of it it can reach */
+    fun withdrawShip(unit: MapUnit) {
+        if (!unit.baseUnit.isWaterUnit || !unit.isMilitary() || unit.civ.civID !in ruledCivs || unit.isDestroyed || !unit.hasMovement()) return
+        val here = unit.getTile()
+        if (here !in landReach(unit.civ)) return
+        unit.movement.getDistanceToTiles().keys.filter { it != here && unit.movement.canMoveTo(it) }.minByOrNull { it.aerialDistanceTo(here) }
+            ?.let { unit.movement.moveToTile(it) }
+    }
+
     /** Does this ruled civ's land unit go by sea to the city - at sea now, or with water on its way? Then it lands out of reach and walks (headForLanding) */
     @yairm210.purity.annotations.Readonly
     fun goesBySea(unit: MapUnit, path: List<Tile>): Boolean =
@@ -363,7 +407,7 @@ object RulerOverrides {
     fun guarded(unit: MapUnit, move: () -> Unit) {
         if (unit.civ.civID !in ruledCivs) return move()
         // A routine that recurses without end is caught too: it costs the unit its turn, not the game (Run 32 stopped at T169 on one)
-        try { fault?.invoke("move", unit.civ); move() } catch (ex: StackOverflowError) {
+        try { fault?.invoke("move", unit.civ); move(); withdrawShip(unit) } catch (ex: StackOverflowError) {
             System.err.println("The officials could not move ${unit.civ.civName}'s ${unit.name} #${unit.id}: $ex")
             unitNotMoved?.invoke(unit.civ, unit, "the officials' routine failed on it")
         } catch (ex: Exception) {

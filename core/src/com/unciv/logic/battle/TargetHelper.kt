@@ -100,7 +100,11 @@ object TargetHelper {
             // still got leftover movement points after all that, to attack
             .filter { it.second > Constants.minimumMovementEpsilon }
             .filter {
-                it.first == unit.getTile() || unit.movement.canMoveTo(it.first)
+                // A ruled civ's melee ship may move in under the shore's guns to strike (RulerOverrides.shipUnderGuns); a ranged one strikes from out of
+                // reach, from where it lies only if it can move on after striking
+                if (it.first == unit.getTile()) !com.unciv.logic.automation.RulerOverrides.shipUnderGuns(unit, it.first) || !unit.baseUnit.isRanged() || unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CanMoveAfterAttacking)
+                else unit.movement.getCannotMoveToReason(it.first).let { reason -> reason == null ||
+                    reason == com.unciv.logic.map.mapunit.movement.UnitMovement.CannotMoveToReason.UnderEnemyGuns && unit.baseUnit.isMelee() }
             }
 
     @Readonly

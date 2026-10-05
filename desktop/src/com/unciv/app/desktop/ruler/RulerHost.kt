@@ -1965,11 +1965,23 @@ object RulerHost {
     private fun recordPeace(before: WorldSnapshot, after: WorldSnapshot) {
         val ended = (before.wars - after.wars).filter { war -> war.all { it in after.alive } }.map { it.toList() }
         val isCityState = { name: String -> game().civilizations.firstOrNull { it.civName == name }?.isCityState == true }
-        // City-states make peace with a power as their ally does, eight at once: one line per power, as their joining a war is (the joins are folded too)
-        val withCityStates = ended.filter { pair -> pair.count(isCityState) == 1 }.groupBy({ pair -> pair.first { !isCityState(it) } }, { pair -> pair.first(isCityState) })
-        for (war in ended.filter { pair -> pair.count(isCityState) != 1 }) addPublicEvent("${war.joinToString(" and ")} have made peace.")
-        for ((power, cityStates) in withCityStates)
-            addPublicEvent(if (cityStates.size == 1) "$power and ${cityStates[0]} have made peace." else "$power and the city-states ${andList(cityStates)} have made peace.")
+        // A round of peace is one line per great power - whom it made peace with, the powers and then the city-states - each peace told once, in the line
+        // of the power that made the most. City-states at peace with one another are no news (Run 32, T245: thirteen lines in one turn, six of them
+        // between city-states); a power's own two-sided peace keeps its plain line
+        val pairs = ended.filter { pair -> pair.any { !isCityState(it) } }.map { it.toSet() }.toMutableSet()
+        val partners = { power: String -> pairs.filter { power in it }.map { pair -> pair.first { it != power } } }
+        val powers = pairs.flatten().filterNot(isCityState).distinct().sortedWith(compareBy({ -partners(it).size }, { it }))
+        for (power in powers) {
+            val theirs = partners(power).ifEmpty { continue }
+            pairs.removeAll { power in it }
+            val (cityStates, majors) = theirs.partition(isCityState)
+            addPublicEvent(when {
+                theirs.size == 1 -> "$power and ${theirs[0]} have made peace."
+                cityStates.isEmpty() -> "$power made peace with ${andList(majors)}."
+                majors.isEmpty() -> "$power made peace with the city-states ${andList(cityStates)}."
+                else -> "$power made peace with ${andList(majors)}, and with the city-state${plural(cityStates.size)} ${andList(cityStates)}."
+            })
+        }
     }
 
     private fun recordPublicEvents(before: WorldSnapshot, after: WorldSnapshot) {

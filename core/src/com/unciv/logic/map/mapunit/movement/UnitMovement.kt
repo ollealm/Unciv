@@ -717,6 +717,7 @@ class UnitMovement(val unit: MapUnit) {
         EscortCannotMove,
         TileIsNotEmpty,
         NoAirUnitTransport,
+        UnderEnemyGuns,
     }
 
     @Readonly
@@ -748,6 +749,11 @@ class UnitMovement(val unit: MapUnit) {
                 && (tile.civilianUnit == null || tile.civilianUnit!!.owner == unit.owner || unit.civ.isAtWarWith(tile.civilianUnit!!.civ))
 
         if (!tileIsEmpty) return CannotMoveToReason.TileIsNotEmpty
+
+        // Nor does a ruled civ's warship end a move under the guns of the shore (RulerOverrides.shipUnderGuns) - the last reason asked, so that a melee
+        // ship moving in to strike can be let past this one alone
+        if (com.unciv.logic.automation.RulerOverrides.shipUnderGuns(unit, tile))
+            return CannotMoveToReason.UnderEnemyGuns
 
         return null
     }
