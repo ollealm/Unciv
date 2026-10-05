@@ -103,6 +103,9 @@ object UnitAutomation {
             if (tryAttacking(unit, homeGroundTargets(unit))) return
             if (tryGarrisoningLandUnit(unit)) return
             if (unit.health < 100 && tryHealUnit(unit)) return
+            // A soldier at sea is never home, our own coastal water included: it comes ashore on our land (a defending host sat embarked off York for good,
+            // Run 32 - our water counted as home ground, and "home" was the harbour it had reached)
+            if (unit.isEmbarked()) { if (!tryHeadHome(unit)) tryRetreat(unit); return }
             if (unit.getTile().getOwner() != unit.civ) { if (!tryRetreat(unit)) tryHeadHome(unit); return }
             tryPrepare(unit); return
         }
@@ -392,9 +395,11 @@ object UnitAutomation {
 
     /** A soldier of a defending host left abroad, with no enemy near enough to retreat from, walks back to the nearest of our cities */
     private fun tryHeadHome(unit: MapUnit): Boolean {
+        // Home is land of ours near the city, out of every reach - never the harbour water nearest the unit (RulerOverrides.perilAtSea)
+        val peril = com.unciv.logic.automation.RulerOverrides.perilAtSea(unit)
         for (city in unit.civ.cities.sortedBy { it.getCenterTile().aerialDistanceTo(unit.currentTile) }.take(2)) {
             val tile = city.getCenterTile().getTilesInDistance(2).sortedBy { it.aerialDistanceTo(unit.currentTile) }
-                .firstOrNull { unit.movement.canMoveTo(it) && unit.movement.canReach(it) } ?: continue
+                .firstOrNull { it.isLand && it.getOwner() == unit.civ && it !in peril && unit.movement.canMoveTo(it) && unit.movement.canReach(it) } ?: continue
             if (com.unciv.logic.automation.RulerOverrides.tryHeadTowards(unit, tile)) return true
         }
         return false

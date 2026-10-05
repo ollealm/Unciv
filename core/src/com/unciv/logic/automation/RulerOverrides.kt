@@ -169,9 +169,19 @@ object RulerOverrides {
      *  a city. One already at sea may move on - out of it, if it can. A city's guns stay with the landing rule, which may accept them */
     @yairm210.purity.annotations.Readonly
     fun underEnemyShips(unit: MapUnit, tile: Tile): Boolean {
-        if (!tile.isWater || unit.isEmbarked() || !unit.baseUnit.isLandUnit || unit.civ.civID !in ruledCivs || unit.civ.isBarbarian) return false
+        if (!tile.isWater || unit.isEmbarked() || !unit.baseUnit.isLandUnit || unit.civ.civID !in ruledCivs || unit.civ.isBarbarian || embarkRuleWaived) return false
         return tile in shipReach(unit.civ)
     }
+    /** Set only while a way is reckoned as if the rule were not there, to say why an order cannot be carried out ([withEmbarkRuleWaived]) */
+    @Volatile private var embarkRuleWaived = false
+    fun <T> withEmbarkRuleWaived(body: () -> T): T {
+        embarkRuleWaived = true
+        try { return body() } finally { embarkRuleWaived = false }
+    }
+    /** Who of the enemy this civ can see could strike [tile] next turn: "Japan's Frigate", one entry each, for a refusal's words */
+    fun strikersOf(civ: Civilization, tile: Tile): List<Pair<Civilization, String>> =
+        civ.viewableTiles.flatMap { at -> at.getUnits().filter { it.isMilitary() && civ.isAtWarWith(it.civ) && at.aerialDistanceTo(tile) <= it.getMaxMovement() - 1 + it.getRange() }.map { it.civ to it.name } }
+
     /** The water an enemy ship or soldier this civ can see could strike next turn; reckoned once for each civ while one power plays its turn (they stand still) */
     @yairm210.purity.annotations.Cache private val shipReachSeen = ConcurrentHashMap<String, Pair<String, Set<Tile>>>()
     @yairm210.purity.annotations.Readonly

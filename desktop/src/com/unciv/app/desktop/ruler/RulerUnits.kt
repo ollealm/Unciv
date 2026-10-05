@@ -238,7 +238,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                         return true
                     }
                     dropped(unit, "Our ${unit.name} has been stuck for ${order.turnsStuck} turns on its way to ${RulerCampaigns.placeOf(civ, target)}, no nearer than it was" +
-                        (blocker?.let { " - the tile is held by ${it.civ.civName}'s ${it.name}" } ?: " - no way to it opens"))
+                        (blocker?.let { " - the tile is held by ${it.civ.civName}'s ${it.name}" } ?: seaBlock(unit, target)?.let { " - $it" } ?: " - no way to it opens"))
                     return false
                 }
                 return true // still on the way
@@ -523,6 +523,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             (if (occupant.civ == civ) "Use garrison to swap places with it, pick a tile beside it, or leave it be - the place is already covered." else "Pick another tile."))
         // Orders are given between turns, when a unit has usually spent its movement - and Unciv finds no path at all for a unit with none left
         val path = if (target == unit.getTile()) listOf() else pathTo(unit, target)
+        // A way closed only because it puts to sea within an enemy's reach (RulerOverrides.underEnemyShips) is refused in those words, not as no way at all
+        if (target != unit.getTile() && !willSwap && path.isEmpty()) seaBlock(unit, target)?.let { throw IllegalArgumentException("${unit.name} cannot reach ${where(civ, target)}: $it") }
         if (target != unit.getTile() && !willSwap && path.isEmpty()) throw IllegalArgumentException("${unit.name} cannot reach ${where(civ, target)} (water, mountains or foreign borders in the way)" + if (action == "settle") nearestSiteHint(civ, unit, target) else "")
         val ability = json.get("ability")?.takeUnless { it.isNull }?.asString()
         if (ability != null && abilitiesNamed(ability).isEmpty()) throw IllegalArgumentException("Unknown ability '$ability'; use one of: ${ABILITY_WORDS.keys.joinToString()}")
@@ -637,6 +639,20 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
      *  path for a spent unit. A yes is a hope, not a promise: the engine's path reckoning counts unexplored tiles as passable, so a way found now may close as the
      *  march uncovers the ground - why a garrison march can fail turns later and a march can wander (Runs 22 and 23), and why failures are remembered and
      *  "stuck" means no nearer */
+    /** Why [unit] cannot reach [target] when the reason is the embark rule alone: "it would have to put to sea within reach of Japan's Frigate".
+     *  Null when the way is closed for any other reason too */
+    fun seaBlock(unit: MapUnit, target: Tile): String? {
+        unit.movement.clearPathfindingCache()
+        val way = try { RulerOverrides.withEmbarkRuleWaived { pathTo(unit, target) } } finally { unit.movement.clearPathfindingCache() }
+        if (way.isEmpty() || way.none { it.isWater }) return null
+        val reach = RulerOverrides.shipReach(unit.civ)
+        val wet = way.filter { it.isWater && it in reach }.ifEmpty { return null }
+        val strikers = wet.flatMap { RulerOverrides.strikersOf(unit.civ, it) }.distinct()
+        val named = strikers.groupBy { it.first }.map { (owner, units) -> "${RulerCampaigns.possessive(owner.civName)} " +
+            Prose.andList(units.map { it.second }.groupingBy { it }.eachCount().map { (name, n) -> if (n == 1) name else "$n ${Prose.pluralOf(name)}" }) }
+        return "it would have to put to sea within reach of ${Prose.andList(named).ifEmpty { "the enemy" }}, and a soldier ashore at war does not"
+    }
+
     fun canMarch(unit: MapUnit, target: Tile) = target == unit.getTile() || pathTo(unit, target).isNotEmpty()
 
     /** Does this unit, sent on a trade mission to [target]'s city-state, stand on that city-state's land - where the engine lets the mission be made (the tile's owner,
