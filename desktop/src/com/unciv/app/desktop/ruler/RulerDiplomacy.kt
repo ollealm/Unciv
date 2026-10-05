@@ -309,6 +309,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
         if (!leave) trade.ourOffers.firstOrNull { it.type == TradeOfferType.WarDeclaration }?.let { throw IllegalArgumentException("A deal in which we give ${it.brief(game)} is a declaration of war, and $WAR_LEAVE. Asking them for one stays open") }
         add(json.get("want"), logic.theirAvailableOffers, trade.theirOffers, other.civName, other)
         if (trade.ourOffers.isEmpty() && trade.theirOffers.isEmpty()) throw IllegalArgumentException("An empty trade")
+        twoSided(trade)
         if (!TradeEvaluation().isTradeValid(trade, civ, other)) throw IllegalArgumentException("That trade is not valid right now")
         // The same swap proposed back at a power whose offer of it already waits on our desk would be accepted on both sides and made twice.
         // Word for word the same is what the advisor wants: their offer is taken. Different terms for the same goods are the advisor's to weigh
@@ -410,6 +411,21 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
         }
     }
 
+    /** A treaty binds both sides, and the engine signs one only from the side that gives it (TradeLogic.acceptTrade signs "their" treaties): a treaty
+     *  on one side of a trade is put on the other too. Japan asked England for peace with the trade order (150 gold given, "Peace Treaty" wanted), the
+     *  offer went out one-sided, and England's acceptance paid the gold and signed nothing - at war still, told it was at peace (Run 32, T217) */
+    private fun twoSided(trade: Trade): Trade = trade.also { t ->
+        for (offer in t.ourOffers.filter { it.type == TradeOfferType.Treaty }) if (t.theirOffers.none { it.type == offer.type && it.name == offer.name }) t.theirOffers.add(offer.copy())
+        for (offer in t.theirOffers.filter { it.type == TradeOfferType.Treaty }) if (t.ourOffers.none { it.type == offer.type && it.name == offer.name }) t.ourOffers.add(offer.copy())
+    }
+
+    /** What an accepted deal with a peace in it came to, checked against the world: a court is never told of a peace that is not there */
+    private fun peaceTook(civ: Civilization, other: Civilization, trade: Trade, terms: String): String? {
+        if ((trade.ourOffers + trade.theirOffers).none { it.name == Constants.peaceTreaty } || !civ.isAtWarWith(other)) return null
+        log(civ, "By your order we accepted ${other.civName}'s offer ($terms), but the peace did not take: we are still at war with ${other.civName}.")
+        return "Accepted ${other.civName}'s offer ($terms), but the peace did not take: we are still at war with ${other.civName}"
+    }
+
     fun proposePeace(civ: Civilization, name: String): String {
         val other = civ.known(name)
         if (!civ.isAtWarWith(other)) throw IllegalArgumentException("We are not at war with $name")
@@ -418,10 +434,12 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
             val terms = describeOffer(offer, civ.gameInfo)
             val logic = TradeLogic(civ, other)
             logic.currentTrade.set(offer.trade)
+            twoSided(logic.currentTrade)
             civ.tradeRequests.remove(offer); peaceOfferedOn.forget("${civ.civName}<${other.civName}")
             settle(offer, civ, "accepted")
             logic.acceptTrade()
             other.addNotification("[${civ.civName}] has accepted your trade request", com.unciv.logic.civilization.NotificationCategory.Trade, com.unciv.logic.civilization.NotificationIcon.Trade, civ.civName)
+            peaceTook(civ, other, logic.currentTrade, terms)?.let { return it }
             log(civ, "By your order: we accepted ${other.civName}'s offer of peace ($terms).")
             return "Peace made with $name on their terms: $terms."
         }
@@ -807,8 +825,10 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
                 settle(request, civ, "accepted")
                 val logic = TradeLogic(civ, other)
                 logic.currentTrade.set(request.trade)
+                twoSided(logic.currentTrade)
                 logic.acceptTrade()
                 other.addNotification("[${civ.civName}] has accepted your trade request", com.unciv.logic.civilization.NotificationCategory.Trade, com.unciv.logic.civilization.NotificationIcon.Trade, civ.civName)
+                peaceTook(civ, other, logic.currentTrade, summary)?.let { return it }
                 log(civ, "By your order: we accepted ${other.civName}'s offer ($summary). The deal is in force.")
                 // Our own proposal of the same swap, still on their desk, would be accepted too and the deal made twice
                 val mirror = other.tradeRequests.firstOrNull { it.requestingCiv == civ.civID && !isPeace(it) && sameSwap(it.trade.reverse(), request.trade) }
