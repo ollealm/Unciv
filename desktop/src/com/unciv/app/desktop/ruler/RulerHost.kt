@@ -1322,7 +1322,7 @@ object RulerHost {
         "has denounced [", "] has denounced us!", "The civilization of [", "] has married into the ruling family of [",
         // told in our own lines already: the raid in the blows' fold, the birth in the awaits-orders line, the taking and its gold in the taken line,
         // the answers to our proposals in the diplomacy's lines
-        "Barbarians raided [", "has been born in [", "We have conquered the city of [", "Gold for capturing [",
+        "Barbarians raided [", "] has destroyed an enemy [", "has been born in [", "We have conquered the city of [", "Gold for capturing [",
         "has made a counteroffer to your trade request", "Our proposed trade is no longer relevant")
     /** A deal's end as the engine tells it ("[Embassy] from [Siam] has ended"): the Deals line says what ended with whom */
     private val dealEnded = Regex("^\\[.+?\\] (from|to) \\[.+\\] has ended$")
@@ -2103,7 +2103,7 @@ object RulerHost {
         "has started constructing", "has completed [^.]*!$",
         "awaits orders", "The United Nations now stands", "our vote is not pledged", "(?<!We have )captured(?! a barbarian)", "has been destroyed", "is no more", "has been stuck", "offers peace", "\\(an advised court\\) offers a deal", "demands that we", "proposes a Declaration of Friendship",
         // the notifications pass: a revolt, a war joined by our pact, a project that changes the race, a pact ended by war
-        "rose in revolt", "^We joined .* in the war against", " (began|completed) the [A-Z]", "ended its Defensive Pact with us").map { Regex(it, RegexOption.IGNORE_CASE) }
+        "rose in revolt", "^We joined .* in the war against", "(began|completed) the .+: (the age of atomic arms begins|the race for the stars begins|its completion wins the world)", "ended its Defensive Pact with us").map { Regex(it, RegexOption.IGNORE_CASE) }
 
     private val warningsWoken = HashMap<String, HashSet<String>>()
     /** The world as the last advance left it (null before the first) */
