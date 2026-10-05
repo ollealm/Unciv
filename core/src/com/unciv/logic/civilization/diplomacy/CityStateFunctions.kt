@@ -323,6 +323,7 @@ class CityStateFunctions(val civInfo: Civilization) {
         }
 
         if (oldAlly != null && civInfo.isAlive()) {
+            com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.AllianceLost(civInfo, oldAlly, newAlly))
             val text = 
                 if (newAlly != null) "We have lost our alliance with [${civInfo.civName}] to [${newAlly.civName}]."
                 else "We have lost our alliance with [${civInfo.civName}]."
@@ -389,6 +390,7 @@ class CityStateFunctions(val civInfo: Civilization) {
             return
 
         otherCiv.addGold(-getDiplomaticMarriageCost())
+        com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.Married(civInfo, otherCiv))
 
         val notificationLocation = civInfo.getCapital()!!.location
         otherCiv.addNotification("We have married into the ruling family of [${civInfo.civName}], bringing them under our control.",

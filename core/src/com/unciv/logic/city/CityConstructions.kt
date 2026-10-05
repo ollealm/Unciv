@@ -468,6 +468,7 @@ class CityConstructions : IsPartOfGameInfoSerialization {
 
         if (construction !is INonPerpetualConstruction) return
         if (!construction.hasUnique(UniqueType.TriggersAlertOnStart)) return
+        if (construction is Building) com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.Project(city.civ, city, construction, begun = true))
         val icon = if (construction is Building) "BuildingIcons/${construction.name}" else "UnitIcons/${construction.name}"
         for (otherCiv in city.civ.gameInfo.civilizations) {
             if (otherCiv == city.civ) continue
@@ -560,6 +561,7 @@ class CityConstructions : IsPartOfGameInfoSerialization {
         }
 
         if (construction.hasUnique(UniqueType.TriggersAlertOnCompletion, city.state)) {
+            if (construction is Building) com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.Project(city.civ, city, construction, begun = false))
             for (otherCiv in city.civ.gameInfo.civilizations) {
                 // No need to notify ourself, since we already got the building notification anyway
                 if (otherCiv == city.civ) continue

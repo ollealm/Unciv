@@ -755,6 +755,7 @@ class DiplomacyManager() : IsPartOfGameInfoSerialization {
         otherCivDiplomacy().setFlag(DiplomacyFlags.DefensivePact, duration)
         diplomaticStatus = DiplomaticStatus.DefensivePact
         otherCivDiplomacy().diplomaticStatus = DiplomaticStatus.DefensivePact
+        com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.Pact(civInfo, otherCiv, "signed"))
 
 
         for (thirdCiv in getCommonKnownCivsWithSpectators()) {
@@ -839,6 +840,7 @@ class DiplomacyManager() : IsPartOfGameInfoSerialization {
         // before adjusting with game speed - consider possible side effects of this
         setFlag(DiplomacyFlags.Denunciation, 30)
         
+        com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.Denounced(civInfo, otherCiv))
         // the denounced civ will get a popup
         otherCiv.popupAlerts.add(
             PopupAlert(AlertType.Denounced, civInfo.civID)

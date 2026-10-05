@@ -150,7 +150,8 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             val shelter = if (unit.isGreatPersonOfType("War") || unit.getTile().let { it.isCityCenter() && it.getOwner() == unit.civ && !claimed(unit, it) }) null else shelterFor(unit)
             orders[unit.id] = Order("hold", shelter?.position?.x?.toInt(), shelter?.position?.y?.toInt())
             log(unit.civ, "A ${unit.name} #${unit.id} ${RulerCampaigns.atPlaceOf(unit.civ, unit.getTile())} awaits orders (use, move, or release to the officials)" +
-                (greatImprovementOf(unit)?.let { "; with use, ability improvement, it can raise $it" } ?: "") +
+                // What it can do here and now, in the order's own words for its abilities (and what the rest need)
+                "; ${abilitiesHere(unit)}" +
                 (shelter?.let { if (it.isCityCenter()) "; meanwhile it walks to ${it.getCity()!!.name} and waits there" else "; meanwhile it waits beside ${it.getCity()!!.name}, whose town another of ours holds" } ?: "") + ".")
         }
         // A unit set exploring before the host explored it itself (older saves) carries the explore action and no order: it is the ruler's explorer still
@@ -626,8 +627,10 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             "religion" -> "a city of ours to found or enhance our religion in, or a city of another faith to spread it to"
             else -> "movement left this turn"
         }
-        val named = { word: String -> if (word == "improvement") greatImprovementOf(unit)?.let { "improvement - $it" } ?: word else word }
-        return "it can now ${open.joinToString { named(it) }.ifEmpty { "do nothing here" }}" + (has - open.toSet()).takeIf { it.isNotEmpty() }?.let { blocked -> "; " + blocked.joinToString("; ") { "${named(it)} needs ${why(it)}" } }.orEmpty()
+        // Each ability by the order's word for it, the improvement with what it raises
+        val named = { word: String -> if (word == "improvement") greatImprovementOf(unit)?.let { "improvement (it raises $it)" } ?: word else word }
+        return (if (open.isEmpty()) "nothing is open to it here" else "open to it here now: ${open.joinToString("; ") { named(it) }}") +
+            (has - open.toSet()).takeIf { it.isNotEmpty() }?.let { blocked -> "; " + blocked.joinToString("; ") { "${named(it)} needs ${why(it)}" } }.orEmpty()
     }
 
     /** Could this unit, given a full turn's movement, walk to that tile at all? Orders are given between turns, when units have spent theirs, and Unciv finds no
@@ -788,7 +791,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             val unique = unit.getMatchingUniques(UniqueType.ConstructImprovementInstantly).firstOrNull() ?: return null
             val improvement = unit.civ.gameInfo.ruleset.tileImprovements[unique.params[0]] ?: return null
             val consumed = "consuming" in unique.text
-            return "a ${improvement.name} (${improvementInWords(improvement)}${if (consumed) "; it uses up the ${unit.baseUnit.name}" else ""})"
+            return "${Prose.article(improvement.name)} (${improvementInWords(improvement)}${if (consumed) "; it uses up the ${unit.baseUnit.name}" else ""})"
         }
 
         /** "(x,y), 3 tiles NE of Rome": for the briefing's unit list and order replies, where the advisor needs the coordinates to give orders. A chancery line, which may

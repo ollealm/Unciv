@@ -155,7 +155,10 @@ object RulerHost {
         RulerOverrides.beliefsChosen = { civ, what, beliefs -> log(civ, "The officials $what with the belief${if (beliefs.size == 1) "" else "s"} ${beliefs.joinToString("; ") { beliefInWords(it) }}.") }
         // A nuclear blow, told with its weight: to every court it touched in full (the attacker's as its own, each struck power's by the attacker's name),
         // to the world as one public event, and to every other ruled court in the world's words. The engine's own notices of it are struck (noise)
+        // The world's news with its facts (the notifications pass): kept for the turn being played, read by the world's events and each chancery
+        RulerOverrides.news = { item -> turnNews += item }
         RulerOverrides.nuked = { fall ->
+            nukeRazed += fall.cities.filter { it.razed }.map { it.city.name } // its own event tells the city razed
             val first = !atomicSeen && game().civilizations.none { c -> c.diplomacy.values.any { it.hasModifier(com.unciv.logic.civilization.diplomacy.DiplomaticModifiers.UsedNuclearWeapons) } }
             atomicSeen = true
             val firstNote = if (first) ", the first atomic weapon the world has seen" else ""
@@ -304,6 +307,7 @@ object RulerHost {
         RulerOverrides.buildingSold?.let { f -> RulerOverrides.buildingSold = { civ, city, building, gold, why -> hook("buildingSold", Unit) { f(civ, city, building, gold, why) } } }
         RulerOverrides.beliefsChosen?.let { f -> RulerOverrides.beliefsChosen = { civ, what, beliefs -> hook("beliefsChosen", Unit) { f(civ, what, beliefs) } } }
         RulerOverrides.nuked?.let { f -> RulerOverrides.nuked = { fall -> hook("nuked", Unit) { f(fall) } } }
+        RulerOverrides.news?.let { f -> RulerOverrides.news = { item -> hook("news", Unit) { f(item) } } }
         RulerOverrides.struck?.let { f -> RulerOverrides.struck = { strike -> hook("struck", Unit) { f(strike) } } }
         RulerOverrides.unitExpended?.let { f -> RulerOverrides.unitExpended = { civ, unit, why -> hook("unitExpended", Unit) { f(civ, unit, why) } } }
         RulerOverrides.faithSpent?.let { f -> RulerOverrides.faithSpent = { civ, faith, what -> hook("faithSpent", Unit) { f(civ, faith, what) } } }
@@ -495,6 +499,7 @@ object RulerHost {
         Memory("warsDeclared", true, { warsDeclared.clear() }, { warsDeclared.map { it.toString() } }, { json -> json?.asStringArray()?.forEach { warsDeclared += WarRecord.parse(it) } }),
         Memory("trail", true, { trail.clear() }, { trail.toMap() }, { json -> trail.load(json) }),
         Memory("ages", true, { ages.clear() }, { ages.toMap() }, { json -> ages.load(json) }),
+        Memory("turnNews", false, { turnNews.clear(); nukeRazed.clear() }),
         Memory("hostAtSea", false, { hostAtSea.clear(); holdingTold.clear(); RulerOverrides.landings.clear(); RulerOverrides.headingFor.clear() }),
         Memory("atomicSeen", true, { atomicSeen = false }, { atomicSeen }, { json -> atomicSeen = json?.asBoolean() ?: false }),
         Memory("lockedCities", true, { RulerOverrides.lockedCities.clear() }, { RulerOverrides.lockedCities.toList() }, { json -> json?.asStringArray()?.let { RulerOverrides.lockedCities += it } }),
@@ -1311,7 +1316,16 @@ object RulerHost {
         // a detonation: the host's own line (the nuked hook) tells it with its weight, to every ruled court
         "has been detonated by [", "has exploded in our territory",
         // a unit disbanded for want of gold: the roll-call's own line says which, where it stood and why (RulerOverrides.noteDisbanded)
-        "Cannot provide unit upkeep for")
+        "Cannot provide unit upkeep for",
+        // the world's news the host tells with its facts (RulerOverrides.News, recordPublicEvents): a project, a pact, a denouncement, a people's end, a marriage
+        "has completed [", "has started constructing [", "have signed a Defensive Pact", "cancelled their Defensive Pact with", "We have cancelled our Defensive Pact with",
+        "has denounced [", "] has denounced us!", "The civilization of [", "] has married into the ruling family of [",
+        // told in our own lines already: the raid in the blows' fold, the birth in the awaits-orders line, the taking and its gold in the taken line,
+        // the answers to our proposals in the diplomacy's lines
+        "Barbarians raided [", "has been born in [", "We have conquered the city of [", "Gold for capturing [",
+        "has made a counteroffer to your trade request", "Our proposed trade is no longer relevant")
+    /** A deal's end as the engine tells it ("[Embassy] from [Siam] has ended"): the Deals line says what ended with whom */
+    private val dealEnded = Regex("^\\[.+?\\] (from|to) \\[.+\\] has ended$")
     /** The engine's notice of a blow on us ("An enemy [Pikeman] ([-40] HP) has attacked [Onondaga] ([-26] HP)"): the turn's blows are folded into one line per attacker and place instead */
     private val blowNotice = Regex("^(An enemy|Enemy city) \\[[^\\]]+\\]( \\(\\[-\\d+\\] HP\\))? (has attacked|has captured|has destroyed|has raided|was destroyed while attacking) (?!our tile improvement)")
     /** The engine's notices in the chancery's own voice: the realm speaks as "we", a blow's arithmetic is struck ("(-40 HP)"), its templates' residue
@@ -1382,8 +1396,13 @@ object RulerHost {
         val joinNotice = Regex("^\\[(.+?)\\] has joined (?:\\[(.+?)\\]|us) in the war against (?:\\[(.+)\\]|us)!$")
         val sweptNotice = Regex("^\\[.+?\\] from \\[(.+)\\] has ended$")
         val joins = notifications.mapNotNull { n -> joinNotice.find(n.text)?.let { m -> Triple(m.groupValues[1], m.groupValues[2].ifEmpty { "us" }, m.groupValues[3].ifEmpty { "us" }) } }
+        // The war declared on us is told with who came in with it (one source with the declaring court's own account, cameIn): their joins are not told again
+        val toldJoins = HashSet<Pair<String, String>>()
+        // The gold a taking brought, told with the taking
+        val captureGold = notifications.mapNotNull { Regex("^Received \\[(\\d+)\\] Gold for capturing \\[(.+)\\]$").find(it.text) }.associate { it.groupValues[2] to it.groupValues[1].toInt() }
         for (notification in notifications) {
-            if (noise.any { it in notification.text }) continue
+            if (noise.any { it in notification.text } || dealEnded.matches(notification.text)) continue
+            reworded(civ, notification.text, toldJoins)?.let { line -> if (line.isNotEmpty()) log(civ, line); continue }
             if (joinNotice.containsMatchIn(notification.text)) continue // told folded, below
             // A deal the war swept away, already named in our own line with the declaration
             if (diplomacy.sweptTold[civ.civName]?.let { partners -> sweptNotice.find(notification.text)?.groupValues?.get(1) in partners } == true) continue
@@ -1391,7 +1410,9 @@ object RulerHost {
             if (came != null) { takenWith.getOrPut(came.groupValues[2]) { ArrayList() } += came.groupValues[1]; continue }
             if (flipped.any { "[$it]" in notification.text && ("allied with" in notification.text || "lost our alliance" in notification.text) }) continue
             // The engine's template text loses its brackets and braces ("{Gained 1 Settler unit(s)}{ }{due to adopting Collective Rule}")
-            val text = inOurWords(notification.text.replace("[", "").replace("]", "").replace("{", "").replace("}", "")) +
+            // A people named by its id in the engine's text ("Your territory has been stolen by [civ id]") is named by its name
+            val named = game().civilizations.filter { it.civID != it.civName }.fold(notification.text) { text, other -> text.replace("[${other.civID}]", "[${other.civName}]") }
+            val text = inOurWords(named.replace("[", "").replace("]", "").replace("{", "").replace("}", "")) +
                 // the engine's minimum war binds the side attacked as well: say so where the war is first heard of
                 (if ("has declared war on us" in notification.text) " No peace can be made for ${civ.gameInfo.ruleset.modOptions.constants.minimumWarDuration} turns." else "")
             // "An enemy X has pillaged our Farm" says not whose: the raider still stands on the tile it pillaged
@@ -1445,7 +1466,7 @@ object RulerHost {
                     && notifications.none { "has been built in [${other.name}]" in it.text && "[$item]" in it.text } })
                 log(civ, "The officials queued $item in ${city.name}" + (favouredBy(civ, city, item)?.let { ", favoured by your $it weight" } ?: "") + ".")
         }
-        for ((side, joiners) in joins.groupBy { Pair(it.second, it.third) }) {
+        for ((side, joiners) in joins.filter { (joiner, side, foe) -> (joiner to (if (side == "us") foe else side)) !in toldJoins }.groupBy { Pair(it.second, it.third) }) {
             val names = joiners.map { it.first }.distinct()
             val who = andList(names)
             log(civ, "$who ${if (names.size == 1) "has" else "have"} joined ${side.first} in the war against ${side.second}.")
@@ -1454,8 +1475,13 @@ object RulerHost {
             // A city new to our rolls was founded only if nobody held it before us: retaking our own is "back", and the buildings it came with were not built this turn
             val from = city.previousOwner.takeIf { it.isNotEmpty() && it != civ.civID }?.let { civ.gameInfo.getCivilization(it).civName }
             val standing = takenWith[city.name].orEmpty()
+            // Given back by its liberator, it was not taken: a people restored
+            val freed = turnNews.filterIsInstance<RulerOverrides.News.Liberated>().firstOrNull { it.city.name == city.name && it.restored == civ }
+            if (freed != null) { log(civ, "${RulerCampaigns.people(freed.by.civName).replaceFirstChar { it.uppercase() }} liberated ${city.name} from ${freed.from.civName} and gave it back to us" +
+                (if (freed.revived) ": our realm lives again" else "") + ". It is ours again, and governed as our own."); continue }
             log(civ, if (from == null && city.foundingCivObject == civ) "Founded ${city.name}."
                 else (if (city.foundingCivObject == civ) "We took ${city.name} back from ${from ?: "its holders"}" else "We took ${city.name}${(from ?: city.foundingCivObject?.civName)?.let { " from $it" } ?: ""}") +
+                    (captureGold[city.name]?.let { ", and $it gold from its treasury" } ?: "") +
                     (if (standing.isNotEmpty()) " (its ${standing.joinToString(" and ")} ${if (standing.size == 1) "stands" else "stand"})" else "") +
                     (if (city.isPuppet) ": it is ours, held as a puppet (it builds and pays for itself, gives no orders) until you annex it - or raze it, or spare it; a cities order does each."
                     else ": it is ours${if (city.foundingCivObject == civ) " again" else ""}, and governed as our own."))
@@ -1522,6 +1548,7 @@ object RulerHost {
         }
         // The enemy's blows on us, folded the same way (the engine's notice of each is dropped above): one line per attacker and place - a city by name, our soldiers
         // or ships where they stood - with what struck, how our walls and companies stand after, who of ours fell and who of theirs died in the attempt
+        val raided = turnNews.filterIsInstance<RulerOverrides.News.Raid>().filter { it.city.civ == civ }.groupBy { it.city.name }.mapValues { (_, raids) -> raids.sumOf { it.gold } }
         for ((key, hits) in (blows.remove(civ.civName) ?: emptyList<RulerOverrides.Strike>()).groupBy { it.attacker.civName to (it.targetCity ?: it.targetTile?.let { RulerCampaigns.placeOf(civ, it, enemies) } ?: "") }) {
             val (attacker, place) = key
             val arms = hits.mapNotNull { it.attackerUnit }.distinct(); val guns = hits.mapNotNull { it.attackerCity }.distinct()
@@ -1531,7 +1558,7 @@ object RulerHost {
             val times = when (hits.size) { 1 -> "once"; 2 -> "twice"; else -> "${hits.size} times" }
             val city = hits.first().targetCity
             val died = hits.filter { it.attackerFell }.mapNotNull { it.attackerUnit }.takeIf { it.isNotEmpty() }?.let { "; their ${it.joinToString(" and ")} died in the attempt" } ?: ""
-            log(civ, if (city != null) "$whose struck $city $times: " + (if (hits.any { it.fell }) (if (attacker == Constants.barbarians) "the walls were overrun and the city raided" else "the walls were stormed and the city is lost") else "the walls at ${hits.last().health} of ${hits.last().maxHealth} health") + died + "."
+            log(civ, if (city != null) "$whose struck $city $times: " + (if (hits.any { it.fell }) (if (attacker == Constants.barbarians) "the walls were overrun and the city raided" + (raided[city]?.let { " of $it gold" } ?: "") else "the walls were stormed and the city is lost") else "the walls at ${hits.last().health} of ${hits.last().maxHealth} health") + died + "."
                 // Soldiers embarked are soldiers at sea, not ships (a ruler read "our ships at the harbour of Sippar" as a navy lost; it was Mechanized Infantry, Run 30)
                 else "$whose struck our ${if (hits.first().targetTile?.isWater != true) "soldiers" else if (hits.all { h -> h.targetUnit?.let { civ.gameInfo.ruleset.units[it]?.isWaterUnit } == true }) "ships" else "soldiers at sea"} ${RulerCampaigns.atPlace(place)} $times: " + listOfNotNull(
                     hits.filter { !it.fell && it.targetUnitId !in hits.filter { b -> b.fell }.map { b -> b.targetUnitId } }.groupBy { it.targetUnitId ?: it.targetUnit!! }.values
@@ -1600,7 +1627,8 @@ object RulerHost {
         // What should be in the treasury - what was there, the turn's income, less every spending with its own line - against what is: a clean turn
         // reads about 0 (it once left the income out, and so understated what was missing by a turn's income: Babylon's 360 read 288, Run 28)
         val unexplained = before.gold + before.income - civ.gold - paid.sumOf { it.first } - diplomacy.officialsDealGold.remove(civ.civName).let { it ?: 0 } -
-            paidByRenewals.coerceAtLeast(0) - (rulersOwnGold.remove(civ.civName) ?: 0)
+            paidByRenewals.coerceAtLeast(0) - (rulersOwnGold.remove(civ.civName) ?: 0) -
+            turnNews.filterIsInstance<RulerOverrides.News.Raid>().filter { it.city.civ == civ }.sumOf { it.gold } // told with the raid
         // Worth a line beyond a margin for the income's own drift (never for trifles under 20): forty gold is a fortune in one age and small change in another
         val income = before.income
         if (unexplained > maxOf(20, income / 2)) { log(civ, "A further $unexplained gold left the treasury this turn without the officials' hand in it (upkeep, payments under our deals, or a deal struck)."); selfCheck("gold", civ.civName, "$unexplained gold left with no recorded cause") }
@@ -1865,6 +1893,12 @@ object RulerHost {
         }
     }
 
+    /** The world's news of the turn being played, with its facts (RulerOverrides.News): the world's events and each chancery read it, and it is
+     *  forgotten once they have. What an order did between turns (a pact signed, a denouncement) is told with the next turn */
+    private val turnNews = java.util.concurrent.CopyOnWriteArrayList<RulerOverrides.News>()
+    /** Cities a nuclear blow razed this turn: its own event tells them, the city-destroyed event does not tell them again */
+    private val nukeRazed = HashSet<String>()
+
     /** Where each ruled realm's host at sea is bound, as the last bookkeeping found it: one line per landing, shown with the posture */
     private val hostAtSea = HashMap<String, List<String>>()
     /** The cities each realm's host found no shore out of reach near last turn: a host holding at sea is told once, when it begins to */
@@ -1931,6 +1965,19 @@ object RulerHost {
             }
             else if (previousOwner != owner) {
                 val game = game()
+                // Given back by a liberator, or wed by marriage: not a city taken
+                val freed = turnNews.filterIsInstance<RulerOverrides.News.Liberated>().firstOrNull { it.city.name == city }
+                val wed = turnNews.filterIsInstance<RulerOverrides.News.Married>().firstOrNull { it.cityState.civName == previousOwner }
+                if (freed != null) {
+                    val text = "${freed.by.civName} liberated $city from $previousOwner and gave it back to $owner" + (if (freed.revived) ", bringing $owner back into the world" else "") + "."
+                    addPublicEvent(text)
+                    tellCourts(text, listOf(freed.by, freed.restored), except = listOf(freed.restored))
+                    continue
+                }
+                if (wed != null) {
+                    if (previousOwner !in ended) { ended += previousOwner; val text = "The city-state of $previousOwner joined ${wed.by.civName} by marriage."; addPublicEvent(text); tellCourts(text, listOf(wed.cityState), except = listOf(wed.by)) }
+                    continue
+                }
                 val sides = listOf(owner, previousOwner).mapNotNull { name -> game.civilizations.firstOrNull { it.civName == name } }
                 // A city-state's fall is one event, not a capture "from Sydney", a capital's fall and a destruction (the Chronicler wrote conquests of Zurich from Zurich)
                 val cityState = sides.getOrNull(1)?.takeIf { it.isCityState && previousOwner !in after.alive }
@@ -1949,7 +1996,16 @@ object RulerHost {
                 }
             }
         }
-        for (city in before.cityOwners.keys - after.cityOwners.keys) addPublicEvent("The city of $city has been destroyed.")
+        for (city in before.cityOwners.keys - after.cityOwners.keys) {
+            if (city in nukeRazed) continue // the blow's own event says it
+            val gone = turnNews.filterIsInstance<RulerOverrides.News.CityGone>().lastOrNull { it.city == city }
+            val by = gone?.by
+            addPublicEvent(when {
+                gone == null || by == null -> "The city of $city has been destroyed."
+                gone.razed -> "${by.civName} razed $city" + (gone.from?.takeIf { it != by }?.let { ", which it had taken from ${it.civName}" } ?: "") + "."
+                else -> "${RulerCampaigns.possessive(by.civName).replaceFirstChar { it.uppercase() }} soldiers destroyed $city" + (gone.from?.let { ", a city of ${it.civName}" } ?: "") + "."
+            })
+        }
         for ((wonder, owner) in after.wonders)
             if (wonder !in before.wonders) addPublicEvent("$owner completed the wonder $wonder in ${after.wonderSites[wonder] ?: "one of its cities"}.")
         for ((civ, era) in after.eras)
@@ -1959,7 +2015,81 @@ object RulerHost {
                 val opened = people?.tech?.techsResearched?.firstOrNull { game().ruleset.technologies[it]?.era() == era }
                 addPublicEvent("$civ entered the $era" + (opened?.let { " with the learning of $it" } ?: "") + ".")
             }
-        for (civ in before.alive - after.alive - ended) addPublicEvent("$civ has been destroyed.")
+        for (civ in before.alive - after.alive - ended) {
+            // The hand and the last city: what became of the cities it held when the turn began
+            val last = before.cityOwners.filterValues { it == civ }.keys
+            val fates = last.map { city -> after.cityOwners[city]?.let { taker -> "$city fell to $taker" }
+                ?: turnNews.filterIsInstance<RulerOverrides.News.CityGone>().lastOrNull { it.city == city && it.by != null }?.let { "$city was ${if (it.razed) "razed" else "destroyed"} by ${it.by!!.civName}" }
+                ?: "$city was destroyed" }
+            val text = "$civ has been destroyed" + (if (fates.isEmpty()) "." else ": its last ${if (fates.size == 1) "city" else "cities"} - ${andList(fates)}.")
+            addPublicEvent(text)
+            tellCourts(text, emptyList())
+        }
+        tellNews()
+    }
+
+    /** A line of the world's news to every ruled court still standing that knows each of [about], save [except] */
+    private fun tellCourts(text: String, about: List<Civilization>, except: List<Civilization> = emptyList()) {
+        for (name in orders.keys) {
+            val court = game().civilizations.firstOrNull { it.civName == name }?.takeIf { it.isAlive() } ?: continue
+            if (court in except || about.any { it != court && !court.knows(it) }) continue
+            log(court, text)
+        }
+    }
+
+    /** The turn's news the engine tells poorly or not at all (RulerOverrides.News), to the world once and to the courts in our words: projects, faiths, pacts, denouncements */
+    private fun tellNews() {
+        val name = { c: Civilization -> c.civName }
+        for (project in turnNews.filterIsInstance<RulerOverrides.News.Project>()) {
+            val building = project.project
+            if (building.isWonder) continue // a world wonder is told as one (the wonder's event, the United Nations' own line)
+            val opens = when {
+                building.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesNuclearWeapons) -> "the age of atomic arms begins"
+                building.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts) -> "the race for the stars begins"
+                building.hasUnique(com.unciv.models.ruleset.unique.UniqueType.TriggersCulturalVictory) -> "its completion wins the world by culture"
+                else -> null
+            }
+            val what = "${if (project.begun) "began" else "completed"} the ${building.name}"
+            addPublicEvent("${name(project.civ)} $what in ${project.city.name}" + (opens?.let { ": $it" } ?: "") + ".")
+            for (court in orders.keys.mapNotNull { n -> game().civilizations.firstOrNull { it.civName == n && it.isAlive() } }) {
+                if (court == project.civ) continue // its own line says it was built
+                log(court, (if (court.knows(project.civ)) "${name(project.civ)} $what in ${project.city.name}" else "A people we have not met $what") + (opens?.let { ": $it" } ?: "") + ".")
+            }
+        }
+        for (faith in turnNews.filterIsInstance<RulerOverrides.News.Faith>()) {
+            val beliefs = faith.beliefs.map { it.name }.takeIf { it.isNotEmpty() }?.let { " with the belief${plural(it.size)} ${andList(it)}" } ?: ""
+            val text = if (faith.enhanced) "${name(faith.civ)} enhanced ${faith.religion}$beliefs."
+                else "${name(faith.civ)} founded ${faith.religion}" + (faith.holyCity?.let { " in its holy city ${it.name}" } ?: "") + "$beliefs."
+            addPublicEvent(text)
+            tellCourts(text, listOf(faith.civ), except = listOf(faith.civ)) // a court's own faith is told by its beliefs' line
+        }
+        // A pact's two sides each tell its end; signed and ended in one turn is a renewal
+        // Keyed by name: a map keyed by the engine's own objects draws on their identity hashes, and so shifts the order the engine's own sets are walked in
+        val pacts = LinkedHashMap<Pair<String, String>, MutableSet<String>>()
+        val byName = HashMap<String, Civilization>()
+        for (pact in turnNews.filterIsInstance<RulerOverrides.News.Pact>()) {
+            byName[pact.a.civName] = pact.a; byName[pact.b.civName] = pact.b
+            val pair = if (pact.how == "broken") pact.a.civName to pact.b.civName else listOf(pact.a.civName, pact.b.civName).sorted().let { it[0] to it[1] }
+            pacts.getOrPut(pair) { LinkedHashSet() } += pact.how
+        }
+        for ((pair, hows) in pacts) {
+            val (a, b) = byName[pair.first]!! to byName[pair.second]!!
+            val text = when {
+                "broken" in hows -> "${name(a)} went to war and so ended its Defensive Pact with ${name(b)}."
+                "signed" in hows && "lapsed" in hows -> "${name(a)} and ${name(b)} renewed their Defensive Pact."
+                "signed" in hows -> "${name(a)} and ${name(b)} signed a Defensive Pact."
+                else -> "The Defensive Pact between ${name(a)} and ${name(b)} ran its term and ended."
+            }
+            addPublicEvent(text)
+            tellCourts(text, listOf(a, b), except = listOf(a, b)) // the two sides have their deals' line, and the declarer its order's
+            if ("broken" in hows && b.civName in orders) log(b, "${name(a)} went to war and so ended its Defensive Pact with us.")
+        }
+        for (denounced in turnNews.filterIsInstance<RulerOverrides.News.Denounced>()) {
+            val text = "${name(denounced.by)} denounced ${name(denounced.whom)}."
+            addPublicEvent(text)
+            tellCourts(text, listOf(denounced.by, denounced.whom), except = listOf(denounced.by, denounced.whom))
+            if (denounced.whom.civName in orders) log(denounced.whom, "${name(denounced.by)} has denounced us.")
+        }
     }
 
     /** Log lines an advisor would want to see at once, not at the next scheduled look-in */
@@ -1971,7 +2101,9 @@ object RulerHost {
         "lost our alliance",
         // The alerts every realm gets (the Utopia Project begun or finished): the end of the game may be in sight
         "has started constructing", "has completed [^.]*!$",
-        "awaits orders", "The United Nations now stands", "our vote is not pledged", "(?<!We have )captured(?! a barbarian)", "has been destroyed", "is no more", "has been stuck", "offers peace", "\\(an advised court\\) offers a deal", "demands that we", "proposes a Declaration of Friendship").map { Regex(it, RegexOption.IGNORE_CASE) }
+        "awaits orders", "The United Nations now stands", "our vote is not pledged", "(?<!We have )captured(?! a barbarian)", "has been destroyed", "is no more", "has been stuck", "offers peace", "\\(an advised court\\) offers a deal", "demands that we", "proposes a Declaration of Friendship",
+        // the notifications pass: a revolt, a war joined by our pact, a project that changes the race, a pact ended by war
+        "rose in revolt", "^We joined .* in the war against", " (began|completed) the [A-Z]", "ended its Defensive Pact with us").map { Regex(it, RegexOption.IGNORE_CASE) }
 
     private val warningsWoken = HashMap<String, HashSet<String>>()
     /** The world as the last advance left it (null before the first) */
@@ -2015,18 +2147,71 @@ object RulerHost {
         } else addPublicEvent(told(record))
     }
 
+    /** Who came in on a war's first day, by side: the target's pact partners and its allies, and the declarer's allies - one reckoning for the declaring
+     *  court's account (cameIn) and the struck court's (reworded) */
+    private class Sides(val targetPartners: List<String>, val targetAllies: List<String>, val declarerAllies: List<String>)
+    private fun sides(declarer: String, target: String, joins: List<WarRecord>) = Sides(
+        joins.filter { it.byPact && it.ally == target }.map { it.declarer }.distinct(),
+        joins.filter { !it.byPact && it.ally == target }.map { it.declarer }.distinct(),
+        joins.filter { !it.byPact && it.ally == declarer }.map { it.declarer }.distinct())
+
     /** Who came in on a war's first day, for the declaring court's own account: the target's pact partners and allies, and our own allies */
     private fun cameIn(civ: Civilization, target: Civilization, joins: List<WarRecord>): String {
-        fun names(list: List<WarRecord>) = andList(list.map { it.declarer }.distinct())
-        val partners = joins.filter { it.byPact && it.ally == target.civName }
-        val theirAllies = joins.filter { !it.byPact && it.ally == target.civName }
-        val ourAllies = joins.filter { !it.byPact && it.ally == civ.civName }
+        val came = sides(civ.civName, target.civName, joins)
         val theirs = listOfNotNull(
-            partners.takeIf { it.isNotEmpty() }?.let { "${target.civName}'s pact partner${plural(it.size)} ${names(it)} came in at its side" },
-            theirAllies.takeIf { it.isNotEmpty() }?.let { "${if (partners.isEmpty()) "${target.civName}'s" else "its"} all${if (it.size == 1) "y" else "ies"} ${names(it)} joined the war" })
+            came.targetPartners.takeIf { it.isNotEmpty() }?.let { "${target.civName}'s pact partner${plural(it.size)} ${andList(it)} came in at its side" },
+            came.targetAllies.takeIf { it.isNotEmpty() }?.let { "${if (came.targetPartners.isEmpty()) "${target.civName}'s" else "its"} all${if (it.size == 1) "y" else "ies"} ${andList(it)} joined the war" })
         return (if (theirs.isEmpty()) "" else " " + theirs.joinToString(", and ") + ".") +
-            (if (ourAllies.isEmpty()) "" else " Our all${if (ourAllies.size == 1) "y" else "ies"} ${names(ourAllies)} came in with us.")
+            (if (came.declarerAllies.isEmpty()) "" else " Our all${if (came.declarerAllies.size == 1) "y" else "ies"} ${andList(came.declarerAllies)} came in with us.")
     }
+
+    /** An engine notice told in our own words with the facts the turn's news holds: null when it is not one of them (or its facts are missing - the
+     *  engine's words then stand), "" when another line already tells it. [toldJoins] gathers the joins a war's line names, so they are not told again */
+    private fun reworded(civ: Civilization, notice: String, toldJoins: MutableSet<Pair<String, String>>): String? {
+        val people = { c: Civilization -> RulerCampaigns.people(c.civName) }
+        val noPeace = "No peace can be made for ${civ.gameInfo.ruleset.modOptions.constants.minimumWarDuration} turns."
+        Regex("^\\[(.+)\\] has declared war on us!$").find(notice)?.let { m ->
+            val attacker = m.groupValues[1]
+            val came = sides(attacker, civ.civName, warsDeclared.filter { setOf(it.target, it.ally).let { side -> civ.civName in side && attacker in side } })
+            (came.targetPartners + came.targetAllies + came.declarerAllies).forEach { toldJoins += it to attacker }
+            val parts = listOfNotNull(
+                came.declarerAllies.takeIf { it.isNotEmpty() }?.let { "${RulerCampaigns.possessive(attacker)} all${if (it.size == 1) "y" else "ies"} ${andList(it)} came in with ${if (attacker.startsWith("The ")) "them" else "it"}" },
+                came.targetPartners.takeIf { it.isNotEmpty() }?.let { "our pact partner${plural(it.size)} ${andList(it)} came in at our side" },
+                came.targetAllies.takeIf { it.isNotEmpty() }?.let { "our all${if (it.size == 1) "y" else "ies"} ${andList(it)} came in at our side" })
+            return "${RulerCampaigns.people(attacker).replaceFirstChar { it.uppercase() }} has declared war on us" + (if (parts.isEmpty()) "." else ": " + parts.joinToString("; ") + ".") + " $noPeace"
+        }
+        Regex("^We have joined \\[(.+)\\] in the war against \\[(.+)\\]!$").find(notice)?.let { m ->
+            val (ally, foe) = m.groupValues[1] to m.groupValues[2]
+            val record = warsDeclared.firstOrNull { it.declarer == civ.civName && it.ally == ally && it.target == foe }
+            return "We joined $ally in the war against $foe" + (if (record?.byPact == true) ", as our Defensive Pact with $ally binds us" else ", at its side") + ". $noPeace"
+        }
+        if (notice.startsWith("Your citizens are revolting")) {
+            val revolt = turnNews.filterIsInstance<RulerOverrides.News.Revolt>().lastOrNull { it.civ == civ } ?: return null
+            return "The people rose in revolt near ${revolt.city.name}: ${RulerCampaigns.count(revolt.rebels)} rebel ${if (revolt.rebels == 1) revolt.unit else Prose.pluralOf(revolt.unit)} took the field against us. " +
+                "The realm's mood stands at ${civ.getHappiness()}."
+        }
+        val goldenAge = turnNews.filterIsInstance<RulerOverrides.News.GoldenAge>().lastOrNull { it.civ == civ }
+        if (notice == "You have entered a Golden Age!" && goldenAge != null) {
+            val cause = goldenAge.cause?.let { "brought by our $it" } ?: "born of the people's contentment"
+            val lengthened = civ.goldenAges.turnsLeftForCurrentGoldenAge > goldenAge.turns
+            return (if (lengthened) "Our Golden Age is lengthened by ${goldenAge.turns} turns, $cause" else "We entered a Golden Age of ${goldenAge.turns} turns, $cause") +
+                ": a fifth more production and culture in every city, and a gold more from every tile that yields gold."
+        }
+        if (notice.startsWith("You enter a Golden Age") && goldenAge != null) return "" // the trigger's second word on the same golden age
+        Regex("^We have lost our alliance with \\[(.+?)\\]").find(notice)?.let { m ->
+            val lost = turnNews.filterIsInstance<RulerOverrides.News.AllianceLost>().lastOrNull { it.oldAlly == civ && it.cityState.civName == m.groupValues[1] } ?: return null
+            val cs = lost.cityState
+            val goods = cs.getCivResourcesByName().filter { (name, amount) -> amount > 0 && civ.gameInfo.ruleset.tileResources[name]?.resourceType != com.unciv.models.ruleset.tile.ResourceType.Bonus }.keys
+            val goes = listOfNotNull("its vote when the world votes",
+                goods.takeIf { it.isNotEmpty() }?.let { "its ${andList(it.toList())}" },
+                // its gifts as they stand now: an era's gift not yet or no longer given is no loss
+                cs.cityStateType.allyBonusUniques.map { com.unciv.models.ruleset.unique.Unique(it) }.filter { it.conditionalsApply(com.unciv.models.ruleset.unique.GameContext(civ)) }
+                    .takeIf { it.isNotEmpty() }?.let { gifts -> "its gifts to an ally (${gifts.joinToString("; ") { u -> RulerUnits.inWords(u.text.replace(Regex("\\s*<[^>]*>"), "")) }})" })
+            return "We lost our alliance with ${cs.civName}" + (lost.newAlly?.let { " to ${people(it)}" } ?: "") + ": with it go ${andList(goes)}."
+        }
+        return null
+    }
+
     /** True while the turn's bookkeeping runs after nextTurn: lines written then belong to the turn just played, all other lines to the turn about to be */
     @Volatile private var settling = false
 
@@ -2066,7 +2251,7 @@ object RulerHost {
                 }
                 guardedStep("the world's vote") { fault("vote"); noteWorldVote(game, ruledCivs) }
                 for (civ in ruledCivs) guardedStep("the self-checks of ${civ.civName}") { selfCheckTurn(civ, civSnapshots[civ]!!) }
-            } finally { settling = false }
+            } finally { settling = false; turnNews.clear(); nukeRazed.clear() }
             guardedStep("the roll of the dead") { units.forgetTheDead(game) }
 
             for (civ in ruledCivs) {

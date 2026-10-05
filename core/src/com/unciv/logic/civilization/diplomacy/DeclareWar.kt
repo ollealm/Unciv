@@ -314,6 +314,7 @@ object DeclareWar {
                 thirdPartyDiploManager.removeFlag(DiplomacyFlags.DefensivePact)
                 thirdPartyDiploManager.otherCivDiplomacy().removeFlag(DiplomacyFlags.DefensivePact)
             }
+            com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.Pact(diplomacyManager.civInfo, thirdPartyDiploManager.otherCiv, "broken"))
             for (civ in thirdPartyDiploManager.getCommonKnownCivsWithSpectators()) {
                 civ.addNotification("[${diplomacyManager.civInfo.civName}] cancelled their Defensive Pact with [${thirdPartyDiploManager.otherCiv.civName}]!",
                     NotificationCategory.Diplomacy, diplomacyManager.civInfo.civName, NotificationIcon.Diplomacy, thirdPartyDiploManager.otherCiv.civName)

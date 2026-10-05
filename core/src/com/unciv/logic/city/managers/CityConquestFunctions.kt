@@ -213,6 +213,7 @@ class CityConquestFunctions(val city: City) {
         diplomaticRepercussionsForLiberatingCity(conqueringCiv, oldCiv)
 
         conquerCity(conqueringCiv, oldCiv, foundingCiv)
+        com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.Liberated(conqueringCiv, foundingCiv, city, oldCiv, revived = foundingCiv.cities.size == 1))
 
         if (foundingCiv.cities.size == 1) {
             // Resurrection!

@@ -181,6 +181,7 @@ object DiplomacyTurnManager {
                     }
                     DiplomacyFlags.DefensivePact.name -> {
                         diplomaticStatus = DiplomaticStatus.Peace
+                        com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.Pact(civInfo, otherCiv, "lapsed"))
                     }
                     // This is confusingly named - in fact, the civ that has the flag set is the MAJOR civ
                     DiplomacyFlags.ProvideMilitaryUnit.name -> {

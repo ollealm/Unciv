@@ -230,6 +230,7 @@ class TurnManager(val civInfo: Civilization) {
         // Will be automatically added again as long as unhappiness is still low enough
         civInfo.removeFlag(CivFlags.RevoltSpawning.name)
 
+        com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.Revolt(civInfo, spawnCity, rebelCount, unitToSpawn.name))
         civInfo.addNotification("Your citizens are revolting due to very high unhappiness!", spawnTile.position, NotificationCategory.General, unitToSpawn.name, "StatIcons/Malcontent")
     }
 

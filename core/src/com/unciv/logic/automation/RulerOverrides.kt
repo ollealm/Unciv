@@ -376,6 +376,46 @@ object RulerOverrides {
             (defender as? com.unciv.logic.battle.MapUnitCombatant)?.unit?.id))
     }
 
+    /** The world's news the engine tells poorly or not at all, with its facts at that moment, for the host to tell in its own words: the world hears the
+     *  public ones once, each court in its chancery (the notifications pass, 2026-10-05). The host keeps them for the turn being played */
+    sealed class News {
+        /** A project the world is alerted to (the Manhattan Project, the Apollo Program, the Utopia Project): [begun], or completed */
+        class Project(val civ: Civilization, val city: com.unciv.logic.city.City, val project: com.unciv.models.ruleset.Building, val begun: Boolean) : News()
+        /** A religion founded, with its holy city, or enhanced, with the beliefs it took */
+        class Faith(val civ: Civilization, val religion: String, val holyCity: com.unciv.logic.city.City?, val beliefs: List<com.unciv.models.ruleset.Belief>, val enhanced: Boolean) : News()
+        /** A defensive pact between [a] and [b]: "signed", "lapsed" (its term ran out), or "broken" ([a] went to war and ended it) */
+        class Pact(val a: Civilization, val b: Civilization, val how: String) : News()
+        class Denounced(val by: Civilization, val whom: Civilization) : News()
+        /** Rebels risen against [civ] near [city] */
+        class Revolt(val civ: Civilization, val city: com.unciv.logic.city.City, val rebels: Int, val unit: String) : News()
+        /** A golden age entered (or lengthened) for [turns] more turns; [cause] what brought it, null for the people's contentment */
+        class GoldenAge(val civ: Civilization, val turns: Int, val cause: String?) : News()
+        class AllianceLost(val cityState: Civilization, val oldAlly: Civilization, val newAlly: Civilization?) : News()
+        /** [by] took [city] from [from] and gave it back to [restored], its founders; [revived] when that brought them back from the dead */
+        class Liberated(val by: Civilization, val restored: Civilization, val city: com.unciv.logic.city.City, val from: Civilization, val revived: Boolean) : News()
+        /** The barbarians took [gold] from [city]'s treasury */
+        class Raid(val city: com.unciv.logic.city.City, val gold: Int) : News()
+        /** A city gone from the map: razed by [by], its holder, or destroyed by [by]'s soldiers; [from] whose it was before */
+        class CityGone(val city: String, val by: Civilization?, val from: Civilization?, val razed: Boolean) : News()
+        /** A city-state wed to [by] by marriage */
+        class Married(val cityState: Civilization, val by: Civilization) : News()
+    }
+    @Volatile var news: ((News) -> Unit)? = null
+    fun noteNews(item: News) = news?.invoke(item)
+    /** What brought a golden age about, set by the trigger that brings one for the moment it is entered; null is the people's contentment */
+    @Volatile var goldenAgeCause: String? = null
+
+    /** A unit struck by a citadel's border: a blow by the citadel's owner like any other, and a death with its killer named when it dies of it (a death
+     *  there read "destroyed; the officials did not say by what") */
+    fun noteCitadel(unit: MapUnit, citadel: Tile, damage: Int) {
+        val owner = citadel.getOwner() ?: return
+        if (owner.civID !in ruledCivs && unit.civ.civID !in ruledCivs) return
+        val fell = unit.health - damage <= 0
+        struck?.invoke(Strike(owner, unit.civ.civName, null, unit.name, (unit.health - damage).coerceAtLeast(0), 100, fell, unit.currentTile,
+            citadel.improvement, null, false, unit.id))
+        if (fell && unit.civ.civID in ruledCivs) unitLost?.invoke(UnitLoss(unit.civ, unit, unit.currentTile, owner, citadel.improvement, false))
+    }
+
     /** civIDs that may raise no world wonder at all (a game setting: e.g. only the rulers' realms compete for them) */
     val noWonders: MutableSet<String> = ConcurrentHashMap.newKeySet()
 

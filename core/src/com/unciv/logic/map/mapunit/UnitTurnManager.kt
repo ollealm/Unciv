@@ -85,6 +85,7 @@ class UnitTurnManager(val unit: MapUnit) {
             }.maxByOrNull { it.second }
             ?: return
         if (damage == 0) return
+        com.unciv.logic.automation.RulerOverrides.noteCitadel(unit, citadelTile, damage)
         unit.takeDamage(damage)
         val improvementName = citadelTile.improvement!!  // guarded by `getUnpillagedImprovement() != null` above
         val improvementIcon = "ImprovementIcons/$improvementName"

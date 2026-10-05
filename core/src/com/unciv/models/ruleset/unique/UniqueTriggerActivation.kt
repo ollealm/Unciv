@@ -505,8 +505,12 @@ object UniqueTriggerActivation {
 
             UniqueType.OneTimeEnterGoldenAge, UniqueType.OneTimeEnterGoldenAgeTurns -> {
                 return {
-                    if (unique.type == UniqueType.OneTimeEnterGoldenAgeTurns) civInfo.goldenAges.enterGoldenAge(unique.params[0].toInt())
-                    else civInfo.goldenAges.enterGoldenAge()
+                    // What brought it, for the chancery's line: the Great Artist, the wonder or the policy whose ability this is
+                    com.unciv.logic.automation.RulerOverrides.goldenAgeCause = unique.sourceObjectName ?: triggerNotificationText
+                    try {
+                        if (unique.type == UniqueType.OneTimeEnterGoldenAgeTurns) civInfo.goldenAges.enterGoldenAge(unique.params[0].toInt())
+                        else civInfo.goldenAges.enterGoldenAge()
+                    } finally { com.unciv.logic.automation.RulerOverrides.goldenAgeCause = null }
 
                     val notificationText = getNotificationText(
                         notification, triggerNotificationText,

@@ -441,12 +441,14 @@ class ReligionManager : IsPartOfGameInfoSerialization {
             }
             ReligionState.FoundingReligion -> {
                 religionState = ReligionState.Religion
+                com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.Faith(civInfo, religion!!.getReligionDisplayName(), civInfo.cities.firstOrNull { it.religion.religionThisIsTheHolyCityOf == religion!!.name }, beliefs, enhanced = false))
                 civInfo.forEachTriggeredUnique(UniqueType.TriggerUponFoundingReligion, ignoreCities = false) { unique ->
                     UniqueTriggerActivation.triggerUnique(unique, civInfo)
                 }
             }
             ReligionState.EnhancingReligion -> {
                 religionState = ReligionState.EnhancedReligion
+                com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.Faith(civInfo, religion!!.getReligionDisplayName(), civInfo.cities.firstOrNull { it.religion.religionThisIsTheHolyCityOf == religion!!.name }, beliefs, enhanced = true))
                 civInfo.forEachTriggeredUnique(UniqueType.TriggerUponEnhancingReligion, ignoreCities = false) { unique ->
                     UniqueTriggerActivation.triggerUnique(unique, civInfo)
                 }

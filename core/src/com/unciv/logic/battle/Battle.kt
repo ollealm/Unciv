@@ -233,6 +233,7 @@ object Battle {
                 )
 
                 defender.city.destroyCity()
+                com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.CityGone(cityName, attacker.getCivInfo(), defendingCiv, razed = false))
 
                 if (defendingCiv.cities.isEmpty()) {
                     destroyIfDefeated(defendingCiv, attacker.getCivInfo(), defender.getTile().position)
@@ -247,6 +248,7 @@ object Battle {
             defender.takeDamage(-1) // Back to 2 HP
             val ransom = min(200, defender.city.civ.gold)
             defender.city.civ.addGold(-ransom)
+            com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.Raid(defender.city, ransom))
             defender.city.civ.addNotification(
                 "Barbarians raided [${defender.city.name}] and stole [$ransom] Gold from your treasury!",
                 defender.city.location,

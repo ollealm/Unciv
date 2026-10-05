@@ -173,6 +173,7 @@ class CityTurnManager(val city: City) {
 
             if (city.population.population <= removedPopulation) {
                 city.espionage.removeAllPresentSpies(SpyFleeReason.Other)
+                com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.CityGone(city.name, city.civ, city.previousOwner.takeIf { it.isNotEmpty() }?.let { id -> city.civ.gameInfo.civilizations.firstOrNull { it.civID == id } }, razed = true))
                 city.civ.addNotification(
                     "[${city.name}] has been razed to the ground!",
                     city.location, NotificationCategory.General,

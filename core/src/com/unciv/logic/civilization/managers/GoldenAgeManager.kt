@@ -52,7 +52,9 @@ class GoldenAgeManager : IsPartOfGameInfoSerialization {
     }
 
     fun enterGoldenAge(unmodifiedNumberOfTurns: Int = 10) {
-        turnsLeftForCurrentGoldenAge += calculateGoldenAgeLength(unmodifiedNumberOfTurns)
+        val turns = calculateGoldenAgeLength(unmodifiedNumberOfTurns)
+        turnsLeftForCurrentGoldenAge += turns
+        com.unciv.logic.automation.RulerOverrides.noteNews(com.unciv.logic.automation.RulerOverrides.News.GoldenAge(civInfo, turns, com.unciv.logic.automation.RulerOverrides.goldenAgeCause))
         civInfo.addNotification("You have entered a Golden Age!",
             CivilopediaAction("Tutorial/Golden Age"),
             NotificationCategory.General, "StatIcons/Happiness")
