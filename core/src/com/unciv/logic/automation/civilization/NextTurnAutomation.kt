@@ -402,6 +402,8 @@ object NextTurnAutomation {
     }
 
     private fun sellBuildingForResource(civInfo: Civilization, resource: String) {
+        // A ruled civ's officials never sell a building: what stands was built or bought on the court's word (India's 660-gold Hydro Plant sold for 36, Run 36)
+        if (civInfo.civID in RulerOverrides.ruledCivs) return
         for (city in civInfo.cities) {
             if (city.hasSoldBuildingThisTurn) continue
             val rng = city.state.stateBasedRandom("NextTurnAutomation.freeUpSpaceResources")
@@ -413,9 +415,7 @@ object NextTurnAutomation {
                         && !civInfo.civConstructions.hasFreeBuilding(city, it)
                 }
                 .randomOrNull(rng) ?: continue
-            val fetched = city.getGoldForSellingBuilding(buildingToSell.name)
             city.sellBuilding(buildingToSell)
-            if (civInfo.civID in RulerOverrides.ruledCivs) RulerOverrides.buildingSold?.invoke(civInfo, city, buildingToSell.name, fetched, "to free its $resource for the spaceship")
             return
         }
     }

@@ -56,7 +56,7 @@ object RulerHost {
     /** civName -> what happened to that civ, turn by turn - the "chancery log" its advisor reads */
     private val chancery = HashMap<String, ArrayList<Map<String, Any?>>>()
     private val units = RulerUnits { civ, text -> log(civ, text) }
-    private val diplomacy = RulerDiplomacy({ civ, text -> log(civ, text) }, { text -> addPublicEvent(text) })
+    private val diplomacy = RulerDiplomacy({ civ, text -> log(civ, text) }, { text -> addPublicEvent(text) }, { civ, group, item, render -> foldLog(civ, group, item, render) })
     private val trail = RulerTrail()
     private val ages = RulerAges(trail, yearText = { turn -> yearText(turn) }, stillFor = { unit -> units.turnsStill(unit) })
 
@@ -151,7 +151,8 @@ object RulerHost {
         RulerOverrides.freeTechTaken = { civ, tech, goal -> freeTechs.getOrPut(civ.civName) { ArrayList() } += Pair(tech, goal) }
         RulerOverrides.unitDisbanded = { civ, unit, why -> disbandedFor.getOrPut(civ.civName) { HashMap() }.putIfAbsent(unit.id, why ?: "") } // the routine's reason first, the sink's word only when none was given
         RulerOverrides.unitDestroyed = { civ, unit, where -> destroyed.getOrPut(civ.civName) { HashMap() }[unit.id] = where }
-        RulerOverrides.buildingSold = { civ, city, building, gold, why -> log(civ, "The officials sold the $building in ${city.name} for $gold gold, $why.") }
+        // Told once a unit: the briefing's settler line says where it waits from then on
+        RulerOverrides.goesAshore = { civ, unit, home -> if (cameAshore.add(unit.id)) log(civ, "Our ${unit.name} #${unit.id} had nowhere to go and stood ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}; it comes ashore ${RulerCampaigns.atPlaceOf(civ, home)} and waits on our own land.") }
         RulerOverrides.beliefsChosen = { civ, what, beliefs -> log(civ, "The officials $what with the belief${if (beliefs.size == 1) "" else "s"} ${beliefs.joinToString("; ") { beliefInWords(it) }}.") }
         // A nuclear blow, told with its weight: to every court it touched in full (the attacker's as its own, each struck power's by the attacker's name),
         // to the world as one public event, and to every other ruled court in the world's words. The engine's own notices of it are struck (noise)
@@ -304,7 +305,7 @@ object RulerHost {
         RulerOverrides.nearWinner?.let { f -> RulerOverrides.nearWinner = { other -> hook("nearWinner", false) { f(other) } } }
         RulerOverrides.unitDisbanded?.let { f -> RulerOverrides.unitDisbanded = { civ, unit, why -> hook("unitDisbanded", Unit) { f(civ, unit, why) } } }
         RulerOverrides.unitDestroyed?.let { f -> RulerOverrides.unitDestroyed = { civ, unit, where -> hook("unitDestroyed", Unit) { f(civ, unit, where) } } }
-        RulerOverrides.buildingSold?.let { f -> RulerOverrides.buildingSold = { civ, city, building, gold, why -> hook("buildingSold", Unit) { f(civ, city, building, gold, why) } } }
+        RulerOverrides.goesAshore?.let { f -> RulerOverrides.goesAshore = { civ, unit, home -> hook("goesAshore", Unit) { f(civ, unit, home) } } }
         RulerOverrides.beliefsChosen?.let { f -> RulerOverrides.beliefsChosen = { civ, what, beliefs -> hook("beliefsChosen", Unit) { f(civ, what, beliefs) } } }
         RulerOverrides.nuked?.let { f -> RulerOverrides.nuked = { fall -> hook("nuked", Unit) { f(fall) } } }
         RulerOverrides.news?.let { f -> RulerOverrides.news = { item -> hook("news", Unit) { f(item) } } }
@@ -1306,10 +1307,27 @@ object RulerHost {
     private var atomicSeen = false
 
     /** The notifications each civ's last bookkeeping read: the same objects move from the live list into the log at the turn's end, and are not read twice */
+    /** Units already told coming ashore with nowhere to go (RulerOverrides.goesAshore) */
+    private val cameAshore = HashSet<Int>()
     private val notificationsSeen = HashMap<String, MutableSet<com.unciv.logic.civilization.Notification>>()
 
     private fun log(civ: Civilization, text: String) {
         chancery.getOrPut(civ.civName) { ArrayList() } += mapOf("turn" to stamp(), "text" to text)
+    }
+
+    /** Lines of one kind told in one turn, as one line: the first item makes it, each later one rewrites it (Run 36: seventeen renewals in a turn, one line each) */
+    private val folds = HashMap<String, Pair<Map<String, Any?>, ArrayList<String>>>()
+    private fun foldLog(civ: Civilization, group: String, item: String, render: (List<String>) -> String) {
+        val lines = chancery.getOrPut(civ.civName) { ArrayList() }
+        val key = "${civ.civName}|${stamp()}|$group"
+        val held = folds[key]
+        val at = held?.let { (line, _) -> lines.indexOfLast { it === line } } ?: -1
+        val items = if (at >= 0) held!!.second else ArrayList()
+        items += item
+        val folded = mapOf("turn" to stamp(), "text" to render(items))
+        if (at >= 0) lines[at] = folded else lines += folded
+        folds.keys.removeAll { !it.contains("|${stamp()}|") }
+        folds[key] = folded to items
     }
 
     /** The first turn whose year is at or after the one asked for (years run negative before Christ) */
@@ -2090,11 +2108,13 @@ object RulerHost {
             if (building.isWonder) continue // a world wonder is told as one (the wonder's event, the United Nations' own line)
             val opens = when {
                 building.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesNuclearWeapons) -> "the age of atomic arms begins"
-                building.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts) -> "the race for the stars begins"
+                building.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts) -> "its race for the stars begins"
                 building.hasUnique(com.unciv.models.ruleset.unique.UniqueType.TriggersCulturalVictory) -> "its completion wins the world by culture"
                 else -> null
             }
-            val what = "${if (project.begun) "began" else "completed"} the ${building.name}"
+            // Every power raises its own Apollo Program: Run 36's courts read another's as the one of the world (Siam's own as news, the Iroquois' as void)
+            val own = building.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts)
+            val what = "${if (project.begun) "began" else "completed"} ${if (own) "its own" else "the"} ${building.name}"
             addPublicEvent("${name(project.civ)} $what in ${project.city.name}" + (opens?.let { ": $it" } ?: "") + ".")
             for (court in orders.keys.mapNotNull { n -> game().civilizations.firstOrNull { it.civName == n && it.isAlive() } }) {
                 if (court == project.civ) continue // its own line says it was built
@@ -2148,7 +2168,7 @@ object RulerHost {
         "has started constructing", "has completed [^.]*!$",
         "awaits orders", "The United Nations now stands", "our vote is not pledged", "(?<!We have )captured(?! a barbarian)", "has been destroyed", "is no more", "has been stuck", "offers peace", "\\(an advised court\\) offers a deal", "demands that we", "proposes a Declaration of Friendship",
         // the notifications pass: a revolt, a war joined by our pact, a project that changes the race, a pact ended by war
-        "rose in revolt", "^We joined .* in the war against", "(began|completed) the .+: (the age of atomic arms begins|the race for the stars begins|its completion wins the world)", "ended its Defensive Pact with us").map { Regex(it, RegexOption.IGNORE_CASE) }
+        "rose in revolt", "^We joined .* in the war against", "(began|completed) (the|its own) .+: (the age of atomic arms begins|its race for the stars begins|its completion wins the world)", "ended its Defensive Pact with us").map { Regex(it, RegexOption.IGNORE_CASE) }
 
     private val warningsWoken = HashMap<String, HashSet<String>>()
     /** The world as the last advance left it (null before the first) */
@@ -2321,7 +2341,14 @@ object RulerHost {
             // The world's history must hear of it too, or the last chapter never knows the story ended. Once: the events are saved with the host, and a restart must not add it again
             if (winner != null && publicEvents.none { (it["text"] as String).startsWith("${winner.civName} has won a ") }) {
                 settling = true // it belongs to the turn just played
-                try { addPublicEvent("$stopReason.") } finally { settling = false }
+                // And every court's own log, the winner's too: the last look-in and the reviews read the log, which told the parts built and never the end (Run 36)
+                val how = when (winner.victoryManager.getVictoryTypeAchieved()) { "Scientific" -> ": the spaceship is complete and has launched"; else -> "" }
+                try {
+                    addPublicEvent("$stopReason.")
+                    for (court in game.civilizations.filter { it.civName in orders.keys })
+                        log(court, if (court == winner) "We have won a ${winner.victoryManager.getVictoryTypeAchieved()} victory$how. The game is over."
+                            else "${if (court.knows(winner)) winner.civName else "A people we have not met"} has won a ${winner.victoryManager.getVictoryTypeAchieved()} victory${how.replace("the spaceship", "its spaceship")}. The game is over.")
+                } finally { settling = false }
             }
             save() // every turn on disk as soon as it is played: a turn that fails later goes back to this one, not to the start of the advance
             if (stopReason != null || (wakeOnEvents && wake.isNotEmpty())) break
@@ -2447,7 +2474,9 @@ object RulerHost {
             // Income and expenses by source were never cited; what the officials spent is (compaction 2026-10-03)
             "officialsSpentLastTurn" to officialsSpent[civ.civName]?.takeIf { it.isNotEmpty() },
             "happiness" to civ.getHappiness(),
-            // happinessBreakdown and techsKnown were cut after the removal league (Run 31, 2026-10-04): mood was managed from happiness and the warnings, and the known techs cost two refusals in 108 turns - the research reply says "already known"
+            // techsKnown was cut after the removal league (Run 31, 2026-10-04): the known techs cost two refusals in 108 turns - the research reply says "already known".
+            // The mood's parts came back for Run 36's courts, who asked for them on a large map late (Run 31's removal was a small map early): only while the mood is below zero, grouped
+            "happinessBreakdown" to civ.getHappiness().takeIf { it < 0 }?.let { moodParts(civ) },
             // Warnings the advisor acknowledged fold to their first clause while they stand
             *warnings(civ, sites).partition { ackKey(it) in (orders[civ.civName]?.acknowledged ?: emptyList<String>()) }.let { (acknowledged, shown) ->
                 arrayOf("warnings" to shown, "warningsAcknowledged" to acknowledged.map { firstClause(it) }.ifEmpty { null }) },
@@ -2519,7 +2548,7 @@ object RulerHost {
 
     /** The spaceship before the Apollo Program stands anywhere we can see: one line, the gold guard in it */
     private fun spaceshipLine(civ: Civilization): String =
-        "No power we know has raised the Apollo Program, without which no spaceship part is built${civ.gameInfo.ruleset.buildings["Apollo Program"]?.requiredTech?.let { " (it needs $it${if (civ.tech.isResearched(it)) ", which we know" else ""})" } ?: ""}. Parts cannot be bought with gold."
+        "No power we know has raised its own Apollo Program, without which it builds no spaceship part${civ.gameInfo.ruleset.buildings["Apollo Program"]?.requiredTech?.let { " (it needs $it${if (civ.tech.isResearched(it)) ", which we know" else ""})" } ?: ""}. Parts cannot be bought with gold."
 
     private fun spaceshipFacts(civ: Civilization): Map<String, Any?> {
         val needed = spaceshipNeeded(civ)!!
@@ -2531,10 +2560,10 @@ object RulerHost {
                 val apollo = other.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts)
                 // What is still to come, and the learning each missing part waits on: the timing a rival can judge (facts, no reckoning of turns)
                 val missing = needed.entries.filter { parts[it.key] < it.value }.joinToString { (part, count) -> (if (count - parts[part] > 1) "${count - parts[part]} $part" else part) +
-                    (civ.gameInfo.ruleset.units[part]?.requiredTech?.let { tech -> ", which ${if (count - parts[part] > 1) "need" else "needs"} $tech (${if (other.tech.isResearched(tech)) "known to them" else "not yet known to them"})" } ?: "") }
-                if (built == 0 && !apollo) null else "${other.civName}: ${if (apollo) "the Apollo Program stands, " else ""}$built of ${needed.values.sum()} parts" + (if (missing.isNotEmpty()) "; missing $missing" else "") }.toList(),
+                    (civ.gameInfo.ruleset.units[part]?.requiredTech?.let { tech -> ", which ${if (count - parts[part] > 1) "need" else "needs"} $tech (knows $tech: ${if (other.tech.isResearched(tech)) "yes" else "no"})" } ?: "") }
+                if (built == 0 && !apollo) null else "${other.civName}: ${if (apollo) "its own Apollo Program stands, " else ""}$built of ${needed.values.sum()} parts" + (if (missing.isNotEmpty()) "; missing $missing" else "") }.toList(),
             "apollo" to civ.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts),
-            "note" to "Parts are units: queue them by name in any city once the Apollo Program stands${civ.gameInfo.ruleset.buildings["Apollo Program"]?.requiredTech?.takeUnless { civ.tech.isResearched(it) }?.let { " (a wonder that needs $it)" } ?: ""} and the techs are known (each needs Aluminum while it is built and on its way - the Aluminum is freed once the part is added to the ship); a finished part walks to the capital and is added to the ship by the officials. They CANNOT be bought with gold - saving gold for them is wasted. The ship launches, and the game is won, when every part is added.")
+            "note" to "Each power builds its own Apollo Program before its parts; another's opens nothing for us and closes nothing. Parts are units: queue them by name in any city once our Apollo Program stands${civ.gameInfo.ruleset.buildings["Apollo Program"]?.requiredTech?.takeUnless { civ.tech.isResearched(it) }?.let { " (a wonder that needs $it)" } ?: ""} and the techs are known (each needs Aluminum while it is built and on its way - the Aluminum is freed once the part is added to the ship); a finished part walks to the capital and is added to the ship by the officials. They CANNOT be bought with gold - saving gold for them is wasted. The ship launches, and the game is won, when every part is added.")
     }
 
     /** Lists whose emptiness is itself the news - no warnings, nothing on the desk, an empty queue - kept when empty wherever they stand */
@@ -2777,10 +2806,31 @@ object RulerHost {
      *  figure never brings it back (Greece acknowledged one warning ten times in twenty turns) - but a unit's #number kept, so one prophet is never another */
     private fun ackKey(warning: String) = countsStruck(firstClause(warning).replace(Regex("\\s*\\([^)]*\\)"), "")).replace(Regex("\\s+"), " ").trim().lowercase()
 
+    /** The mood's sum by kind of source, as the game counts it; no per-city split, the cities carry their own unhappiness */
+    private fun moodParts(civ: Civilization): Map<String, Int> {
+        val parts = LinkedHashMap<String, Float>()
+        for ((source, value) in civ.stats.getHappinessBreakdown()) {
+            val part = when {
+                source == "Cities" || source == "Occupied City" -> "cities"
+                source == "Population" -> "population"
+                "Luxur" in source -> "luxuries"
+                source == "Buildings" -> "buildings"
+                source == "Policies" || source == "Wonders" || source == "Religion" -> "policiesWondersAndFaith"
+                else -> "other"
+            }
+            parts[part] = (parts[part] ?: 0f) + value
+        }
+        return listOf("cities", "population", "luxuries", "buildings", "policiesWondersAndFaith", "other").associateWith { Math.round(parts[it] ?: 0f) }.filterValues { it != 0 }
+    }
+
+    /** What one more distinct luxury adds to the mood, as getHappinessBreakdown counts it */
+    private fun perLuxury(civ: Civilization): Int =
+        4 + civ.getDifficulty().extraHappinessPerLuxury.toInt() + civ.getMatchingUniques(com.unciv.models.ruleset.unique.UniqueType.BonusHappinessFromLuxury).sumOf { it.params[0].toInt() }
+
     private fun warnings(civ: Civilization, citySites: List<String>? = null): List<String> {
         val warnings = ArrayList<String>()
         if (civ.getHappiness() < 0) warnings += "The people are unhappy (${civ.getHappiness()}): ${if (civ.getHappiness() <= -10) "no city grows at all" else "every city's growth is cut by three quarters"} while the mood is below zero, and production suffers - farming for food does little until the mood is mended. " +
-            "The mood is a sum: every citizen costs one and every city a few; each distinct luxury gives four, and buildings, policies and wonders what they say (the build lists mark a building's mood as +N). A wide, populous realm settles a little below zero and growth is its brake; what raises it is a luxury not yet ours, a mood building not yet raised, a policy or wonder that gives it, a belief of our religion, or fewer and smaller cities."
+            "The mood is a sum, and happinessBreakdown shows its parts: every citizen costs one and every city a few; each distinct luxury not yet ours would add ${perLuxury(civ)}, and buildings, policies and wonders what they say (the build lists mark a building's mood as +N). A wide, populous realm settles a little below zero and growth is its brake; what raises it is a luxury not yet ours, a mood building not yet raised, a policy or wonder that gives it, a belief of our religion, or fewer and smaller cities."
         if (civ.tech.currentTechnologyName() == null) warnings += "Research is idle - give research goals."
         val standing = orders[civ.civName]
         val goalsLeft = standing?.research?.count { !reached(civ, it) } ?: 0
@@ -2818,11 +2868,7 @@ object RulerHost {
                     else "The officials re-arm only in war: order rearm to do it now, or disband the worst."
             } + (if (away.isNotEmpty()) " ${away.size} of them ${if (away.size == 1) "stands" else "stand"} abroad or at sea, and can be re-armed only once back on our own land." else ""))
         if (waiting.size >= 3) warnings += "${waiting.size} soldiers (${waiting.groupingBy { it.name }.eachCount().entries.joinToString { "${it.value} ${it.key}" }}) carry old arms that gold alone cannot replace: the newer arms need ${waiting.flatMap { units.newerArms(it).mapNotNull { to -> to.requiredResource } }.distinct().joinToString(" or ")}, which we lack."
-        if (!units.hasLandForACity(civ)) for (unit in civ.units.getCivUnits()) if (unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.FoundCity))
-            warnings += "${unit.name} #${unit.id} has nowhere to go: no land is left for a new city within our reach${if (civ.tech.unitsCanEmbark) ", on our shores or across the sea" else ""}. It costs upkeep - disband it, or keep it and know why."
         if (civ.policies.canAdoptPolicy()) warnings += "A policy can be adopted but none of the preferred branches has one available - add a branch to the policy order."
-        if (civ.units.getCivUnits().any { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.FoundCity) } && (citySites ?: units.citySites(civ)).isEmpty())
-            warnings += "We have a Settler but no free land for a city within reach - every site is too close to an existing city or unexplored. Explore further, or disband/keep the Settler."
         for (city in civ.cities) {
             if (city.cityConstructions.constructionQueue.isEmpty()) warnings += "${city.name} has an empty build queue."
             if (city.foodForNextTurn() < 0) warnings += "${city.name} is starving."
@@ -2830,10 +2876,21 @@ object RulerHost {
         if (civ.gold < 0 || civ.gold + civ.stats.statsForNextTurn.gold * (lookInTurns + 1) < 0) warnings += "The treasury is running dry (${civ.gold} gold, ${civ.stats.statsForNextTurn.gold.toInt()} per turn)."
         if (civ.units.getCivUnits().none { !it.isCivilian() }) warnings += "We have no military units at all."
         // A settler that has stood still for ten turns or more: held by order, or left to officials who found no site. Said with the price of one more city, so the wait is a weighed choice
-        for (settler in civ.units.getCivUnits().filter { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.FoundCity) }) {
+        // One line a settler: with no site the officials bring it ashore to wait (RulerOverrides.waitAshore), and the line says where it is (Run 36: "no free land"
+        // every look-in, the settlers adrift at sea for 60 turns and more); one waiting ten turns or more on a site or an order carries the price of a city
+        val settlers = civ.units.getCivUnits().filter { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.FoundCity) }.toList()
+        val noSite = settlers.isNotEmpty() && ((citySites ?: units.citySites(civ)).isEmpty() || !units.hasLandForACity(civ))
+        for (settler in settlers) {
             val waited = units.turnsStill(settler)
-            if (waited < 10) continue
             val order = units.orders[settler.id]
+            if (noSite && order == null) {
+                val ashore = !settler.isEmbarked() && settler.getTile().getOwner() == civ
+                warnings += "${settler.name} #${settler.id} has no site to go to: every site within our reach is too close to a city, another realm's, or unexplored. " +
+                    (if (ashore) "It waits ${RulerCampaigns.atPlaceOf(civ, settler.getTile())}" else "It stands ${RulerCampaigns.atPlaceOf(civ, settler.getTile())}, and the officials bring it ashore on our own land to wait") +
+                    ". It costs upkeep: order it to settle when a site opens, or disband it."
+                continue
+            }
+            if (waited < 10) continue
             val breakdown = civ.stats.getHappinessBreakdown()
             val perCity = if (civ.cities.isEmpty()) 0f else -(breakdown["Cities"] ?: 0f) / civ.cities.size
             val population = civ.cities.sumOf { it.population.population }

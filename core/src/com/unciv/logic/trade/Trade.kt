@@ -1,5 +1,6 @@
 package com.unciv.logic.trade
 
+import com.unciv.logic.automation.RulerOverrides
 import com.unciv.Constants
 import com.unciv.logic.IsPartOfGameInfoSerialization
 import com.unciv.logic.civilization.Civilization
@@ -58,12 +59,14 @@ class TradeRequest : IsPartOfGameInfoSerialization {
         val refusedByAI = decliningCiv.isAI() && !decliningCiv.hasPlayerStanding()
         val requestingCivInfo = decliningCiv.gameInfo.getCivilization(requestingCiv)
         val requestingCivDiploManager = requestingCivInfo.getDiplomacyManager(decliningCiv)!!
+        // A ruled civ's officials offer refused terms to that power again no sooner than ten turns (Run 36: the same Truffles and Open Borders proposals refused again and again)
+        val courtWait = if (requestingCiv in RulerOverrides.ruledCivs) 10 else 0
         // the numbers of the flags (20,5) are the amount of turns to wait until offering again
         if (trade.ourOffers.all { it.type == TradeOfferType.Luxury_Resource }
             && trade.theirOffers.all { it.type == TradeOfferType.Luxury_Resource })
-            requestingCivDiploManager.setFlag(DiplomacyFlags.DeclinedLuxExchange,5 - (requestingCivInfo.getPersonality()[PersonalityValue.Commerce] / 2).toInt())
+            requestingCivDiploManager.setFlag(DiplomacyFlags.DeclinedLuxExchange, maxOf(courtWait, 5 - (requestingCivInfo.getPersonality()[PersonalityValue.Commerce] / 2).toInt()))
         if (trade.ourOffers.any { it.name == Constants.researchAgreement })
-            requestingCivDiploManager.setFlag(DiplomacyFlags.DeclinedResearchAgreement,15 - requestingCivInfo.getPersonality()[PersonalityValue.Science].toInt())
+            requestingCivDiploManager.setFlag(DiplomacyFlags.DeclinedResearchAgreement, maxOf(courtWait, 15 - requestingCivInfo.getPersonality()[PersonalityValue.Science].toInt()))
         if (trade.ourOffers.any { it.name == Constants.defensivePact })
             requestingCivDiploManager.setFlag(DiplomacyFlags.DeclinedDefensivePact,10)
         if (trade.ourOffers.any { it.name == Constants.openBorders })

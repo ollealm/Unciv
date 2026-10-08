@@ -277,6 +277,7 @@ object UnitAutomation {
                         && unit.movement.canMoveTo(it)
                         && unit.movement.canReachInCurrentTurn(it) // Yes this is required despite the above line - see #14461
                         && unit.getDamageFromTerrain(it) <= 0 // Don't end turn on damaging terrain for no good reason
+                        && !(it.isWater && exploresOnFoot(unit)) // a ruled civ's land unit never wanders out to sea (Run 36)
                         && (!stayInTerritory || it.getOwner() == unit.civ || unit.currentTile.getOwner() != unit.civ)
                 }
         val rng = unit.cache.state.stateBasedRandom("UnitAutomation.wander")

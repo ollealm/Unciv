@@ -39,7 +39,9 @@ private val DURATION = Regex(" for \\d+ turns?\\b")
 /** A Research Agreement as a deal in force reads it, both sides alike: one wording for the loss of it */
 private val RESEARCH_PAID = Regex("we give Research Agreement \\((\\d+) gold from each side\\); they give Research Agreement \\(\\d+ gold from each side\\)")
 
-class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private val event: (String) -> Unit = {}) {
+class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private val event: (String) -> Unit = {},
+                     /** Lines of one kind in one turn told as one: (civ, group, item, the line for all items so far) */
+                     private val fold: (Civilization, String, String, (List<String>) -> String) -> Unit = { civ, _, item, render -> log(civ, render(listOf(item))) }) {
 
     private val hiddenOffers = setOf(TradeOfferType.City, TradeOfferType.Introduction, TradeOfferType.Technology)
 
@@ -139,6 +141,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
             val partner = offer.substringBefore(":")
             val entry = Triple(civ.civName, partner, offer.substringAfter(": "))
             if (entry !in officialsPending) officialsPending += entry
+            if (refusedKey(civ.civName, partner, entry.third) in refusedOnce) continue // refused before: told only if it is accepted this time
             val other = civ.gameInfo.civilizations.firstOrNull { it.civName == partner }
             val offers = other?.tradeRequests?.firstOrNull { it.requestingCiv == civ.civID && "${other.civName}: ${it.trade.reverse().brief(civ.gameInfo)}" == offer }?.trade?.let { it.ourOffers + it.theirOffers }.orEmpty()
             log(civ, "The officials proposed a deal to $partner: ${entry.third}. ${other?.let { whoAnswers(it).capitalised() } ?: "They answer on their turn"}.${nearVictoryNote(other, offers)}")
@@ -207,6 +210,11 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
     /** Friendships proposed by the ruler's own order since the last bookkeeping, keyed "them<us": told by their own line, not as the officials' */
     private val friendshipsAsked = HashSet<String>()
 
+    /** The officials' proposals the other side refused, "from>to: terms" (loosely): asked again, they are told only if accepted (Run 36: Open Borders to Austria
+     *  proposed and refused seventeen times, each told twice) */
+    private val refusedOnce = HashSet<String>()
+    private fun refusedKey(from: String, to: String, terms: String) = "$from>$to: ${loosely(terms)}"
+
     /** Partners whose last word on a proposal of ours was a counteroffer, keyed "us<them": the offer now on our desk is announced as an answer, not a fresh approach */
     private val counters = HashSet<String>()
 
@@ -237,9 +245,16 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
         val dealGold = if (ours == null && outcome == "accepted") request.trade.theirOffers.filter { it.name == Constants.researchAgreement || it.type == TradeOfferType.Gold }.sumOf { it.amount } else 0
         if (dealGold > 0) officialsDealGold[civ.civName] = (officialsDealGold[civ.civName] ?: 0) + dealGold
         if (ours != null) pending.remove(entry) else officialsPending.remove(entry)
+        if (ours == null) {
+            val key = refusedKey(entry.first, entry.second, entry.third)
+            if (outcome == "declined" || outcome == "lapsed") {
+                if (!refusedOnce.add(key)) return // a repeat of terms refused before: its proposal went untold, so does its refusal
+            } else if (outcome == "accepted" && refusedOnce.remove(key))
+                return log(civ, "The officials proposed a deal to ${receiver.civName} again (${entry.third}), refused before, and this time it was accepted - the deal is in force${if (dealGold > 0) "; it took $dealGold gold from the treasury" else ""}.")
+        }
         val answer = when (outcome) {
             "accepted" -> "was accepted - the deal is in force"
-            "declined" -> "was refused"
+            "declined" -> if (ours == null) "was refused; should the officials ask the same of them again, it is told only if accepted" else "was refused"
             "countered" -> { counters += "${civ.civName}<${receiver.civName}"; "got a counteroffer, which now waits on our desk for your answer (answerOffers accept or refuse)" }
             "lapsed" -> "waited $DESK_WAITS turns at their court unanswered and lapsed as refused"
             "invalid" -> "could not be honoured when their officials weighed it (a resource or the treasury had changed) and was dropped"
@@ -977,7 +992,9 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
             friendshipRenewed -> " The $pact needs the Declaration of Friendship, which ends ${if (friendsFor == turns) "the same turn" else "$friendsFor turn${plural(friendsFor)} from now, before it"}; that is ordered renewed too, and the $pact goes out once ${other.civName} has taken the friendship again."
             else -> " Note: the $pact needs the Declaration of Friendship, which ends ${if (friendsFor == turns) "the same turn" else "$friendsFor turn${plural(friendsFor)} from now, before it"} - order the friendship renewed too (renew with terms \"$FRIENDSHIP\"), or it cannot be offered again."
         }
-        log(civ, "By your order: the ${renewal.goods} deal with ${other.civName} ($words) is to be offered again, on the same terms, the turn it ends.")
+        fold(civ, "renewals ordered", "the ${renewal.goods} deal with ${other.civName} ($words)") { items ->
+            if (items.size == 1) "By your order: ${items[0]} is to be offered again, on the same terms, the turn it ends."
+            else "By your order: ${items.size} deals are to be offered again, on the same terms, the turn each ends: ${items.joinToString("; ")}." }
         return "The ${renewal.goods} deal with ${other.civName} ($words) ends in $turns turn${plural(turns)}; the turn it ends it is proposed again on the same terms, as our own proposal, once.$lacking" + nearVictoryNote(other, trade.ourOffers + trade.theirOffers)
     }
 
@@ -1042,10 +1059,11 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
                 continue
             }
             renewals.remove(renewal)
-            offerAgain(civ, renewal, "ended and was offered again")
+            offerAgain(civ, renewal, RENEWED)
         }
     }
 
+    private val RENEWED = "ended and was offered again"
     /** One renewal proposed, and the log told what the proposal did: taken as their own offer of the same, sent, or impossible */
     private fun offerAgain(civ: Civilization, renewal: Renewal, sent: String) {
         val json = JsonValue(JsonValue.ValueType.`object`).apply {
@@ -1067,8 +1085,15 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
             val told = proposeTrade(civ, json)
             renewals.remove(renewal)
             // Their offer of the same already waited on our desk: proposeTrade took it, and said so in its own line
-            log(civ, if (told.contains(TAKEN_THEIRS)) "By your order: the ${renewal.goods} deal with ${renewal.partner} ended; ${renewal.partner} had offered the same again, and we accepted their offer of the same."
-                else "By your order: the ${renewal.goods} deal with ${renewal.partner} $sent.")
+            val deal = "the ${renewal.goods} deal with ${renewal.partner}"
+            when {
+                told.contains(TAKEN_THEIRS) -> fold(civ, "renewals taken", deal) { items ->
+                    if (items.size == 1) "By your order: ${items[0]} ended; ${renewal.partner} had offered the same again, and we accepted their offer of the same."
+                    else "By your order: ${items.size} deals ended and each partner had offered the same again; we accepted their offers: ${items.joinToString("; ")}." }
+                sent == RENEWED -> fold(civ, "renewals sent", deal) { items ->
+                    if (items.size == 1) "By your order: ${items[0]} $RENEWED." else "By your order: ${items.size} deals ended and were each offered again: ${items.joinToString("; ")}." }
+                else -> log(civ, "By your order: $deal $sent.")
+            }
         } catch (ex: IllegalArgumentException) {
             renewals.remove(renewal)
             log(civ, "By your order the ${renewal.goods} deal with ${renewal.partner} was to be offered again when it ended, but it cannot be: ${ex.message?.removeSuffix(".")}. The order is spent.")
@@ -1076,12 +1101,13 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
     }
 
     /** Forget everything of one game */
-    fun reset() { renewals.clear(); pending.clear(); officialsPending.clear(); peaceOfferedOn.clear(); dealOfferedOn.clear(); demandOfferedOn.clear(); friendshipOfferedOn.clear(); friendshipsAsked.clear(); oursOut.clear(); counters.clear(); gone.clear(); sweptTold.clear() }
+    fun reset() { renewals.clear(); pending.clear(); officialsPending.clear(); refusedOnce.clear(); peaceOfferedOn.clear(); dealOfferedOn.clear(); demandOfferedOn.clear(); friendshipOfferedOn.clear(); friendshipsAsked.clear(); oursOut.clear(); counters.clear(); gone.clear(); sweptTold.clear() }
 
     /** What a restart would otherwise lose: which proposals are ours to settle, and when each waiting offer was first seen */
     fun toMap() = mapOf(
         "pending" to pending.map { mapOf("from" to it.first, "to" to it.second, "terms" to it.third) },
         "officialsPending" to officialsPending.map { mapOf("from" to it.first, "to" to it.second, "terms" to it.third) },
+        "refusedOnce" to refusedOnce.toList(),
         "peaceOfferedOn" to peaceOfferedOn.toMap(),
         "dealOfferedOn" to dealOfferedOn.toMap(),
         "demandOfferedOn" to demandOfferedOn.toMap(),
@@ -1092,6 +1118,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
         reset()
         json?.get("pending")?.forEach { pending += Triple(it.getString("from"), it.getString("to"), reworded(it.getString("terms"))) }
         json?.get("officialsPending")?.forEach { officialsPending += Triple(it.getString("from"), it.getString("to"), it.getString("terms")) }
+        json?.get("refusedOnce")?.asStringArray()?.let { refusedOnce += it }
         peaceOfferedOn.load(json?.get("peaceOfferedOn"))
         dealOfferedOn.load(json?.get("dealOfferedOn"), ::reworded)
         demandOfferedOn.load(json?.get("demandOfferedOn"))

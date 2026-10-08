@@ -319,8 +319,6 @@ object RulerOverrides {
     fun noteBeliefs(civ: Civilization, what: String, beliefs: List<com.unciv.models.ruleset.Belief>) { if (civ.civID in ruledCivs) beliefsChosen?.invoke(civ, what, beliefs) }
     /** Set by the host: told of a free technology taken for a ruled civ - (civ, technology, the goal it was taken toward or null) */
     @Volatile var freeTechTaken: ((Civilization, String, String?) -> Unit)? = null
-    /** Set by the host: a building the officials sold for a ruled civ - (civ, city, building, the gold it fetched, why: "to free its Aluminum for the spaceship") */
-    @Volatile var buildingSold: ((Civilization, com.unciv.logic.city.City, String, Int, String) -> Unit)? = null
 
     /** The officials' faith purchase for any civ: a ruled civ's keeps above its faith reserve and off its never-build list, and is told to the host
      *  (Persia's officials spent 1,600 faith in a turn with no line, audit 2026-10-03). Unruled civs buy as the engine always has */
@@ -392,6 +390,22 @@ object RulerOverrides {
      *  (UnitAutomation). The one test behind the posture sites, which each had their own trio before audit 2026-10-04 */
     @yairm210.purity.annotations.Readonly
     fun staysHome(unit: MapUnit) = isUnderOrders(unit) || unit.isMilitary() && unit.civ.isAtWar() && (defending(unit.civ) || inReserve(unit) || outclassed(unit))
+
+    /** Set by the host: a ruled civ's land unit with nowhere to go turned for home - (civ, unit, the tile of ours it makes for) */
+    @Volatile var goesAshore: ((Civilization, MapUnit, Tile) -> Unit)? = null
+    /** A ruled civ's land unit with no aim waits on our own land, never at sea: settlers with no site wandered embarked 60 to 100 turns, a random tile a turn,
+     *  and their escorts with them (Run 36). True when it is home, or on its way there; false when no tile of ours can be reached */
+    fun waitAshore(unit: MapUnit): Boolean {
+        if (unit.civ.civID !in ruledCivs || !unit.baseUnit.isLandUnit) return false
+        val here = unit.getTile()
+        if (!unit.isEmbarked() && here.isLand && here.getOwner() == unit.civ) return true
+        val peril = perilAtSea(unit)
+        val home = unit.civ.cities.sortedBy { it.getCenterTile().aerialDistanceTo(here) }.take(4).asSequence()
+            .flatMap { city -> city.getCenterTile().getTilesInDistance(FIELDS).filter { it.isLand && it.getOwner() == unit.civ }.sortedBy { it.aerialDistanceTo(here) } }
+            .firstOrNull { it !in peril && unit.movement.canMoveTo(it) && unit.movement.canReach(it) } ?: return false
+        goesAshore?.invoke(unit.civ, unit, home)
+        return tryHeadTowards(unit, home)
+    }
 
     /** A step toward a tile that may not open after all (the path reckoning and the march disagree): taken if it can be, else the unit stands where it is.
      *  For the moves this fork added to the officials' routines - an unreachable step there once stopped the whole turn (Run 20, T187) */

@@ -168,6 +168,8 @@ object SpecificUnitAutomation {
             val frontierCity = unit.civ.cities.maxByOrNull { getFrontierScore(it) }
             if (frontierCity != null && getFrontierScore(frontierCity) > 0  && unit.movement.canReach(frontierCity.getCenterTile()))
                 unit.movement.headTowards(frontierCity.getCenterTile())
+            // A ruled civ's settler with no site and no frontier waits on our own land: it neither explores nor wanders out to sea
+            else if (com.unciv.logic.automation.RulerOverrides.waitAshore(unit)) return
             if (UnitAutomation.tryExplore(unit)) return // try to find new areas
             UnitAutomation.wander(unit, tilesToAvoid = dangerousTiles) // go around aimlessly
             return
