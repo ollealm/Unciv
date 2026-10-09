@@ -30,7 +30,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
          *  to notice an order that is going nowhere - standing still or wandering alike */
         var stepsBest: Int? = null
         var turnsStuck = 0
-        fun toMap() = mapOf("action" to action, "x" to x, "y" to y, "ability" to ability, "to" to to, "stepsBest" to stepsBest, "turnsStuck" to turnsStuck)
+        /** Turns the unit has marched under this order without arriving: the order ledger's "turns so far" */
+        var turnsMarching = 0
+        fun toMap() = mapOf("action" to action, "x" to x, "y" to y, "ability" to ability, "to" to to, "stepsBest" to stepsBest, "turnsStuck" to turnsStuck, "turnsMarching" to turnsMarching)
     }
 
     /** unit id -> order */
@@ -97,7 +99,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     fun load(json: JsonValue?) {
         orders.clear()
         json?.forEach { orders[it.name.toInt()] = Order(it.getString("action"), it.get("x")?.takeUnless { v -> v.isNull }?.asInt(), it.get("y")?.takeUnless { v -> v.isNull }?.asInt(), it.get("ability")?.takeUnless { v -> v.isNull }?.asString(), it.getString("to", null)).apply {
-            stepsBest = it.get("stepsBest")?.takeUnless { v -> v.isNull }?.asInt(); turnsStuck = it.getInt("turnsStuck", 0) } }
+            stepsBest = it.get("stepsBest")?.takeUnless { v -> v.isNull }?.asInt(); turnsStuck = it.getInt("turnsStuck", 0); turnsMarching = it.getInt("turnsMarching", 0) } }
     }
 
     fun toMap() = orders.mapKeys { it.key.toString() }.mapValues { it.value.toMap() }
@@ -228,6 +230,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 // Nearer is fewer steps left at the turn's start than at any before: a march that moves but comes no nearer - the way reckoned through unknown ground
                 // closing as it is explored (Babylon's Warrior wandered at sea for 18 turns, Run 22) - is as stuck as one that stands still
                 val best = order.stepsBest
+                order.turnsMarching++
                 order.turnsStuck = if (best != null && way.size >= best) order.turnsStuck + 1 else 0
                 order.stepsBest = if (best == null) way.size else minOf(best, way.size)
                 if (order.turnsStuck >= 3) {
@@ -416,6 +419,19 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     private fun drop(unit: MapUnit) {
         orders.remove(unit.id)
         if (unit.isGreatPerson()) released += unit.id
+    }
+
+    /** The order ledger's part of the units: marches under way (whither, turns so far) and re-armings put off to our next turn, in the log's words */
+    fun awaiting(civ: Civilization): List<String> {
+        val marching = setOf("move", "settle", "garrison", "use", "gift")
+        return orders.entries.sortedBy { it.key }.mapNotNull { (id, order) ->
+            val unit = civ.units.getUnitById(id) ?: return@mapNotNull null
+            val target = order.x?.let { x -> order.y?.let { y -> civ.gameInfo.tileMap.getIfTileExistsOrNull(x, y) } }
+            if (order.action !in marching || target == null || unit.getTile() == target) return@mapNotNull null
+            val purpose = when (order.action) { "settle" -> " to found a city"; "garrison" -> " to garrison it"; "use" -> " to use its ability${order.ability?.let { " ($it)" } ?: ""}"; "gift" -> " to be given to ${order.to}"; else -> "" }
+            "${unit.name} #$id is on its way to ${where(civ, target)}$purpose, ${order.turnsMarching} turn${if (order.turnsMarching == 1) "" else "s"} so far" +
+                (if (order.turnsStuck > 0) ", no nearer for ${order.turnsStuck}" else "") + "."
+        } + rearmNext.keys.mapNotNull { id -> civ.units.getUnitById(id)?.let { "${it.name} #$id had marched when its re-arming was ordered: it is re-armed at the start of our next turn, if the treasury still allows." } }
     }
 
     /** At the start of our turn, before the officials spend a coin: the re-armings ordered for units that had marched. Re-arming keeps a unit's number */

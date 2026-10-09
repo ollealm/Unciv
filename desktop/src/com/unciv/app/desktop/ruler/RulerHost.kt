@@ -508,6 +508,8 @@ object RulerHost {
         Memory("focusedCities", true, { RulerOverrides.focusedCities.clear() }, { RulerOverrides.focusedCities.toList() }, { json -> json?.asStringArray()?.let { RulerOverrides.focusedCities += it } }),
         Memory("cadence", true, { ageTurns = 12; lookInTurns = 4 }, { mapOf("ageTurns" to ageTurns, "lookInTurns" to lookInTurns) },
             { json -> json?.let { ageTurns = it.getInt("ageTurns", 12); lookInTurns = it.getInt("lookInTurns", 4) } }),
+        Memory("refusedOrders", true, { refusedOrders.clear() }, { refusedOrders.mapValues { (_, list) -> list.map { mapOf("turn" to it.first, "text" to it.second) } } },
+            { json -> json?.forEach { civ -> refusedOrders[civ.name] = ArrayList(civ.map { it.getInt("turn") to it.getString("text") }) } }),
         Memory("waiting", true, { waiting.clear() }, { waiting }, { json -> json?.forEach { city -> waiting[city.name] = ArrayList(city.asStringArray().toList()) } }),
         Memory("inPlay", true, { inPlaySeen.clear() }, { inPlaySeen.filterValues { it.isNotEmpty() }.mapValues { it.value.sorted() } },
             { json -> json?.forEach { civ -> inPlaySeen[civ.name] = civ.asStringArray().toHashSet() } }), // older files have none: latched afresh
@@ -817,6 +819,34 @@ object RulerHost {
     /** Every field an order may carry: an order with none of them is no order (a model that wrapped its fields in "arguments" sent nothing) */
     /** city id -> what the ruler queued there before it could be built, in the order given: each starts once it can (startWaiting) */
     private val waiting = HashMap<String, ArrayList<String>>()
+
+    /** By realm: the lines set_orders sent back under "failed", with the turn - the order ledger's "refused" */
+    private val refusedOrders = HashMap<String, ArrayList<Pair<Int, String>>>()
+
+    /** The court's orders in one view, from what the host already keeps (asked for by every Sol seat, Runs 34-38): what waits on an outcome, and what became
+     *  of the orders since the last look-in - carried out, refused (set_orders turned it back), lapsed (another power refused it, let it drop or countered it)
+     *  and overridden (the order dropped or undone by what happened) - one line each in the log's words. Nothing in it is decided here */
+    private fun orderLedger(civ: Civilization, logSince: Int?): Pair<Map<String, Any?>, Set<String>> {
+        val since = maxOf(logSince ?: -1, game().turns - lookInTurns - 1)
+        val sorted = chanceryLog(civ, since).mapNotNull { line -> ledgerKind(line["text"] as String)?.let { it to "T${line["turn"]}: ${line["text"]}" } }.groupBy({ it.first }, { it.second })
+        val waits = civ.cities.flatMap { city -> waiting[city.id].orEmpty().mapNotNull { item -> runCatching { civ.construction(item) }.getOrNull()?.let {
+            "$item waits in ${city.name}'s queue: ${whyNot(city, it, city.cityConstructions.constructionQueue.toList()).ifEmpty { listOf("what it needs is queued ahead of it") }.joinToString()}." } } }
+        return mapOf(
+            "awaiting" to diplomacy.awaiting(civ) + units.awaiting(civ) + waits,
+            "sinceLastLookIn" to mapOf("carriedOut" to sorted["carriedOut"], "refused" to refusedOrders[civ.civName]?.filter { it.first > since }?.map { "T${it.first}: ${it.second}" },
+                "lapsed" to sorted["lapsed"], "overridden" to sorted["overridden"])
+        ) to sorted.values.flatten().toSet()
+    }
+
+    /** Which part of the ledger a log line of ours belongs to, if any: the host's own wording is the record */
+    private fun ledgerKind(text: String): String? = when {
+        LEDGER_OVERRIDDEN.containsMatchIn(text) -> "overridden"
+        text.startsWith("Our proposal to ") -> if (" was accepted" in text) "carriedOut" else "lapsed"
+        text.startsWith("By your order") || text.startsWith("By your standing order") || LEDGER_RELIEVED.containsMatchIn(text) -> "carriedOut"
+        else -> null
+    }
+    private val LEDGER_OVERRIDDEN = Regex("order is dropped|is dropped:|is spent|but it cannot be|could not be done|did not take|no longer waits|no longer usable|could not use its ability|stays and the order|^The officials dropped .+ from .+'s queue")
+    private val LEDGER_RELIEVED = Regex("^Our .+ relieved the .+ as garrison")
 
     /** Each turn, before the officials' turn: a waiting item that can now be built goes to the front of its city's queue, in the order given; one that can
      *  never be built there now (a wonder raised elsewhere, made obsolete) is dropped, and both are told */
@@ -1165,6 +1195,8 @@ object RulerHost {
             applyStandingOrders(civ)
             save()
         }
+        // The order ledger's "refused": what set_orders turned back, by turn, kept an age
+        if (failed.isNotEmpty()) refusedOrders.getOrPut(civ.civName) { ArrayList() }.apply { addAll(failed.map { stamp() to it }); removeAll { it.first <= stamp() - ageTurns } }
         return mapOf("orders" to standing.toMap(civ), "done" to done, "failed" to failed,
             "researchQueue" to civ.tech.techsToResearch, "researchNote" to "researchQueue is the scholars' path to the first goal; every goal stands under orders.research and is taken up in turn",
             "gold" to civ.gold)
@@ -2459,6 +2491,7 @@ object RulerHost {
         val next = civ.stats.statsForNextTurn
         val turn = civ.gameInfo.turns
         val sites = units.citySites(civ) // the full site search, once: the warnings want it too
+        val ledger = orderLedger(civ, logSince)
         return mapOf(
             "civ" to civ.civName,
             "turn" to turn,
@@ -2529,16 +2562,17 @@ object RulerHost {
             "strategicResources" to strategicResources(civ),
             "religion" to told(civ, "religion"),
             "knownCivs" to diplomacy.relations(civ),
-            "log" to condensed(chanceryLog(civ, logSince ?: (turn - ageTurns)).map { "T${it["turn"]}: ${it["text"]}" }),
+            "log" to condensed(chanceryLog(civ, logSince ?: (turn - ageTurns)).map { "T${it["turn"]}: ${it["text"]}" }.filter { it !in ledger.second }),
             "peaceOffers" to diplomacy.peaceOffers(civ),
             "tradeOffers" to diplomacy.tradeOffers(civ) + diplomacy.friendshipOffers(civ),
             "demands" to diplomacy.demands(civ),
             "dealsLedger" to diplomacy.ledger(civ, lookInTurns + 1),
             // The posture with where its host at sea is bound: the generals' own craft, told, no decision asked
-            "standingOrders" to orders[civ.civName]?.toMap(civ)?.let { standing ->
+            // The standing orders, and the ledger of the rest: the lines it carries are not in the log a second time
+            "standingOrders" to (orders[civ.civName]?.toMap(civ)?.let { standing ->
                 val posture = standing["posture"]
                 if (posture is Map<*, *> && !hostAtSea[civ.civName].isNullOrEmpty()) standing + ("posture" to posture + ("hostAtSea" to hostAtSea[civ.civName])) else standing
-            }
+            } ?: emptyMap()) + ledger.first
         )
     }
 

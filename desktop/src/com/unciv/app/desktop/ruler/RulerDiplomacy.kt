@@ -202,6 +202,19 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
     }
 
     /** Who answers what is put to [other], in one wording wherever it is said: an advised court's advisor at its look-in, or the officials on their turn */
+    /** The order ledger's part of diplomacy: what the ruler proposed that waits on another's answer, our friendships proposed and not yet answered,
+     *  and the renewals set to go out when a deal ends - in the log's words */
+    fun awaiting(civ: Civilization): List<String> {
+        val game = civ.gameInfo
+        val answers = { name: String -> game.civilizations.firstOrNull { it.civName == name }?.let { whoAnswers(it) } ?: "they answer on their turn" }
+        return pending.filter { it.first == civ.civName }.map { (_, to, terms) -> if (terms == "peace") "Peace proposed to $to: ${answers(to)}." else "Our proposal to $to ($terms): ${answers(to)}." } +
+            game.civilizations.filter { other -> other.popupAlerts.any { it.type == AlertType.DeclarationOfFriendship && it.value == civ.civID } }
+                .map { "A Declaration of Friendship proposed to ${it.civName}: ${whoAnswers(it)}." } +
+            renewals.filter { it.civ == civ.civName }.map { renewal ->
+                if (renewal.friendship) "The Declaration of Friendship with ${renewal.partner} is to be proposed again the turn it lapses."
+                else "The ${renewal.goods} deal with ${renewal.partner} (${renewal.terms}) is to be offered again the turn it ends" + (if (renewal.afterFriendship) ", once ${renewal.partner} has taken the friendship proposed again" else "") + "." }
+    }
+
     fun whoAnswers(other: Civilization): String =
         if (other.civID in RulerOverrides.ruledCivs) "${other.civName} is an advised court: its advisor answers at its next look-in" else "they answer on their turn"
     private fun String.capitalised() = replaceFirstChar { it.uppercase() }
