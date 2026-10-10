@@ -393,7 +393,7 @@ object NextTurnAutomation {
             if (civInfo.getResourceAmount(resource) >= 2) continue
 
             val unitToDisband = civInfo.units.getCivUnits()
-                .filter { it.requiresResource(resource) && !it.hasUnique(UniqueType.SpaceshipPart) }
+                .filter { it.requiresResource(resource) && !it.hasUnique(UniqueType.SpaceshipPart) && !RulerOverrides.sparedFromDisbanding(it) }
                 .minByOrNull { it.getForceEvaluation() }
             if (unitToDisband != null) RulerOverrides.noteDisbanded(unitToDisband, "to free its $resource for the spaceship")
             unitToDisband?.disband()

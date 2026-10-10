@@ -380,6 +380,21 @@ object RulerOverrides {
     @yairm210.purity.annotations.Readonly
     fun isUnderOrders(unit: MapUnit) = unit.civ.civID in ruledCivs && hasOrder?.invoke(unit) == true
 
+    /** unit id -> the turn the court paid gold or faith for it (bought, or re-armed), set by the host. The officials disband neither such a unit that turn nor
+     *  one under the court's order to free a resource for the spaceship (Carthage's Rocket Artillery, bought for 660 gold at T311 and disbanded the same
+     *  turn for its Aluminum, Run 40) */
+    val paidFor = ConcurrentHashMap<Int, Int>()
+    fun notePaidFor(unit: MapUnit) {
+        val turn = unit.civ.gameInfo.turns
+        paidFor.values.removeIf { it < turn } // only this turn's are ever read
+        paidFor[unit.id] = turn
+    }
+    @yairm210.purity.annotations.Readonly
+    fun paidForThisTurn(unit: MapUnit) = unit.civ.civID in ruledCivs && paidFor[unit.id] == unit.civ.gameInfo.turns
+    /** A unit of a ruled civ the officials leave standing when they free a resource: under the court's order, or paid for by the court this turn */
+    @yairm210.purity.annotations.Readonly
+    fun sparedFromDisbanding(unit: MapUnit) = isUnderOrders(unit) || paidForThisTurn(unit)
+
     /** A ruled civ at war under the defend posture: its soldiers and planes keep to home ground and out of every enemy city's guns, wherever the automation
      *  would otherwise send them. The one test behind every "defending" site (it was written three times) */
     @yairm210.purity.annotations.Readonly

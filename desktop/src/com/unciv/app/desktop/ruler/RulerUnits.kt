@@ -487,6 +487,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         action.invoke()
         val now = civ.units.getUnitById(id)
         if (now == null || now.name == unit.name) return Pair(false, "$label could not be re-armed as ${article(to)}: the new arms found no room to stand")
+        RulerOverrides.notePaidFor(now) // the officials do not disband it this turn to free a resource
         log(civ, "By your order: re-armed our ${unit.name} #$id as $to for $cost gold.")
         return Pair(true, "$label re-armed as $to for $cost gold")
     }

@@ -519,18 +519,21 @@ object RulerHost {
             { shipRaids.mapValues { (_, raids) -> raids.mapKeys { it.key.toString() }.mapValues { (_, r) -> mapOf("turn" to r.turn, "owner" to r.owner, "target" to r.target, "from" to r.from) } } },
             { json -> json?.forEach { civ -> shipRaids[civ.name] = HashMap(civ.associate { r -> r.name.toInt() to ShipRaid(r.getInt("turn"), r.getString("owner"), r.getString("target"), r.getString("from")) }) } }),
         // What the orders set in the engine, read again from the orders at load
-        Memory("orders in the engine", false, { RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.faithReserve.clear(); RulerOverrides.officialsOrders.clear(); RulerOverrides.noWonders.clear() }),
+        Memory("orders in the engine", false, { RulerOverrides.paidFor.clear(); RulerOverrides.postures.clear(); RulerOverrides.goldReserve.clear(); RulerOverrides.faithReserve.clear(); RulerOverrides.officialsOrders.clear(); RulerOverrides.noWonders.clear() }),
         // A turn's buckets, filled by the hooks and drained by the bookkeeping; and what the last turn left for the next briefing
         Memory("turn buckets", false, { spending.clear(); losses.clear(); strikes.clear(); blows.clear(); expended.clear(); disbandedFor.clear(); destroyed.clear()
             faithSpending.clear(); freeTechs.clear(); hostAdopted.clear(); notificationsSeen.clear(); officialsSpent.clear(); lastFaithSpent.clear(); worldAtLastAdvance = null; tokensTold.clear(); rulersOwnGold.clear() })
     ) }
 
-    /** A copy of the world after every stretch of turns, so a test game can be wound back (the last dozen are kept) */
+    /** A copy of the world after every stretch of turns, so a test game can be wound back: the last dozen are kept, and every [SPARSE_BACKUP]th turn's for the
+     *  whole game, never pruned - a finished league can then be resumed from before its space race (the rolling dozen alone could not, 2026-10-10) */
     private fun backup() {
         val folder = File(dataDir, "backups/turn-${game().turns.toString().padStart(4, '0')}").apply { mkdirs() }
         for (name in listOf("save.unciv", "host.json", "orchestrator.json")) File(dataDir, name).takeIf { it.exists() }?.copyTo(File(folder, name), overwrite = true)
-        File(dataDir, "backups").listFiles()?.filter { it.isDirectory }?.sortedBy { it.name }?.dropLast(12)?.forEach { it.deleteRecursively() }
+        val sparse = { dir: File -> dir.name.removePrefix("turn-").toIntOrNull()?.let { it % SPARSE_BACKUP == 0 } == true }
+        File(dataDir, "backups").listFiles()?.filter { it.isDirectory }?.sortedBy { it.name }?.dropLast(12)?.filterNot(sparse)?.forEach { it.deleteRecursively() }
     }
+    private const val SPARSE_BACKUP = 20
 
     /** For test games only: gold from outside the world, said plainly in the log so the advisor knows where it came from */
     private fun grant(civ: Civilization, json: JsonValue): Any? {
@@ -1121,7 +1124,7 @@ object RulerHost {
             if (!city.cityConstructions.purchaseConstruction(construction, -1, false)) throw ApiError(400, "Could not buy $item in ${city.name}: no room to place it")
             val refill = refilled(city, queueBefore, item)
             val centre = city.getCenterTile()
-            val bought = civ.units.getCivUnits().filter { it.name == item && it.getTile().aerialDistanceTo(centre) <= 1 }.maxByOrNull { it.id }
+            val bought = boughtUnit(civ, city, item)
             // An aircraft or a missile waits inside the city, whoever holds its walls, and a ship in its waters; only a soldier can be left standing beside them
             val holder = centre.militaryUnit?.takeIf { bought != null && bought.isMilitary() && bought.baseUnit.isLandUnit && it != bought } // a ship is no garrison
             val note = (if (holder != null && bought != null) " ${item} #${bought.id} stands beside ${city.name}, which our ${holder.name} #${holder.id} still holds: order it to garrison ${city.name} to swap them, or the officials use it as they see fit." else "") +
@@ -1202,6 +1205,14 @@ object RulerHost {
             "gold" to civ.gold)
     }
 
+    /** The unit a purchase just placed at [city], if it was one - marked paid for this turn, so the officials do not disband it the turn it was bought
+     *  to free a resource (RulerOverrides.paidFor) */
+    private fun boughtUnit(civ: Civilization, city: City, item: String): MapUnit? {
+        val centre = city.getCenterTile()
+        return civ.units.getCivUnits().filter { it.name == item && it.getTile().aerialDistanceTo(centre) <= 1 }.maxByOrNull { it.id }
+            ?.also { RulerOverrides.notePaidFor(it) }
+    }
+
     /** What faith would buy this in this city, if faith can buy it here at all (the engine's own tests, an "Unbuildable" Missionary included); null if it cannot */
     /** A purchase that leaves a queue empty: the engine has the officials fill it at once (CityConstructions.purchaseConstruction), before any snapshot sees it - so it is said here */
     private fun refilled(city: City, before: List<String>, item: String): String {
@@ -1253,6 +1264,7 @@ object RulerHost {
         if (!city.cityConstructions.isConstructionPurchaseAllowed(construction, Stat.Faith, cost) || !city.cityConstructions.purchaseConstruction(construction, -1, false, Stat.Faith))
             throw ApiError(400, "Could not buy $item in ${city.name} with faith: ${if (city.isInResistance()) "the city is in resistance" else if (city.isPuppet) "a puppet city buys nothing" else "no room to place it - a unit of its kind already stands in ${city.name}"}")
         val refill = refilled(city, queueBefore, item)
+        boughtUnit(civ, city, item)
         log(civ, "By your order: bought $item in ${city.name} for $cost faith.$refill")
         return "Bought $item in ${city.name} for $cost faith (${civ.religionManager.storedFaith} left).$refill"
     }
@@ -1860,12 +1872,16 @@ object RulerHost {
         val race = LinkedHashMap<String, List<String>>()
         for (road in listOf("Scientific", "Cultural", "Diplomatic")) {
             if (road !in inPlay) continue
-            val lines = powers.mapNotNull { power -> diplomacy.victoryStandings(power).firstOrNull { it.road == road }?.let { "${name(power)}: ${it.have} of ${it.need}" } }
+            // A rival's line goes on with the facts of its pace (2026-10-10): what it still lacks, its last step and how long ago, what is under way and where -
+            // never when the next is due
+            val pace = { power: Civilization -> if (power == civ) "" else racePace(civ, power, road).joinToString("") { "; $it" } }
+            val lines = powers.mapNotNull { power -> diplomacy.victoryStandings(power).firstOrNull { it.road == road }?.let { power to "${name(power)}: ${it.have} of ${it.need}" } }
             race[road] = when (road) {
-                "Scientific" -> lines.map { "$it spaceship parts" }
+                "Scientific" -> lines.map { (power, line) -> "$line spaceship parts" + pace(power) }
                 "Cultural" -> powers.map { power -> "${name(power)}: ${power.policies.completedBranches.size} of ${culturalBranchesNeeded(civ) ?: "?"} branches of policy complete" +
-                    (if ((culturalBranchesNeeded(civ) ?: 99) <= power.policies.completedBranches.size) ", only the ${culturalLastStep(civ)?.name ?: "last project"} to build" else "") } + listOfNotNull(shutBranches(civ))
-                else -> lines.map { "$it votes, in the city-states allied" }.ifEmpty { listOf("the United Nations is not built: nobody can be voted in yet") }
+                    (if ((culturalBranchesNeeded(civ) ?: 99) <= power.policies.completedBranches.size) ", only the ${culturalLastStep(civ)?.name ?: "last project"} to build" else "") + pace(power) } + listOfNotNull(shutBranches(civ))
+                else -> lines.map { (power, line) -> "$line votes, in the city-states allied" + pace(power) }.ifEmpty {
+                    listOf("the United Nations is not built: nobody can be voted in yet") + powers.filter { it != civ }.mapNotNull { power -> racePace(civ, power, road).takeIf { it.isNotEmpty() }?.let { "${power.civName}: ${it.joinToString("; ")}" } } }
             }
         }
         if ("Domination" in inPlay) {
@@ -1882,6 +1898,121 @@ object RulerHost {
         }
         if (unmet > 0) race["powers we have not met"] = listOf("$unmet great power${plural(unmet)} we have not met: their standing is unknown to us")
         return race
+    }
+
+    /** The building that opens a power's own spaceship (the Apollo Program), by its unique */
+    private fun spaceshipProject(game: com.unciv.logic.GameInfo) =
+        game.ruleset.buildings.values.firstOrNull { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts) }
+
+    /** "an SS Booster", "2 SS Boosters": names counted, in the order first met */
+    private fun counted(names: List<String>) = names.groupingBy { it }.eachCount().map { (item, n) -> if (n == 1) article(item) else "$n ${Prose.pluralOf(item)}" }
+
+    /** The facts of [power]'s pace on [road] as [civ] can know them, each a clause of its race line: what it still lacks (and the learning it lacks for it),
+     *  its last step and how long ago, and what is under way toward it and where. No turns to come and no judgement of nearness (2026-10-10) */
+    private fun racePace(civ: Civilization, power: Civilization, road: String): List<String> {
+        val game = civ.gameInfo
+        val clauses = ArrayList<String>()
+        val step = lastStep(power, road)?.let { (turn, what) -> "it $what ${turnsAgo(game.turns - turn)}" }
+        when (road) {
+            "Scientific" -> {
+                val needed = spaceshipNeeded(civ) ?: return emptyList()
+                val apollo = spaceshipProject(game)
+                val have = power.victoryManager.currentsSpaceshipParts
+                val missing = needed.entries.flatMap { (part, n) -> List((n - have[part]).coerceAtLeast(0)) { part } }
+                val unlearned = { items: List<String> -> items.mapNotNull { item -> (game.ruleset.units[item] ?: game.ruleset.buildings[item])?.requiredTech?.takeUnless { power.tech.isResearched(it) }?.let { it to item } }
+                    .groupBy({ it.first }, { it.second }).map { (tech, items) -> "$tech (for ${andList(items.distinct().map { "the $it" })})" } }
+                if (apollo != null && !power.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts)) {
+                    clauses += "not yet built: its own ${apollo.name}, then every part"
+                    // Before it, the learning the parts need is counted, not named: the names come once its Apollo Program stands
+                    val forParts = needed.keys.mapNotNull { game.ruleset.units[it]?.requiredTech }.distinct().count { !power.tech.isResearched(it) }
+                    listOfNotNull(unlearned(listOf(apollo.name)).firstOrNull(), forParts.takeIf { it > 0 }?.let { "$it technolog${if (it == 1) "y" else "ies"} the parts need" })
+                        .takeIf { it.isNotEmpty() }?.let { clauses += "it has yet to learn ${andList(it)}" }
+                } else if (missing.isNotEmpty()) {
+                    clauses += "still to add to its ship: ${andList(counted(missing))}"
+                    unlearned(missing).takeIf { it.isNotEmpty() }?.let { clauses += "it has yet to learn ${andList(it)}" }
+                    // A finished part walks to the capital before it is added: built, so no longer under way, and not yet counted
+                    val walking = power.units.getCivUnits().filter { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.SpaceshipPart) }.map { it.name }.toList()
+                    if (walking.isNotEmpty()) clauses += "built and not yet added: ${andList(counted(walking))}"
+                }
+                step?.let { clauses += it }
+                clauses += underWay(civ, power) { item -> item in needed || item == apollo?.name }
+            }
+            "Cultural" -> {
+                val needed = culturalBranchesNeeded(civ) ?: return emptyList()
+                val last = culturalLastStep(civ)
+                val done = power.policies.completedBranches.size
+                if (done < needed) clauses += "${needed - done} more branch${if (needed - done == 1) "" else "es"} of policy to complete" + (last?.let { ", then the ${it.name}" } ?: "")
+                step?.let { clauses += it }
+                val building = underWay(civ, power) { it == last?.name }
+                clauses += building
+                if (done >= needed && last != null && building.isEmpty()) clauses += "the ${last.name} is not under way"
+            }
+            "Diplomatic" -> {
+                val un = unitedNations(game) ?: return emptyList()
+                val holder = power.victoryManager.getUNBuildingAndOwnerNames().second
+                diplomacy.victoryStandings(power).firstOrNull { it.road == road }?.let { if (it.need > it.have) clauses += "${it.need - it.have} vote${plural(it.need - it.have)} short" }
+                if (holder == power.civName) clauses += step ?: "it holds the ${un.name}"
+                if (holder == null) clauses += underWay(civ, power) { it == un.name }
+            }
+        }
+        return clauses
+    }
+
+    /** What [power]'s cities are building now toward a road - the current construction of each, as the race needs it - grouped by item: "an SS Booster is
+     *  under way in Thebes", "SS Boosters are under way in Susa and Tarsus". A city whose place we have never seen is not named, as the engine's own alerts do */
+    private fun underWay(civ: Civilization, power: Civilization, toward: (String) -> Boolean): List<String> {
+        val apollo = spaceshipProject(civ.gameInfo)?.name
+        return power.cities.mapNotNull { city -> city.cityConstructions.currentConstructionName().takeIf { it.isNotEmpty() && toward(it) }?.let { it to city } }
+            .groupBy({ it.first }, { it.second }).map { (item, cities) ->
+                val (seen, unseen) = cities.partition { it.getCenterTile().isExplored(civ) }
+                val where = seen.map { it.name } + listOfNotNull(when (unseen.size) { 0 -> null; 1 -> "a city we have not seen"; else -> "${unseen.size} cities we have not seen" })
+                val one = cities.size == 1
+                val named = when {
+                    item == apollo -> "its own $item"
+                    civ.gameInfo.ruleset.units[item] == null -> "the $item"
+                    one -> article(item)
+                    else -> Prose.pluralOf(item)
+                }
+                "$named ${if (one || civ.gameInfo.ruleset.units[item] == null) "is" else "are"} under way in ${andList(where)}"
+            }
+    }
+
+    /** [power]'s last step on [road], as the world's events recorded it: (the event's turn, what it did, "added an SS Cockpit to its spaceship"). Read back
+     *  from the events' own lines (recordRaceSteps, the project and wonder lines), and said only while the standing still matches it - a game whose earlier
+     *  steps went untold (parts added before 2026-10-10) says none rather than an older one */
+    private fun lastStep(power: Civilization, road: String): Pair<Int, String>? {
+        val game = power.gameInfo
+        val who = Regex.escape(power.civName)
+        val events = publicEvents.asReversed().asSequence().map { (it["turn"] as Int) to (it["text"] as String) }.filter { it.second.startsWith(power.civName + " ") }
+        return when (road) {
+            "Scientific" -> {
+                val have = power.victoryManager.currentsSpaceshipParts.values.sum()
+                val apollo = spaceshipProject(game)?.name ?: return null
+                val part = Regex("^$who (added .+ to its spaceship)(?: in [^:]+)?: (\\d+) of \\d+ parts\\.$")
+                val built = Regex("^$who completed (?:its own|the) ${Regex.escape(apollo)} in ")
+                if (have > 0) events.firstNotNullOfOrNull { (turn, text) -> part.find(text)?.takeIf { it.groupValues[2].toInt() == have }?.let { turn to it.groupValues[1] } }
+                else if (power.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts))
+                    events.firstNotNullOfOrNull { (turn, text) -> if (built.containsMatchIn(text)) turn to "completed its own $apollo" else null }
+                else null
+            }
+            "Cultural" -> {
+                val needed = culturalBranchesNeeded(power) ?: return null
+                val done = power.policies.completedBranches.size.coerceAtMost(needed)
+                val project = culturalLastStep(power)?.name
+                val branch = Regex("^$who (completed the branch of policy .+): (\\d+) of the \\d+ a cultural victory asks\\.$")
+                val begun = project?.takeIf { done >= needed }?.let { Regex("^$who (began|completed) the ${Regex.escape(it)} in ") }
+                if (done == 0) null
+                else events.firstNotNullOfOrNull { (turn, text) ->
+                    branch.find(text)?.takeIf { it.groupValues[2].toInt() == done }?.let { turn to it.groupValues[1] }
+                        ?: begun?.find(text)?.let { turn to "${it.groupValues[1]} the $project" } }
+            }
+            "Diplomatic" -> {
+                val un = unitedNations(game)?.name ?: return null
+                if (power.victoryManager.getUNBuildingAndOwnerNames().second != power.civName) null
+                else Regex("^$who completed the wonder ${Regex.escape(un)} in ").let { built -> events.firstNotNullOfOrNull { (turn, text) -> if (built.containsMatchIn(text)) turn to "completed the $un" else null } }
+            }
+            else -> null
+        }
     }
 
     /** The branches of policy shut to us for good - their opening policy unavailable to us now that another is ours - and whether the cultural road is shut */
@@ -1938,11 +2069,18 @@ object RulerHost {
         val wonderSites = HashMap<String, String>()
         val eras = HashMap<String, String>()
         val alive = HashSet<String>()
+        /** Each great power's spaceship, part by part, and its branches of policy completed: the steps of a race (recordRaceSteps) */
+        val shipParts = HashMap<String, Map<String, Int>>()
+        val branches = HashMap<String, Set<String>>()
         init {
             for (civ in game.civilizations) {
                 if (civ.isBarbarian || civ.isSpectator()) continue
                 if (civ.isAlive()) alive += civ.civName
                 if (civ.isMajorCiv()) eras[civ.civName] = civ.getEra().name
+                if (civ.isMajorCiv() && civ.isAlive()) {
+                    shipParts[civ.civName] = HashMap(civ.victoryManager.currentsSpaceshipParts)
+                    branches[civ.civName] = civ.policies.completedBranches.map { it.name }.toSet()
+                }
                 for (city in civ.cities) {
                     cityOwners[city.name] = civ.civName
                     if (city.isCapital()) capitals += city.name
@@ -2101,8 +2239,11 @@ object RulerHost {
                 else -> "${RulerCampaigns.possessive(by.civName).replaceFirstChar { it.uppercase() }} soldiers destroyed $city" + (gone.from?.let { ", a city of ${it.civName}" } ?: "") + "."
             })
         }
+        // The United Nations is a step on the diplomatic road: its line says the vote it brings (2026-10-10)
+        val un = unitedNations(game())?.name?.takeIf { "Diplomatic" in game().gameParameters.victoryTypes }
         for ((wonder, owner) in after.wonders)
-            if (wonder !in before.wonders) addPublicEvent("$owner completed the wonder $wonder in ${after.wonderSites[wonder] ?: "one of its cities"}.")
+            if (wonder !in before.wonders) addPublicEvent("$owner completed the wonder $wonder in ${after.wonderSites[wonder] ?: "one of its cities"}" + (if (wonder == un) ": the vote for world leader begins" else "") + ".")
+        recordRaceSteps(before, after)
         for ((civ, era) in after.eras)
             if (before.eras[civ] != era) {
                 // The first learning of the new age is what opened it: named, so the age's picture can show it rather than an emblem
@@ -2121,6 +2262,42 @@ object RulerHost {
             tellCourts(text, emptyList())
         }
         tellNews()
+    }
+
+    /** The steps of a race the world can count, one public line each (2026-10-10): parts added to a great power's spaceship, and a branch of policy completed
+     *  while the cultural road is in play and the power has not yet the branches it asks. The courts that know the power hear it in the same words, its own
+     *  court as ours; the United Nations is told by the wonder's line, the projects by theirs (tellNews). The counts in these lines are read back by lastStep */
+    private fun recordRaceSteps(before: WorldSnapshot, after: WorldSnapshot) {
+        val game = game()
+        val tell = { power: Civilization, text: String, ours: String ->
+            addPublicEvent(text)
+            tellCourts(text, listOf(power), except = listOf(power))
+            if (power.civName in orders && power.isAlive()) log(power, ours)
+        }
+        val needed = game.ruleset.victories["Scientific"]?.requiredSpaceshipPartsAsCounter?.takeIf { it.isNotEmpty() && "Scientific" in game.gameParameters.victoryTypes }
+        if (needed != null) for ((name, parts) in after.shipParts) {
+            val was = before.shipParts[name] ?: continue
+            val added = parts.flatMap { (part, n) -> List((n - (was[part] ?: 0)).coerceAtLeast(0)) { part } }
+            if (added.isEmpty()) continue
+            val power = game.getCivilization(name)
+            val where = power.getCapital()?.let { " in ${it.name}" } ?: ""
+            val count = "${parts.values.sum()} of ${needed.values.sum()} parts"
+            val what = andList(counted(added))
+            tell(power, "$name added $what to its spaceship$where: $count.", "We added $what to our spaceship$where: $count.")
+        }
+        val branchesNeeded = culturalBranchesNeeded(game.civilizations.first()).takeIf { "Cultural" in game.gameParameters.victoryTypes }
+        if (branchesNeeded != null) for ((name, branches) in after.branches) {
+            val was = before.branches[name] ?: continue
+            // Sorted by the ruleset's own order, so two completed in one turn are told the same way every time
+            val new = game.ruleset.policyBranches.keys.filter { it in branches && it !in was }
+            new.forEachIndexed { i, branch ->
+                val count = was.size + i + 1
+                if (count > branchesNeeded) return@forEachIndexed // past the branches the victory asks: no step on that road
+                val power = game.getCivilization(name)
+                tell(power, "$name completed the branch of policy $branch: $count of the $branchesNeeded a cultural victory asks.",
+                    "We completed the branch of policy $branch: $count of the $branchesNeeded a cultural victory asks.")
+            }
+        }
     }
 
     /** A line of the world's news to every ruled court still standing that knows each of [about], save [except] */
@@ -2321,7 +2498,8 @@ object RulerHost {
         val roundStart = worldAtLastAdvance ?: WorldSnapshot(game)
         // A peace made by order since the last advance - a held offer accepted, or an offer of peace answered - happened between the turns' snapshots, and
         // the world never heard of it (Run 28: every war between two courts began in the chronicle and none ended). Wars by order are told as declared (noteWar)
-        worldAtLastAdvance?.let { last -> guardedStep("the world's events") { recordPeace(last, WorldSnapshot(game)) } }
+        // So is a race's step taken by order between rounds: a policy adopted that completes a branch
+        worldAtLastAdvance?.let { last -> guardedStep("the world's events") { val now = WorldSnapshot(game); recordPeace(last, now); recordRaceSteps(last, now) } }
         var stopReason: String? = null
         var council: Council? = null
         val ruledCivs = orders.keys.map { name -> game.civilizations.first { it.civName == name } }.filter { it.isAlive() }
@@ -2383,6 +2561,7 @@ object RulerHost {
                 } finally { settling = false }
             }
             save() // every turn on disk as soon as it is played: a turn that fails later goes back to this one, not to the start of the advance
+            if (game.turns % SPARSE_BACKUP == 0 && i < turns) backup() // a kept turn inside a longer advance is copied as it is played
             if (stopReason != null || (wakeOnEvents && wake.isNotEmpty())) break
         }
         worldAtLastAdvance = WorldSnapshot(game)
@@ -2588,14 +2767,7 @@ object RulerHost {
         val needed = spaceshipNeeded(civ)!!
         val have = civ.victoryManager.currentsSpaceshipParts
         return mapOf("parts" to needed.keys.associateWith { "${have[it]} of ${needed[it]}${civ.gameInfo.ruleset.units[it]?.requiredTech?.takeUnless { tech -> civ.tech.isResearched(tech) }?.let { tech -> " (needs $tech)" } ?: ""}" },
-            "others" to civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.mapNotNull { other ->
-                val parts = other.victoryManager.currentsSpaceshipParts
-                val built = parts.values.sum()
-                val apollo = other.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts)
-                // What is still to come, and the learning each missing part waits on: the timing a rival can judge (facts, no reckoning of turns)
-                val missing = needed.entries.filter { parts[it.key] < it.value }.joinToString { (part, count) -> (if (count - parts[part] > 1) "${count - parts[part]} $part" else part) +
-                    (civ.gameInfo.ruleset.units[part]?.requiredTech?.let { tech -> ", which ${if (count - parts[part] > 1) "need" else "needs"} $tech (knows $tech: ${if (other.tech.isResearched(tech)) "yes" else "no"})" } ?: "") }
-                if (built == 0 && !apollo) null else "${other.civName}: ${if (apollo) "its own Apollo Program stands, " else ""}$built of ${needed.values.sum()} parts" + (if (missing.isNotEmpty()) "; missing $missing" else "") }.toList(),
+            // The rivals' ships are in the race view (victory.race.Scientific), each with what it lacks, its last step and what is under way (2026-10-10)
             "apollo" to civ.hasUnique(com.unciv.models.ruleset.unique.UniqueType.EnablesConstructionOfSpaceshipParts),
             "note" to "Each power builds its own Apollo Program before its parts; another's opens nothing for us and closes nothing. Parts are units: queue them by name in any city once our Apollo Program stands${civ.gameInfo.ruleset.buildings["Apollo Program"]?.requiredTech?.takeUnless { civ.tech.isResearched(it) }?.let { " (a wonder that needs $it)" } ?: ""} and the techs are known (each needs Aluminum while it is built and on its way - the Aluminum is freed once the part is added to the ship); a finished part walks to the capital and is added to the ship by the officials. They CANNOT be bought with gold - saving gold for them is wasted. The ship launches, and the game is won, when every part is added.")
     }

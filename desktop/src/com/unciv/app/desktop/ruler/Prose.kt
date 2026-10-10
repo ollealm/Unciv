@@ -29,6 +29,10 @@ object Prose {
         return when { r >= 0.9 -> "nearly all"; r >= 0.7 -> "three quarters"; r >= 0.58 -> "two thirds"; r >= 0.42 -> "half"; r >= 0.3 -> "a third"
             r >= 0.22 -> "a quarter"; r >= 0.15 -> "a fifth"; else -> "a few" }
     }
-    /** "a Pikeman", "an Archer": the article by the sound of the name's first letter */
-    fun article(name: String): String = if (name.firstOrNull()?.lowercaseChar()?.let { it in "aeiou" } == true) "an $name" else "a $name"
+    /** "a Pikeman", "an Archer", "an SS Booster": the article by the sound of the name's first letter - an initialism's by the letter's name */
+    fun article(name: String): String {
+        val initialism = Regex("^[A-Z]{2,}\\b").containsMatchIn(name)
+        val vowelSound = if (initialism) name[0] in "AEFHILMNORSX" else name.firstOrNull()?.lowercaseChar()?.let { it in "aeiou" } == true
+        return if (vowelSound) "an $name" else "a $name"
+    }
 }
