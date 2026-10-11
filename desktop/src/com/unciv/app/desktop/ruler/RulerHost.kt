@@ -1149,10 +1149,11 @@ object RulerHost {
             val given = entry.asString().trim().removeSuffix(".")
             if (given.isEmpty()) throw ApiError(400, "acknowledge takes a warning as the briefing shows it")
             val standingNow = warnings(civ)
-            val matched = standingNow.filter { ackKey(it) == ackKey(given) }.ifEmpty { standingNow.filter { countsStruck(it).startsWith(countsStruck(given), ignoreCase = true) } }.groupBy { ackKey(it) }
-            if (matched.isEmpty()) throw ApiError(400, "No warning standing now reads '${entry.asString()}'" + (if (standingNow.isEmpty()) "; there are none" else "; warnings now: ${standingNow.joinToString(" | ") { firstClause(it) }}"))
-            if (matched.size > 1) throw ApiError(400, "'${entry.asString()}' could be any of ${matched.size} warnings; give more of the one you mean: ${matched.values.joinToString(" | ") { firstClause(it.first()) }}")
-            val (key, warning) = matched.entries.single().let { it.key to it.value.first() }
+            val matched = standingNow.filter { ackKey(it.text) == ackKey(given) || it.key == ackKey(given) }
+                .ifEmpty { standingNow.filter { countsStruck(it.text).startsWith(countsStruck(given), ignoreCase = true) } }.groupBy { it.key }
+            if (matched.isEmpty()) throw ApiError(400, "No warning standing now reads '${entry.asString()}'" + (if (standingNow.isEmpty()) "; there are none" else "; warnings now: ${standingNow.joinToString(" | ") { firstClause(it.text) }}"))
+            if (matched.size > 1) throw ApiError(400, "'${entry.asString()}' could be any of ${matched.size} warnings; give more of the one you mean: ${matched.values.joinToString(" | ") { firstClause(it.first().text) }}")
+            val (key, warning) = matched.entries.single().let { it.key to it.value.first().text }
             if (key !in standing.acknowledged) standing.acknowledged += key
             "Acknowledged: '${firstClause(warning)}' now stands under warningsAcknowledged while it lasts - its figures and the units it names may change; if it clears and returns, it shows in full again"
         }
@@ -2504,7 +2505,7 @@ object RulerHost {
         var council: Council? = null
         val ruledCivs = orders.keys.map { name -> game.civilizations.first { it.civName == name } }.filter { it.isAlive() }
         // What each advisor has already been shown; anything new below is worth waking them for
-        val warningsSeen = ruledCivs.associate { civ -> civ.civName to warnings(civ).map(::normalised).toSet() }
+        val warningsSeen = ruledCivs.associate { civ -> civ.civName to warnings(civ).map { normalised(it.text) }.toSet() }
         val wake = LinkedHashMap<String, List<String>>()
 
         for (i in 1..turns) {
@@ -2536,10 +2537,10 @@ object RulerHost {
                     .filterNot { line -> atWar && "lost in action" in line && " under your " !in line }
                 // A warning wakes an advisor once per game: many of them flicker on and off between turns, and every look-in shows them all anyway
                 val everSeen = warningsWoken.getOrPut(civ.civName) { HashSet(warningsSeen[civ.civName] ?: emptySet()) }
-                val warningsNow = warnings(civ)
-                val standingNow = warningsNow.map(::normalised)
+                val standing = warnings(civ)
+                val warningsNow = standing.map { it.text }
                 // An acknowledged warning is forgotten once it clears: if it returns, it shows in full again
-                orders[civ.civName]?.acknowledged?.retainAll(warningsNow.map(::ackKey).toSet())
+                orders[civ.civName]?.acknowledged?.retainAll(standing.map { it.key }.toSet())
                 // Deduplicated on the normalised key, sent in the warning's own words (the key reads "The people are unhappy (#)")
                 val fresh = warningsNow.filter { everSeen.add(normalised(it)) }
                     .filter { "no defender" in it || "unhappy" in it || "treasury" in it.lowercase() || "no military" in it }
@@ -2690,8 +2691,8 @@ object RulerHost {
             // The mood's parts came back for Run 36's courts, who asked for them on a large map late (Run 31's removal was a small map early): only while the mood is below zero, grouped
             "happinessBreakdown" to civ.getHappiness().takeIf { it < 0 }?.let { moodParts(civ) },
             // Warnings the advisor acknowledged fold to their first clause while they stand
-            *warnings(civ, sites).partition { ackKey(it) in (orders[civ.civName]?.acknowledged ?: emptyList<String>()) }.let { (acknowledged, shown) ->
-                arrayOf("warnings" to shown, "warningsAcknowledged" to acknowledged.map { firstClause(it) }.ifEmpty { null }) },
+            *warnings(civ, sites).partition { it.key in (orders[civ.civName]?.acknowledged ?: emptyList<String>()) }.let { (acknowledged, shown) ->
+                arrayOf("warnings" to shown.map { it.text }, "warningsAcknowledged" to acknowledged.map { firstClause(it.text) }.ifEmpty { null }) },
             // waysToWin names the victories; the note that told them again was never cited in a league (compaction 2026-10-03)
             "victory" to civ.gameInfo.civilizations.firstOrNull { it.victoryManager.hasWon() }.let { winner -> mapOf("winner" to winner?.civName, "victoryType" to winner?.victoryManager?.getVictoryTypeAchieved(),
                 "diplomatic" to told(civ, "victory.diplomatic"), "cultural" to culturalFacts(civ), "race" to raceView(civ)) },
@@ -3033,8 +3034,16 @@ object RulerHost {
     private fun perLuxury(civ: Civilization): Int =
         4 + civ.getDifficulty().extraHappinessPerLuxury.toInt() + civ.getMatchingUniques(com.unciv.models.ruleset.unique.UniqueType.BonusHappinessFromLuxury).sumOf { it.params[0].toInt() }
 
-    private fun warnings(civ: Civilization, citySites: List<String>? = null): List<String> {
+    /** A standing warning: its words, and [key], what an acknowledgement holds it by (ackKey) */
+    private class Warning(val text: String, val key: String)
+
+    private fun warnings(civ: Civilization, citySites: List<String>? = null): List<Warning> {
         val warnings = ArrayList<String>()
+        // What a warning is about, where its first clause names what may change while it stands - the soldier holding a city, a unit's place, the cities a
+        // lapsing pact would cut off: an acknowledgement holds by the subject, so the line stays folded while it stands, whatever its figures and names do.
+        // Without one the key is read from the words (ackKey); before, a defender swapped for another as weak, or a held general seen at another place,
+        // brought an acknowledged line back in full (Rome, Run 20; the Iroquois, Run 29; Greece's pacts, Run 18)
+        val about = HashMap<String, String>()
         if (civ.getHappiness() < 0) warnings += "The people are unhappy (${civ.getHappiness()}): ${if (civ.getHappiness() <= -10) "no city grows at all" else "every city's growth is cut by three quarters"} while the mood is below zero, and production suffers - farming for food does little until the mood is mended. " +
             "The mood is a sum, and happinessBreakdown shows its parts: every citizen costs one and every city a few; each distinct luxury not yet ours would add ${perLuxury(civ)}, and buildings, policies and wonders what they say (the build lists mark a building's mood as +N). A wide, populous realm settles a little below zero and growth is its brake; what raises it is a luxury not yet ours, a mood building not yet raised, a policy or wonder that gives it, a belief of our religion, or fewer and smaller cities."
         if (civ.tech.currentTechnologyName() == null) warnings += "Research is idle - give research goals."
@@ -3048,11 +3057,12 @@ object RulerHost {
             val missed = units.garrisonMiss(civ, city.getCenterTile())?.let { "; $it" } ?: ""
             if (defender == null) warnings += "${city.name} has no defender in it" + (city.getCenterTile().militaryUnit?.let { " - only ${article(it.name)} in harbour, and a ship holds no city" } ?: "") + "$missed."
             else if (poorDefender(defender))
-                warnings += "${city.name} is only held by ${article(defender.name)} - weak for this age" +
-                    (if (orders[civ.civName]?.garrisonEveryCity == true && missed.isEmpty()) "; by your standing garrison order a stronger soldier of ours relieves it when one is free" else "") + "$missed."
+                warnings += ("${city.name} is only held by ${article(defender.name)} - weak for this age" +
+                    (if (orders[civ.civName]?.garrisonEveryCity == true && missed.isEmpty()) "; by your standing garrison order a stronger soldier of ours relieves it when one is free" else "") + "$missed.")
+                    .also { about[it] = "${city.name} is only held by a weak defender" }
         }
         for (unit in civ.units.getCivUnits()) if (unit.isGreatPerson() && units.orders[unit.id]?.action == "hold")
-            warnings += "${unit.name} #${unit.id} ${RulerCampaigns.atPlaceOf(civ, unit.getTile())} awaits orders."
+            warnings += "${unit.name} #${unit.id} ${RulerCampaigns.atPlaceOf(civ, unit.getTile())} awaits orders.".also { about[it] = "${unit.name} #${unit.id} awaits orders" }
         if (civ.getHappiness() in 0..2) warnings += "The people's mood is thin (+${civ.getHappiness()}): one more city or a lost luxury tips them into unrest."
         // The rearm order's own test (RulerUnits.newerArms), so the warning never sends the advisor to an order that then finds no one to re-arm
         val oldArms = civ.units.getCivUnits().filter { it.baseUnit.isLandUnit && units.newerArms(it).isNotEmpty() }.toList()
@@ -3103,6 +3113,7 @@ object RulerHost {
             val perCitizen = if (population == 0) 1f else -(breakdown["Population"] ?: 0f) / population
             warnings += "${settler.name} #${settler.id} has waited $waited turns ${RulerCampaigns.atPlaceOf(civ, settler.getTile())}, ${if (order != null) "held by your ${order.action} order" else "left to the officials, who found it no site"}. " +
                 "It costs upkeep meanwhile. One more city would cost about ${Math.round(perCity + perCitizen)} contentment at first (the people stand at ${if (civ.getHappiness() >= 0) "+" else ""}${civ.getHappiness()}); found one, disband it, or keep it and know why."
+            about[warnings.last()] = "${settler.name} #${settler.id} has waited"
         }
         // A spaceship part that could be built but is in no city's queue: the ruler's own binding queues keep the officials from adding it
         for (part in civ.gameInfo.ruleset.units.values.filter { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.SpaceshipPart) }) {
@@ -3120,10 +3131,11 @@ object RulerHost {
                 val pacts = civ.diplomacy.values.filter { it.hasOpenBorders && it.otherCiv.isMajorCiv() }.map { manager ->
                     manager.otherCivName + (manager.trades.flatMap { it.ourOffers + it.theirOffers }.filter { it.name == "Open Borders" }.maxOfOrNull { it.duration }?.let { " (ends in $it turns)" } ?: "") }
                 warnings += "${hanging.joinToString { it.name }} ${if (hanging.size == 1) "is" else "are"} joined to the capital only by way of foreign land, under Open Borders with ${pacts.joinToString(" and ").ifEmpty { "a neighbour" }}. When that pact lapses ${if (hanging.size == 1) "it is" else "they are"} cut off until it is renewed: keep it renewed, or build a road of our own."
+                about[warnings.last()] = "cities joined to the capital only by way of foreign land"
             }
         }
         noShipAtSea(civ)?.let { warnings += it }
-        return warnings
+        return warnings.map { Warning(it, ackKey(about[it] ?: it)) }
     }
 
     /** A realm that has not met every great power finds the rest beyond the water only by sea, our land units exploring on foot: said when no warship
