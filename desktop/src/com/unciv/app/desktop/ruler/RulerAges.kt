@@ -162,6 +162,23 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
             }
             names
         }
+        // The realms whose land the map shows, with the game's colour pair for each, which of them meet on known land, and which border known
+        // land nobody holds: the painted map's frontiers. A realm with neither has no frontier to draw - its every edge is coast or unknown
+        val realms = run {
+            val known = game.tileMap.tileList.filter { it.isExplored(civ) && it.getOwner()?.isBarbarian == false }
+            val meet = HashSet<Pair<String, String>>(); val open = HashSet<String>()
+            for (tile in known) if (tile.isLand) for (next in tile.neighbors) {
+                if (!next.isLand || !next.isExplored(civ)) continue
+                val a = tile.getOwner()!!.civName; val b = next.getOwner()?.civName
+                if (b == null) open += a else if (a < b) meet += a to b
+            }
+            val hex = { c: com.badlogic.gdx.graphics.Color -> "#" + c.toString().take(6) }
+            known.groupBy { it.getOwner()!! }.map { (owner, tiles) ->
+                mapOf("name" to owner.civName, "cityState" to owner.isCityState, "outer" to hex(owner.nation.getOuterColor()), "inner" to hex(owner.nation.getInnerColor()),
+                    "cities" to tiles.filter { it.isCityCenter() }.mapNotNull { it.getCity()?.name }.take(8),
+                    "meets" to meet.filter { owner.civName in it.toList() }.map { if (it.first == owner.civName) it.second else it.first }, "open" to (owner.civName in open))
+            }.sortedWith(compareBy({ it["name"] != civ.civName }, { it["cityState"] as Boolean }, { -(it["cities"] as List<*>).size }))
+        }
 
         // The same, told
         val lines = ArrayList<String>()
@@ -192,7 +209,7 @@ class RulerAges(private val trail: RulerTrail, private val yearText: (Int) -> St
 
         return mapOf("from" to from, "to" to to, "fromYear" to yearText(from), "toYear" to yearText(to),
             "marches" to marches, "lost" to lost, "enemyMarches" to theirs, "enemyLost" to enemyLost, "citiesTaken" to taken,
-            "exploration" to exploration, "explorers" to explorers, "met" to met, "inSight" to inSight, "glimpses" to glimpses, "lines" to lines,
+            "exploration" to exploration, "explorers" to explorers, "met" to met, "inSight" to inSight, "glimpses" to glimpses, "realms" to realms, "lines" to lines,
             "curiosities" to curiosities(civ, from, to, first, last, enemies))
     }
 }

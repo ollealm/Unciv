@@ -200,9 +200,10 @@ object MapRenderer {
                 val onLand = landMaskForBorders?.let { (it.getRGB(x, y) and 0xff) > 134 } ?: true
                 // a thin firm line at the edge; within, a light wash on land and barely a breath of it at sea
                 // No firm border line along the edge of knowledge: a realm that runs on into the unknown has no known frontier there,
-                // and its wash fades out with the known world
+                // and its wash fades out with the known world. Nor at sea: a realm's coastal waters are no frontier, and a painter shown a line
+                // round them draws a coloured stripe along every shore (map border tests, 2026-11-03)
                 val atEdge = knownMaskForBorders?.let { (it.getRGB(x, y) and 0xff) < 160 } ?: false
-                if (inside < 127 && atEdge) continue
+                if (inside < 127 && (atEdge || !onLand)) continue
                 val known = knownMaskForBorders?.let { knownness(it.getRGB(x, y) and 0xff) } ?: 1f
                 if (known <= 0f) continue
                 val weight = (if (inside < 127) 0.7f else if (onLand) 0.16f else 0.05f) * known
