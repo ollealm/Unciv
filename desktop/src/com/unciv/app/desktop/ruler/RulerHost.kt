@@ -241,9 +241,14 @@ object RulerHost {
      *  realm and game in selfcheck.log - the words layer (Prose.engineWords) should have said it plainly. Keys are the API's own and are not read */
     private val engineToken = Regex("[\\[\\]]|\\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\\b")
     private val tokensTold = HashSet<String>()
+    /** A count of turns in prose: every time the host states is a year and how long from now (end years, 2026-11-05); one left is told in selfcheck.log */
+    private val turnCount = Regex("\\b(?:\\d+|two|three|four|five|six|seven|eight|nine|ten|twenty|thirty) (?:more )?turns?\\b", RegexOption.IGNORE_CASE)
     private fun <T> served(civ: Civilization, reply: T): T {
         fun walk(value: Any?) { when (value) {
-            is String -> engineToken.findAll(value).forEach { token -> if (tokensTold.add("${civ.civName}|${token.value}")) selfCheck("words", civ.civName, "engine token '${token.value}' served: ${value.take(160)}") }
+            is String -> {
+                engineToken.findAll(value).forEach { token -> if (tokensTold.add("${civ.civName}|${token.value}")) selfCheck("words", civ.civName, "engine token '${token.value}' served: ${value.take(160)}") }
+                turnCount.find(value)?.let { count -> if (tokensTold.add("${civ.civName}|turns|${count.value.lowercase()}")) selfCheck("words", civ.civName, "a count of turns served ('${count.value}'): ${value.take(160)}") }
+            }
             is Map<*, *> -> value.values.forEach(::walk)
             is Iterable<*> -> value.forEach(::walk)
         } } // a Sequence is left unread: walking one would spend it before it is written
@@ -264,6 +269,7 @@ object RulerHost {
                 Regex("\\(-?\\d+,\\s?-?\\d+\\)").containsMatchIn(text) -> selfCheck("words", civ.civName, "coordinates: $text")
                 Regex("\\b[Aa]\\(n\\)").containsMatchIn(text) -> selfCheck("words", civ.civName, "the engine's A(n): $text")
                 Regex("#\\d+").containsMatchIn(text) && !asksForOrders.containsMatchIn(text) -> selfCheck("words", civ.civName, "a unit's number in prose: $text")
+                turnCount.containsMatchIn(text) -> selfCheck("words", civ.civName, "a count of turns: $text")
             }
         }
         // A unit the ruler put in place that stood on its spot when the turn began and stands elsewhere now: a hold without a place, a fortify, or a
@@ -831,12 +837,12 @@ object RulerHost {
      *  and overridden (the order dropped or undone by what happened) - one line each in the log's words. Nothing in it is decided here */
     private fun orderLedger(civ: Civilization, logSince: Int?): Pair<Map<String, Any?>, Set<String>> {
         val since = maxOf(logSince ?: -1, game().turns - lookInTurns - 1)
-        val sorted = chanceryLog(civ, since).mapNotNull { line -> ledgerKind(line["text"] as String)?.let { it to "T${line["turn"]}: ${line["text"]}" } }.groupBy({ it.first }, { it.second })
+        val sorted = chanceryLog(civ, since).mapNotNull { line -> ledgerKind(line["text"] as String)?.let { it to "${yearText(line["turn"] as Int)}: ${line["text"]}" } }.groupBy({ it.first }, { it.second })
         val waits = civ.cities.flatMap { city -> waiting[city.id].orEmpty().mapNotNull { item -> runCatching { civ.construction(item) }.getOrNull()?.let {
             "$item waits in ${city.name}'s queue: ${whyNot(city, it, city.cityConstructions.constructionQueue.toList()).ifEmpty { listOf("what it needs is queued ahead of it") }.joinToString()}." } } }
         return mapOf(
             "awaiting" to diplomacy.awaiting(civ) + units.awaiting(civ) + waits,
-            "sinceLastLookIn" to mapOf("carriedOut" to sorted["carriedOut"], "refused" to refusedOrders[civ.civName]?.filter { it.first > since }?.map { "T${it.first}: ${it.second}" },
+            "sinceLastLookIn" to mapOf("carriedOut" to sorted["carriedOut"], "refused" to refusedOrders[civ.civName]?.filter { it.first > since }?.map { "${yearText(it.first)}: ${it.second}" },
                 "lapsed" to sorted["lapsed"], "overridden" to sorted["overridden"])
         ) to sorted.values.flatten().toSet()
     }
@@ -1138,7 +1144,7 @@ object RulerHost {
             val (told, warWith) = diplomacy.answerDemand(civ, entry.getString("power"), entry.getString("answer"), leave)
             if (warWith == null) told else {
                 // The refusal was a declaration: the war is ours, as if declared by order (the engine's declaration wrote the world's event and the council's record)
-                "$told - that refusal declared war on ${warWith.civName}. No peace can be made for ${civ.gameInfo.ruleset.modOptions.constants.minimumWarDuration} turns"
+                "$told - that refusal declared war on ${warWith.civName}. No peace can be made before ${Prose.dated(civ.gameInfo, civ.gameInfo.ruleset.modOptions.constants.minimumWarDuration)}"
             }
         }
         tryEach(json.get("trade")) { diplomacy.proposeTrade(civ, it, leave) }
@@ -1178,8 +1184,8 @@ object RulerHost {
             val ended = if (pacts.isEmpty()) "" else " Declaring it ended our defensive pact${plural(pacts.size)} with ${pacts.joinToString(" and ")}."
             val swept = RulerHost.diplomacy.lostToWar(civ, dealsBefore)?.let { " It swept away our deals: $it." } ?: ""
             val company = cameIn(civ, target, warsDeclared.drop(warsBefore))
-            log(civ, "By your order: we declared war on $targetName. No peace can be made for $minimum turns.$ended$swept$company")
-            "Declared war on $targetName. No peace can be made for $minimum turns - neither side may offer it before then.$ended$swept$company"
+            log(civ, "By your order: we declared war on $targetName. No peace can be made before ${Prose.year(civ.gameInfo, minimum)}.$ended$swept$company")
+            "Declared war on $targetName. No peace can be made before ${Prose.dated(civ.gameInfo, minimum)} - neither side may offer it before then.$ended$swept$company"
         }
         if (alreadyKnown.isNotEmpty()) failed += "Already known, dropped from the research goals: ${alreadyKnown.joinToString()}"
         standing.research.removeAll { reached(civ, it) }
@@ -1492,7 +1498,7 @@ object RulerHost {
             val named = game().civilizations.filter { it.civID != it.civName }.fold(notification.text) { text, other -> text.replace("[${other.civID}]", "[${other.civName}]") }
             val text = inOurWords(named.replace("[", "").replace("]", "").replace("{", "").replace("}", "")) +
                 // the engine's minimum war binds the side attacked as well: say so where the war is first heard of
-                (if ("has declared war on us" in notification.text) " No peace can be made for ${civ.gameInfo.ruleset.modOptions.constants.minimumWarDuration} turns." else "")
+                (if ("has declared war on us" in notification.text) " No peace can be made before ${Prose.year(civ.gameInfo, civ.gameInfo.ruleset.modOptions.constants.minimumWarDuration)}." else "")
             // "An enemy X has pillaged our Farm" says not whose: the raider still stands on the tile it pillaged
             val raider = if (notification.text.startsWith("An enemy [") && "has pillaged" in notification.text)
                 notification.actions.filterIsInstance<com.unciv.logic.civilization.LocationAction>().firstOrNull()?.location
@@ -1671,7 +1677,7 @@ object RulerHost {
         val dealsNow = diplomacy.dealsInForce(civ)
         // Told once, the turn a deal comes to end just past the next look-in: there is time yet to order it renewed
         val soon = lookInTurns + 1
-        for (deal in diplomacy.endingSoon(civ, soon) - diplomacy.endingSoon(civ, soon - 1).toSet()) log(civ, "A deal ends in $soon turns, in ${yearText(turn + soon)}: $deal. The same terms can be offered to them again only once it has ended; order renew and they are offered again that very turn, as our proposal.")
+        for (deal in diplomacy.endingSoon(civ, soon) - diplomacy.endingSoon(civ, soon - 1).toSet()) log(civ, "A deal ends in ${yearText(turn + soon)}: $deal. The same terms can be offered to them again only once it has ended; order renew and they are offered again that very turn, as our proposal.")
         val began = (dealsNow - before.deals).toList(); val ended = (before.deals - dealsNow).toList()
         // A deal that ends the turn its renewal begins was replaced, not lost: same partner, same goods, only the numbers differ
         val (changed, lapsed) = ended.partition { old -> began.any { diplomacy.sameGoods(it) == diplomacy.sameGoods(old) } }
@@ -1747,7 +1753,7 @@ object RulerHost {
         val holder = ruled.first().victoryManager.getUNBuildingAndOwnerNames().second?.let { game.getCivilization(it) }
         if (holder != null && unHolder == null) for (civ in ruled.filter { it.isAlive() }) {
             val pledged = orders[civ.civName]?.worldVote
-            log(civ, "The United Nations now stands, built by ${if (holder == civ) "us" else holder.civName}: the world votes for its leader in ${civ.getTurnsTillNextDiplomaticVote() ?: civ.getTurnsBetweenDiplomaticVotes()} turns, and every ${civ.getTurnsBetweenDiplomaticVotes()} turns after. " +
+            log(civ, "The United Nations now stands, built by ${if (holder == civ) "us" else holder.civName}: the world votes for its leader in ${Prose.year(civ.gameInfo, civ.getTurnsTillNextDiplomaticVote() ?: civ.getTurnsBetweenDiplomaticVotes())}, and again at even intervals after. " +
                 (pledged?.let { "Our vote is pledged to $it." } ?: "Our vote is not pledged: unpledged, we abstain - set worldVote to pledge it."))
         }
         unHolder = holder?.civName
@@ -1756,7 +1762,7 @@ object RulerHost {
             val due = civ.getTurnsTillNextDiplomaticVote() ?: continue
             if (due !in 1..lookInTurns || orders[civ.civName]?.worldVote != null || voteReminded[civ.civName] == game.turns + due) continue
             voteReminded[civ.civName] = game.turns + due
-            log(civ, "The world votes for its leader in $due turn${plural(due)}, and our vote is not pledged: unpledged, we abstain. Set worldVote to pledge it to a great power.")
+            log(civ, "The world votes for its leader in ${Prose.year(civ.gameInfo, due)}, and our vote is not pledged: unpledged, we abstain. Set worldVote to pledge it to a great power.")
         }
         // The votes are counted the turn after they are cast, and cleared the turn after that: told once, to every realm
         val votes = game.diplomaticVictoryVotesCast
@@ -1773,7 +1779,7 @@ object RulerHost {
             val ours = votes[civ.civID]
             log(civ, "The world's vote for its leader was counted: $counted. We ${if (votes.containsKey(civ.civID)) (ours?.let { "voted for ${name(it)}" } ?: "abstained") else "did not vote"}. " +
                 (if (elected != null) "${if (elected == civ) "We are" else "${elected.civName} is"} elected world leader${needed?.let { ", with the $it votes needed" } ?: ""}."
-                 else "Nobody won the${needed?.let { " $it" } ?: ""} votes needed; the world votes again in ${civ.getTurnsBetweenDiplomaticVotes()} turns."))
+                 else "Nobody won the${needed?.let { " $it" } ?: ""} votes needed; the world votes again in ${Prose.year(civ.gameInfo, civ.getTurnsBetweenDiplomaticVotes())}."))
         }
     }
 
@@ -1814,10 +1820,10 @@ object RulerHost {
         val every = civ.getTurnsBetweenDiplomaticVotes()
         val powers = powersWeKnow(civ)
         return mapOf(
-            "unitedNations" to if (holder != null) "built by ${if (holder == civ) "us" else holder.civName}: the world votes for a leader every $every turns" + (civ.getTurnsTillNextDiplomaticVote()?.let { if (it == 0) "; the world votes this turn" else "; the next vote in $it turn${plural(it)}" } ?: "") +
+            "unitedNations" to if (holder != null) "built by ${if (holder == civ) "us" else holder.civName}: the world votes for a leader at even intervals" + (civ.getTurnsTillNextDiplomaticVote()?.let { if (it == 0) "; the world votes now, as this season is played" else "; the next vote in ${Prose.dated(civ.gameInfo, it)}" } ?: "") +
                     // City-states cast for their ally as the vote's turn is played, after every great power has moved (NextTurnAutomation): what moves one must be done before
                     ". A city-state votes for whoever is its ally when the voting turn is played, after every great power has moved in it, so the last look-in that can still move a city-state's vote is the one before that turn"
-                else "not yet built (${un.name} is a wonder${un.requiredTech?.let { " that needs $it" } ?: ""}): nobody votes until it stands; the first vote comes $every turns after it is built, then one every $every turns",
+                else "not yet built (${un.name} is a wonder${un.requiredTech?.let { " that needs $it" } ?: ""}): nobody votes until it stands; the first vote comes a while after it is built, then one at even intervals",
             "votes" to "$total votes in all${if (holder == null) " once it stands" else ""}: one for each of the ${voters.count { it.isMajorCiv() }} great powers and ${voters.count { it.isCityState }} city-states still standing, and a second for the holder of the ${un.name}. $needed are needed to win, and the most votes with no tie. No power may vote for itself - the holder's two votes go to another",
             "howTheyVote" to run {
                 val courts = powers.filter { it != civ && it.civID in RulerOverrides.ruledCivs }.map { it.civName }
@@ -2128,7 +2134,7 @@ object RulerHost {
                 mode == "waiting" -> " waiting out of reach off $place, against $city: every shore near it lies under ${covered(group[0].second.cover)}" +
                     " - ships to clear that shore, or a weaker aim, would open a landing"
                 else -> " crossing to ${if (group.size == 1) "its" else "their"} landing at $place, against $city"
-            } + " (${RulerCampaigns.count(longest)} turn${Prose.plural(longest)} at sea)"
+            } + " (at sea since ${yearText(game().turns - longest + 1)})"
         }
         // Each begins to be told once: a host waiting off a shore under the guns, or holding with none to land on
         val now = plans.filter { it.second.mode != "crossing" }.groupBy { "${it.second.mode}|${cityOf(it.second)}" }
@@ -2444,7 +2450,7 @@ object RulerHost {
      *  engine's words then stand), "" when another line already tells it. [toldJoins] gathers the joins a war's line names, so they are not told again */
     private fun reworded(civ: Civilization, notice: String, toldJoins: MutableSet<Pair<String, String>>): String? {
         val people = { c: Civilization -> RulerCampaigns.people(c.civName) }
-        val noPeace = "No peace can be made for ${civ.gameInfo.ruleset.modOptions.constants.minimumWarDuration} turns."
+        val noPeace = "No peace can be made before ${Prose.year(civ.gameInfo, civ.gameInfo.ruleset.modOptions.constants.minimumWarDuration)}."
         Regex("^\\[(.+)\\] has declared war on us!$").find(notice)?.let { m ->
             val attacker = m.groupValues[1]
             val came = sides(attacker, civ.civName, warsDeclared.filter { setOf(it.target, it.ally).let { side -> civ.civName in side && attacker in side } })
@@ -2469,7 +2475,7 @@ object RulerHost {
         if (notice == "You have entered a Golden Age!" && goldenAge != null) {
             val cause = goldenAge.cause?.let { "brought by our $it" } ?: "born of the people's contentment"
             val lengthened = civ.goldenAges.turnsLeftForCurrentGoldenAge > goldenAge.turns
-            return (if (lengthened) "Our Golden Age is lengthened by ${goldenAge.turns} turns, $cause" else "We entered a Golden Age of ${goldenAge.turns} turns, $cause") +
+            return (if (lengthened) "Our Golden Age is lengthened, now until ${Prose.year(civ.gameInfo, civ.goldenAges.turnsLeftForCurrentGoldenAge)}, $cause" else "We entered a Golden Age, until ${Prose.year(civ.gameInfo, civ.goldenAges.turnsLeftForCurrentGoldenAge)}, $cause") +
                 ": a fifth more production and culture in every city, and a gold more from every tile that yields gold."
         }
         if (notice.startsWith("You enter a Golden Age") && goldenAge != null) return "" // the trigger's second word on the same golden age
@@ -2676,9 +2682,8 @@ object RulerHost {
             "civ" to civ.civName,
             "turn" to turn,
             "year" to yearText(turn),
-            // Advisors speak in years, but everything here counts turns - and early on a turn is decades long
-            "calendar" to (civ.gameInfo.getYear(1) - civ.gameInfo.getYear(0)).let { years ->
-                "One turn is now about $years year${plural(years)}. Every figure of turns in this briefing (turnsLeft, deal durations, 'about N turns away') counts turns, not years: ${if (years > 1) "3 turns is about ${3 * years} years. " else ""}Reckon it over before you speak of time, and prefer a loose span ('within a generation', 'a century's work') to an exact count." },
+            // Every end is dated by the host, the year and how long from now, so nothing is reckoned from a turn's length that changes inside a span (end years, 2026-11-05)
+            "calendar" to "Every date in this briefing is a year of the realm's calendar, with how long from now; it is now ${yearText(turn)}.",
             "era" to civ.getEra().name,
             "wondersBarredFor" to wonderless.toList().ifEmpty { null },
             "waysToWin" to civ.gameInfo.gameParameters.victoryTypes.toList().ifEmpty { listOf("none - this world was made without victory conditions; nobody can build a spaceship or win a vote") },
@@ -2702,8 +2707,9 @@ object RulerHost {
             "spaceship" to told(civ, "spaceship"),
             "policies" to civ.policies.getAdoptedPolicies().toList(),
             "culture" to mapOf("stored" to civ.policies.storedCulture, "neededForNextPolicy" to civ.policies.getCultureNeededForNextPolicy(),
-                "turnsToNextPolicy" to next.culture.toInt().let { perTurn -> val short = civ.policies.getCultureNeededForNextPolicy() - civ.policies.storedCulture
-                    if (short <= 0) "now" else if (perTurn <= 0) "never, at no culture a turn" else "about ${(short + perTurn - 1) / perTurn} at $perTurn culture a turn" },
+                // When, not how: the year and how long from now - a "needed / a turn" pair beside it was divided into turns ("eight generations")
+                "nextPolicy" to next.culture.toInt().let { perTurn -> val short = civ.policies.getCultureNeededForNextPolicy() - civ.policies.storedCulture
+                    if (short <= 0) "now" else if (perTurn <= 0) "never, while the realm makes no culture" else "about ${Prose.dated(civ.gameInfo, (short + perTurn - 1) / perTurn)}" },
                 "costOfEachCity" to "each non-puppet city beyond the first adds ${policyCostPerCity(civ)} to policy costs"),
             "militaryStrength" to armsStanding(civ),
             "warEstimate" to told(civ, "warEstimate"),
@@ -2722,10 +2728,10 @@ object RulerHost {
                     // Ordered before it could be built: each starts once it can
                     "waiting" to waiting[city.id]?.mapNotNull { item -> runCatching { civ.construction(item) }.getOrNull()?.let {
                         "$item - ${whyNot(city, it, city.cityConstructions.constructionQueue.toList()).ifEmpty { listOf("once what it needs, queued ahead of it, stands") }.joinToString()}" } },
-                    "turnsLeft" to city.cityConstructions.currentConstructionName().let { current ->
+                    "doneAbout" to city.cityConstructions.currentConstructionName().let { current ->
                         if (current.isEmpty()) null
                         else if (com.unciv.models.ruleset.PerpetualConstruction.isNamePerpetual(current)) "ongoing (production turned into $current)"
-                        else city.cityConstructions.turnsToConstruction(current).coerceAtLeast(1) },
+                        else Prose.dated(civ.gameInfo, city.cityConstructions.turnsToConstruction(current).coerceAtLeast(1)) },
                     // The food the city's turn will add, rounded as the engine rounds it - the starving warning reads the same figure
                     "production" to stats.production.toInt(), "foodSurplus" to city.foodForNextTurn(),
                     "growth" to when {
@@ -2742,7 +2748,7 @@ object RulerHost {
             "strategicResources" to strategicResources(civ),
             "religion" to told(civ, "religion"),
             "knownCivs" to diplomacy.relations(civ),
-            "log" to condensed(chanceryLog(civ, logSince ?: (turn - ageTurns)).map { "T${it["turn"]}: ${it["text"]}" }.filter { it !in ledger.second }),
+            "log" to condensed(chanceryLog(civ, logSince ?: (turn - ageTurns)).map { "${yearText(it["turn"] as Int)}: ${it["text"]}" }.filter { it !in ledger.second }),
             "peaceOffers" to diplomacy.peaceOffers(civ),
             "tradeOffers" to diplomacy.tradeOffers(civ) + diplomacy.friendshipOffers(civ),
             "demands" to diplomacy.demands(civ),
@@ -2956,7 +2962,7 @@ object RulerHost {
                     enginesAcross -> "our engines all stand across the sea from it, so they must cross the water first, and how long that takes cannot be reckoned from here"
                     marchTurns == null -> ""
                     marchTurns == 0 -> "our engines already stand within reach of the walls"
-                    else -> "the march there is about $marchTurns turn${plural(marchTurns)} at the pace of our slowest engine, and the defender will raise and buy defenders in that time"
+                    else -> "at the pace of our slowest engine the march there arrives about ${Prose.dated(civ.gameInfo, marchTurns)}, and the defender will raise and buy defenders in that time"
                 }
                 val verdict = (acrossTheSea?.let { "$it - " } ?: "") + when {
                     bestEngine == null -> "no siege engines - the walls cannot be broken"
@@ -3111,7 +3117,7 @@ object RulerHost {
             val perCity = if (civ.cities.isEmpty()) 0f else -(breakdown["Cities"] ?: 0f) / civ.cities.size
             val population = civ.cities.sumOf { it.population.population }
             val perCitizen = if (population == 0) 1f else -(breakdown["Population"] ?: 0f) / population
-            warnings += "${settler.name} #${settler.id} has waited $waited turns ${RulerCampaigns.atPlaceOf(civ, settler.getTile())}, ${if (order != null) "held by your ${order.action} order" else "left to the officials, who found it no site"}. " +
+            warnings += "${settler.name} #${settler.id} has waited since ${yearText(civ.gameInfo.turns - waited)} ${RulerCampaigns.atPlaceOf(civ, settler.getTile())}, ${if (order != null) "held by your ${order.action} order" else "left to the officials, who found it no site"}. " +
                 "It costs upkeep meanwhile. One more city would cost about ${Math.round(perCity + perCitizen)} contentment at first (the people stand at ${if (civ.getHappiness() >= 0) "+" else ""}${civ.getHappiness()}); found one, disband it, or keep it and know why."
             about[warnings.last()] = "${settler.name} #${settler.id} has waited"
         }
@@ -3129,7 +3135,7 @@ object RulerHost {
             val hanging = connected.filter { it !in onOurOwn }
             if (hanging.isNotEmpty()) {
                 val pacts = civ.diplomacy.values.filter { it.hasOpenBorders && it.otherCiv.isMajorCiv() }.map { manager ->
-                    manager.otherCivName + (manager.trades.flatMap { it.ourOffers + it.theirOffers }.filter { it.name == "Open Borders" }.maxOfOrNull { it.duration }?.let { " (ends in $it turns)" } ?: "") }
+                    manager.otherCivName + (manager.trades.flatMap { it.ourOffers + it.theirOffers }.filter { it.name == "Open Borders" }.maxOfOrNull { it.duration }?.let { " (ends in ${Prose.dated(civ.gameInfo, it)})" } ?: "") }
                 warnings += "${hanging.joinToString { it.name }} ${if (hanging.size == 1) "is" else "are"} joined to the capital only by way of foreign land, under Open Borders with ${pacts.joinToString(" and ").ifEmpty { "a neighbour" }}. When that pact lapses ${if (hanging.size == 1) "it is" else "they are"} cut off until it is renewed: keep it renewed, or build a road of our own."
                 about[warnings.last()] = "cities joined to the capital only by way of foreign land"
             }
@@ -3291,7 +3297,9 @@ object RulerHost {
         }
     }
 
-    private fun turnsAgo(turns: Int) = when (turns) { 0 -> "this turn"; 1 -> "last turn"; else -> "$turns turns ago" }
+    /** When a past turn was, as a year and how long ago: "in AD 1830, 5 years ago" */
+    private fun turnsAgo(turns: Int): String = (game().getYear(0) - game().getYear(-turns)).let { years ->
+        if (turns <= 0 || years <= 0) "this year" else "in ${yearText(game().turns - turns)}, ${if (years == 1) "a year" else "$years years"} ago" }
 
     private fun threats(civ: Civilization): List<String> {
         val threats = ArrayList<String>()
@@ -3427,14 +3435,14 @@ object RulerHost {
         val length = civ.gameInfo.speed.dealDuration
         val raCost = (civ.getEra().researchAgreementCost * civ.gameInfo.speed.goldCostModifier).toInt()
         return when (name.trim().lowercase().removeSuffix("s")) {
-            "defensive pact" -> mapOf("kind" to "treaty", "name" to Constants.defensivePact, "length" to "$length turns",
+            "defensive pact" -> mapOf("kind" to "treaty", "name" to Constants.defensivePact, "length" to "until ${Prose.dated(civ.gameInfo, length)} if made now",
                 "binds" to "If a third power declares war on either side, the other is pulled into that war at once, automatically. Declaring war yourself cancels your own defensive pacts - they do not drag a partner into a war we start.",
                 "gold" to "none", "needs" to "a Declaration of Friendship in force between the two, shared embassies where the game asks for them, and the learning that allows pacts on both sides")
-            "research agreement" -> mapOf("kind" to "treaty", "name" to Constants.researchAgreement, "length" to "$length turns",
+            "research agreement" -> mapOf("kind" to "treaty", "name" to Constants.researchAgreement, "length" to "until ${Prose.dated(civ.gameInfo, length)} if made now",
                 "binds" to "Both sides pay the gold up front; when it runs out each gains research, more the more both learnt meanwhile. A war between the two cancels it, and the gold is lost.",
                 "gold" to "$raCost gold from each side at our age (the dearer of the two sides' ages sets it)",
                 "needs" to "a Declaration of Friendship in force, shared embassies where the game asks for them, the learning that allows it on both sides, the gold on both sides, techs still left to learn on both sides, and no research agreement already running between the two")
-            "open border" -> mapOf("kind" to "treaty", "name" to Constants.openBorders, "length" to "$length turns",
+            "open border" -> mapOf("kind" to "treaty", "name" to Constants.openBorders, "length" to "until ${Prose.dated(civ.gameInfo, length)} if made now",
                 "binds" to "Each side's units may cross the other's lands; without it they are turned back at the border. It is usually a swap - each side gives its own.",
                 "gold" to "none", "needs" to "peace, and the learning that allows it")
             "declaration of friendship" -> mapOf("kind" to "treaty", "name" to "Declaration of Friendship",
@@ -3452,7 +3460,7 @@ object RulerHost {
         return mapOf(
             "warEstimate" to warEstimate(civ, everyPower = true),
             "researchableNow" to ruleset.technologies.values.filter { civ.tech.canBeResearched(it.name) }
-                .map { mapOf("tech" to it.name, "turns" to civ.tech.turnsToTech(it.name)) },
+                .map { mapOf("tech" to it.name, "readyAbout" to (civ.tech.turnsToTech(it.name).toIntOrNull()?.let { turns -> if (turns <= 0) "now" else Prose.dated(civ.gameInfo, turns) } ?: "never, while the realm makes no science")) },
             "researchGoals" to "Any technology name works as a research goal; the path to it is researched automatically.",
             "futureTechs" to ruleset.technologies.values.filter { !civ.tech.isResearched(it.name) }.map { it.name },
             "policyBranches" to ruleset.policyBranches.values.map {
@@ -3473,13 +3481,13 @@ object RulerHost {
                     "Loyal" to "how much they honour friendships",
                     "DeclareWar" to "how warlike their building and keeping is (the Great Wall, a standing army); they never declare war on their own - war is the ruler's")),
             "diplomacy" to diplomacy.tradeOptions(civ, leave),
-            // What each city can build, with turns and its price in gold - and in faith where faith buys it (a Missionary is bought, never built)
+            // What each city can build, with how long it takes in years and its price in gold - and in faith where faith buys it (a Missionary is bought, never built)
             "buildable" to civ.cities.associate { city ->
                 city.name to (ruleset.buildings.values.asSequence() + ruleset.units.values.asSequence())
                     .mapNotNull { construction -> Triple(construction, construction.isBuildable(city.cityConstructions), faithPrice(city, construction)).takeIf { it.second || it.third != null } }
                     .map { (construction, buildable, faith) ->
                         val buy = construction.getStatBuyCost(city, Stat.Gold)?.takeIf { buildable && construction.canBePurchasedWithStat(city, Stat.Gold) }
-                        "${construction.name} (" + listOfNotNull(if (buildable) "${city.cityConstructions.turnsToConstruction(construction.name)}t" else null, buy?.let { "buy $it gold" }, faith?.let { "buy $it faith" },
+                        "${construction.name} (" + listOfNotNull(if (buildable) city.cityConstructions.turnsToConstruction(construction.name).let { turns -> if (turns >= Int.MAX_VALUE / 2) "never, at no production" else "about ${Prose.span(civ.gameInfo, turns)}" } else null, buy?.let { "buy $it gold" }, faith?.let { "buy $it faith" },
                             (construction as? com.unciv.models.ruleset.Building)?.happiness?.toInt()?.takeIf { it > 0 }?.let { "+$it mood" }).joinToString(", ") + ")"
                     }.toList()
             },

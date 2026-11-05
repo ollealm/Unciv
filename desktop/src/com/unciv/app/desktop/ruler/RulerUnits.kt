@@ -79,7 +79,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         val (key, turn) = garrisonFailed.entries.filter { it.key.endsWith("@${cityKey(city)}") }.maxByOrNull { it.value }?.let { it.key to it.value } ?: return null
         val id = key.substringBefore("@").toInt()
         val name = civ.gameInfo.civilizations.asSequence().flatMap { it.units.getCivUnits() }.firstOrNull { it.id == id }?.name ?: "soldier"
-        return "our $name #$id, sent to garrison it, could not reach it (turn $turn)"
+        return "our $name #$id, sent to garrison it, could not reach it (in ${Prose.yearOfTurn(civ.gameInfo, turn)})"
     }
 
     private fun noteGarrisonFailure(unit: MapUnit, order: Order, target: Tile) {
@@ -242,7 +242,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                         if (order.turnsStuck == 3) log(civ, "Our ${unit.name} waits beside ${RulerCampaigns.placeOf(civ, target)}: our ${blocker.name} holds it and cannot change places yet. It swaps in as soon as it can.")
                         return true
                     }
-                    dropped(unit, "Our ${unit.name} has been stuck for ${order.turnsStuck} turns on its way to ${RulerCampaigns.placeOf(civ, target)}, no nearer than it was" +
+                    dropped(unit, "Our ${unit.name} has been stuck since ${Prose.yearOfTurn(civ.gameInfo, civ.gameInfo.turns - order.turnsStuck)} on its way to ${RulerCampaigns.placeOf(civ, target)}, no nearer than it was" +
                         (blocker?.let { " - the tile is held by ${it.civ.civName}'s ${it.name}" } ?: seaBlock(unit, target)?.let { " - $it" } ?: " - no way to it opens"))
                     return false
                 }
@@ -278,7 +278,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 if (used != null) { usedByOrder += unit.id; log(civ, "Our ${unit.name} used its ability (${abilityWord(used)}) ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}${if (used == UnitActionType.SpreadReligion) promiseBroken(civ, unit.getTile(), "religion").orEmpty() else ""}.") }
                 else {
                     order.turnsStuck += 1
-                    if (order.turnsStuck == 1) log(civ, "Our ${unit.name} #${unit.id} could not use its ability ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}${order.ability?.let { " ($it)" } ?: ""}: ${abilitiesHere(unit)}. Name one with the order and stand where it applies. It tries again for two more turns, then the order is dropped.")
+                    if (order.turnsStuck == 1) log(civ, "Our ${unit.name} #${unit.id} could not use its ability ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}${order.ability?.let { " ($it)" } ?: ""}: ${abilitiesHere(unit)}. Name one with the order and stand where it applies. It tries again twice more, then the order is dropped.")
                     if (order.turnsStuck < 3) return true
                     dropped(unit, "Our ${unit.name} still could not use its ability ${RulerCampaigns.atPlaceOf(civ, unit.getTile())}")
                     return false // taken back this turn, as said
@@ -431,7 +431,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             val target = order.x?.let { x -> order.y?.let { y -> civ.gameInfo.tileMap.getIfTileExistsOrNull(x, y) } }
             if (order.action !in marching || target == null || unit.getTile() == target) return@mapNotNull null
             val purpose = when (order.action) { "settle" -> " to found a city"; "garrison" -> " to garrison it"; "use" -> " to use its ability${order.ability?.let { " ($it)" } ?: ""}"; "gift" -> " to be given to ${order.to}"; else -> "" }
-            "${unit.name} #$id is on its way to ${where(civ, target)}$purpose, ${order.turnsMarching} turn${if (order.turnsMarching == 1) "" else "s"} so far" +
+            "${unit.name} #$id is on its way to ${where(civ, target)}$purpose, marching since ${Prose.yearOfTurn(civ.gameInfo, civ.gameInfo.turns - order.turnsMarching)}" +
                 (if (order.turnsStuck > 0) ", no nearer for ${order.turnsStuck}" else "") + "."
         } + rearmNext.keys.mapNotNull { id -> civ.units.getUnitById(id)?.let { "${it.name} #$id had marched when its re-arming was ordered: it is re-armed at the start of our next turn, if the treasury still allows." } }
     }
@@ -552,9 +552,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         val turns = if (target == unit.getTile()) 0 else kotlin.math.ceil(path.size / unit.getMaxMovement().coerceAtLeast(1).toFloat()).toInt()
         // A ruler may break the realm's word, but never unknowing: the reply says which promise the order breaks
         val broken = when { action == "settle" -> promiseBroken(civ, target, "settle"); action == "use" && (ability == null || "religion" in ability.lowercase()) -> promiseBroken(civ, target, "religion"); else -> null }
-        if (action == "explore") return "${unit.name} #$unitId will explore" + (if (turns > 0) " from ${where(civ, target)}, about $turns turns away" else "") + ", turn after turn, until nothing within its reach is left unexplored; then it is back under the officials. " +
+        if (action == "explore") return "${unit.name} #$unitId will explore" + (if (turns > 0) " from ${where(civ, target)}, which it reaches about ${Prose.dated(civ.gameInfo, turns)}" else "") + ", turn after turn, until nothing within its reach is left unexplored; then it is back under the officials. " +
             (if (unit.baseUnit.isLandUnit) "It explores the land it can walk: it does not cross the sea - the sea is for ships." else "A ship explores the sea and the coasts it can reach.")
-        return "${unit.name} #$unitId will $action at ${where(civ, target)}" + (if (turns > 0) ", about $turns turns away" else "") + broken.orEmpty()
+        return "${unit.name} #$unitId will $action at ${where(civ, target)}" + (if (turns > 0) ", arriving about ${Prose.dated(civ.gameInfo, turns)}" else "") + broken.orEmpty()
     }
 
     /** The promise an order at this tile would break, as a clause for the reply and the log: a city founded within six tiles of a power that holds our
@@ -583,7 +583,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         orders[unit.id] = Order("gift", tile.position.x.toInt(), tile.position.y.toInt(), to = recipient.civName)
         released -= unit.id
         val turns = if (tile == unit.getTile()) 0 else kotlin.math.ceil(steps / unit.getMaxMovement().coerceAtLeast(1).toFloat()).toInt()
-        return "${unit.name} #${unit.id} will be given to $name at ${where(civ, tile)}" + (if (turns > 0) ", about $turns turns away" else "")
+        return "${unit.name} #${unit.id} will be given to $name at ${where(civ, tile)}" + (if (turns > 0) ", arriving about ${Prose.dated(civ.gameInfo, turns)}" else "")
     }
 
     /** Left wholly to the officials: no order of ours, not fortified, asleep or exploring - what describeUnit calls "automated" */
@@ -600,9 +600,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
             else -> "automated"
         }
         val health = if (unit.health < 100) ", ${unit.health} hp" else ""
-        val atSea = if (unit.isEmbarked()) ", at sea, embarked" + (embarkedSince[unit.id]?.let { " since turn $it" } ?: "") else ""
+        val atSea = if (unit.isEmbarked()) ", at sea, embarked" + (embarkedSince[unit.id]?.let { " since ${Prose.yearOfTurn(unit.civ.gameInfo, it)}" } ?: "") else ""
         // A ship left to the officials that has not moved in ten turns: said, as an embarked soldier's time at sea is (Babylon's Caravel sat 86 turns off Seoul)
-        val idle = if (state == "automated" && unit.isMilitary() && unit.baseUnit.isWaterUnit && turnsStill(unit) >= 10) ", idle here since turn ${civ.gameInfo.turns - turnsStill(unit)}" else ""
+        val idle = if (state == "automated" && unit.isMilitary() && unit.baseUnit.isWaterUnit && turnsStill(unit) >= 10) ", idle here since ${Prose.yearOfTurn(civ.gameInfo, civ.gameInfo.turns - turnsStill(unit))}" else ""
         return "${unit.name} #${unit.id} at ${where(civ, unit.getTile())}$atSea, $state$health$idle"
     }
 

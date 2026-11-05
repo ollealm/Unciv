@@ -2,6 +2,19 @@ package com.unciv.app.desktop.ruler
 
 /** The small idioms of the chancery's prose, one copy each, so a line reads the same whichever part of the host wrote it */
 object Prose {
+    /** A year of the running game's calendar, [turnOffset] turns from now: "1250 BC", "AD 400". GameInfo.getYear follows the calendar across the
+     *  ages' changes of pace, so a span read off it is right where a turn's length changes inside it (end years, 2026-11-05) */
+    fun year(game: com.unciv.logic.GameInfo, turnOffset: Int = 0): String = game.getYear(turnOffset).let { if (it < 0) "${-it} BC" else "AD $it" }
+    /** The year a turn of the game fell in: the log's stamps, "since AD 1200" */
+    fun yearOfTurn(game: com.unciv.logic.GameInfo, turn: Int): String = year(game, turn - game.turns)
+    /** How long from now [turns] on is, in the calendar's years: "640 years from now" */
+    fun fromNow(game: com.unciv.logic.GameInfo, turns: Int): String = (game.getYear(turns) - game.getYear(0)).let { years ->
+        when { years <= 0 -> "this year"; years == 1 -> "a year from now"; else -> "$years years from now" } }
+    /** How long [turns] on takes, in the calendar's years, for a list too long to date every line: "60 years" */
+    fun span(game: com.unciv.logic.GameInfo, turns: Int): String = (game.getYear(turns) - game.getYear(0)).let { years -> if (years <= 1) "a year" else "$years years" }
+    /** A time to come as the briefing states every end, the year and how long from now: "AD 1320, 640 years from now". Said in the briefing, which is
+     *  read when it is written; a log line, read later, names the year alone */
+    fun dated(game: com.unciv.logic.GameInfo, turns: Int): String = "${year(game, turns)}, ${fromNow(game, turns)}"
     /** "A", "A and B", "A, B and C" */
     fun andList(parts: List<String>): String = if (parts.size <= 1) parts.joinToString() else parts.dropLast(1).joinToString(", ") + " and " + parts.last()
     /** The plural's "s", unless the count is one */

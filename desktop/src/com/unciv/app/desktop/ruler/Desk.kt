@@ -1,7 +1,6 @@
 package com.unciv.app.desktop.ruler
 
 import com.badlogic.gdx.utils.JsonValue
-import com.unciv.app.desktop.ruler.Prose.plural
 import com.unciv.logic.civilization.Civilization
 
 /** The turns anything laid before a court waits for the ruler's answer before it lapses: an offer of a deal or of peace, a friendship, a demand */
@@ -37,7 +36,8 @@ class Desk {
     fun load(json: JsonValue?, key: (String) -> String = { it }) { json?.forEach { since[key(it.name)] = it.asInt() } }
 
     companion object {
-        /** The clock in words: "waits 3 more turns[after]", or [atLast] on the last turn before it lapses */
-        fun waits(left: Int, atLast: String, after: String = "") = if (left == 0) atLast else "waits $left more turn${plural(left)}$after"
+        /** The clock in years: "waits until AD 1320, 40 years from now[after]", or on the last turn before it lapses "[lapses] in AD 1325, 5 years from now" */
+        fun waits(game: com.unciv.logic.GameInfo, left: Int, lapses: String, after: String = "") =
+            if (left == 0) "$lapses in ${Prose.dated(game, 1)}" else "waits until ${Prose.dated(game, left)}$after"
     }
 }
