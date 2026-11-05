@@ -10,7 +10,9 @@ import com.unciv.logic.map.mapunit.movement.UnitMovement
 import com.unciv.logic.map.tile.Tile
 import com.unciv.models.UnitActionType
 import com.unciv.models.UpgradeUnitAction
+import com.unciv.models.ruleset.unique.GameContext
 import com.unciv.models.ruleset.unique.UniqueType
+import com.unciv.models.translations.removeConditionals
 import com.unciv.ui.screens.worldscreen.unit.actions.UnitActions
 import com.unciv.ui.screens.worldscreen.unit.actions.UnitActionsUpgrade
 import kotlin.math.roundToInt
@@ -517,7 +519,7 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         if (action == "settle") settleProblem(civ, target)?.let { throw IllegalArgumentException("Cannot found a city at ${where(civ, target)}: $it" + nearestSiteHint(civ, unit, target)) }
         // A way this unit does not have at all (a Great Prophet has no golden age) is refused now, not tried for three turns
         json.get("ability")?.takeUnless { it.isNull }?.asString()?.lowercase()?.trim()?.let { ability -> if (action == "use" && ABILITY_UNIQUES[ability]?.none { unit.hasUnique(it) } == true)
-            throw IllegalArgumentException("${unit.name} #$unitId has no '$ability' to use; the ways it has: ${ABILITY_UNIQUES.filter { (_, uniques) -> uniques.any { unit.hasUnique(it) } }.keys.joinToString().ifEmpty { "none" }}") }
+            throw IllegalArgumentException("${unit.name} #$unitId has no '$ability' to use${closedForGood(unit)?.let { " ($it)" }.orEmpty()}; the ways it has: ${ABILITY_UNIQUES.filter { (_, uniques) -> uniques.any { unit.hasUnique(it) } }.keys.joinToString().ifEmpty { "none" }}") }
         if (action == "use") when (json.get("ability")?.takeUnless { it.isNull }?.asString()?.lowercase()?.trim()) {
             "trade mission" -> if (target.getOwner()?.isCityState != true) throw IllegalArgumentException("A trade mission needs a city-state's city, or a tile of its land, as its target; ${where(civ, target)} is neither")
             "hurry production" -> target.getCity()?.let { city -> when (val current = city.cityConstructions.getCurrentConstruction()) {
@@ -631,7 +633,9 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
     fun abilitiesHere(unit: MapUnit): String {
         val tile = unit.getTile()
         val city = tile.getCity()?.takeIf { tile.isCityCenter() }
-        val has = ABILITY_UNIQUES.filter { (_, uniques) -> uniques.any { unit.hasUnique(it) } }.keys
+        // A way lost for good (closedForGood) is no way it waits on: said once, with what the unit did, never as a place it needs
+        val lost = lostForGood(unit)
+        val has = ABILITY_UNIQUES.filter { (_, uniques) -> uniques.any { unit.hasUnique(it) && it !in lost } }.keys
         val open = has.filter { word -> ABILITY_WORDS[word]!!.any { type -> UnitActions.getUnitActions(unit, type).any { it.action != null } } }
         fun why(word: String) = when (word) {
             "improvement" -> "an unimproved tile of ours outside a city to stand on, where its improvement can be built"
@@ -643,13 +647,15 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
                 else -> "more work left on ${city.cityConstructions.currentConstructionName()}"
             }
             "trade mission" -> "a city-state's land to stand in, at peace with us"
-            "religion" -> "a city of ours to found or enhance our religion in, or a city of another faith to spread it to"
+            "religion" -> if (UniqueType.MayFoundReligion in lost && UniqueType.MayEnhanceReligion in lost) "a city of another faith to spread it to"
+                else "a city of ours to found or enhance our religion in, or a city of another faith to spread it to"
             else -> "movement left this turn"
         }
         // Each ability by the order's word for it, the improvement with what it raises
         val named = { word: String -> if (word == "improvement") greatImprovementOf(unit)?.let { "improvement (it raises $it)" } ?: word else word }
         return (if (open.isEmpty()) "nothing is open to it here" else "open to it here now: ${open.joinToString("; ") { named(it) }}") +
-            (has - open.toSet()).takeIf { it.isNotEmpty() }?.let { blocked -> "; " + blocked.joinToString("; ") { "${named(it)} needs ${why(it)}" } }.orEmpty()
+            (has - open.toSet()).takeIf { it.isNotEmpty() }?.let { blocked -> "; " + blocked.joinToString("; ") { "${named(it)} needs ${why(it)}" } }.orEmpty() +
+            closedForGood(unit)?.let { "; $it" }.orEmpty()
     }
 
     /** Could this unit, given a full turn's movement, walk to that tile at all? Orders are given between turns, when units have spent theirs, and Unciv finds no
@@ -820,6 +826,43 @@ class RulerUnits(private val log: (Civilization, String) -> Unit) {
         }
 
         /** The improvement this unit can raise in an instant (a Great Person's), with what it gives and whether it uses the unit up; null for one that raises none */
+        /** The ways the rulebook gives a unit only "if it hasn't used other actions yet" (a Great Prophet's holy site, founding and enhancing a religion) that this
+         *  unit has lost for good. The engine's own check (Conditionals: ConditionalHasNotUsedOtherActions) is that it has acted at all - abilityToTimesUsed not empty.
+         *  A way counts only when every one of its uniques the unit has carries that condition */
+        private fun lostForGood(unit: MapUnit): List<UniqueType> {
+            if (unit.abilityToTimesUsed.isEmpty()) return emptyList()
+            return ABILITY_UNIQUES.values.flatten().distinct().filter { type ->
+                val uniques = unit.getMatchingUniques(type, GameContext.IgnoreConditionals).toList()
+                uniques.isNotEmpty() && uniques.all { it.hasModifier(UniqueType.ConditionalHasNotUsedOtherActions) }
+            }
+        }
+
+        /** What a unit has lost for good by acting, and what it did: "raising a Holy site, founding a religion and enhancing a religion are closed to it for good:
+         *  it has already spread the faith". Null while it has lost nothing. Said in the unit's line and in the briefing's religion line, so a court never promises
+         *  what the engine will refuse (the rulebook-silence samples, 2026-11-05: the spent prophet's holy site was promised three times and refused every look-in) */
+        fun closedForGood(unit: MapUnit): String? {
+            val lost = lostForGood(unit).ifEmpty { return null }
+            val ways = lost.map { type ->
+                when (type) {
+                    UniqueType.ConstructImprovementInstantly -> unit.getMatchingUniques(type, GameContext.IgnoreConditionals).firstOrNull()?.params?.get(0)?.let { "raising ${Prose.article(it)}" } ?: "raising its improvement"
+                    UniqueType.MayFoundReligion -> "founding a religion"
+                    UniqueType.MayEnhanceReligion -> "enhancing a religion"
+                    UniqueType.CanSpreadReligion -> "spreading its religion"
+                    UniqueType.CanHurryResearch -> "hurrying research"
+                    UniqueType.CanSpeedupWonderConstruction, UniqueType.CanSpeedupConstruction -> "hurrying production"
+                    UniqueType.CanHurryPolicy -> "hurrying a policy"
+                    UniqueType.CanTradeWithCityStateForGoldAndInfluence -> "a trade mission"
+                    else -> "a golden age"
+                }
+            }.distinct()
+            // What it did, by the engine's record of its uses (keyed by the unique's words): the faith spread, or the ability by its own words
+            val did = unit.abilityToTimesUsed.keys.map { used ->
+                val type = unit.getMatchingUniques(UniqueType.CanSpreadReligion, GameContext.IgnoreConditionals).firstOrNull { it.text.removeConditionals() == used }?.type
+                if (type == UniqueType.CanSpreadReligion) "spread the faith" else "used its ability to ${inWords(used).removePrefix("Can ").removePrefix("can ").lowercase()}"
+            }.distinct()
+            return "${Prose.andList(ways)} ${if (ways.size == 1) "is" else "are"} closed to it for good: it has already ${Prose.andList(did)}"
+        }
+
         fun greatImprovementOf(unit: MapUnit): String? {
             val unique = unit.getMatchingUniques(UniqueType.ConstructImprovementInstantly).firstOrNull() ?: return null
             val improvement = unit.civ.gameInfo.ruleset.tileImprovements[unique.params[0]] ?: return null

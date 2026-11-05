@@ -3201,7 +3201,9 @@ object RulerHost {
                 if (unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.MayEnhanceReligion) && manager.mayEnhanceReligionAtAll()) "can enhance our religion in a city of ours" else null,
                 if (unit.hasUnique(com.unciv.models.ruleset.unique.UniqueType.CanSpreadReligion)) "can spread its religion in a city it stands in" else null,
                 RulerUnits.greatImprovementOf(unit)?.let { "can raise $it on an unimproved tile of ours (use, ability improvement)" }
-            ).ifEmpty { listOf("nothing it can do now") }.joinToString(", ") + " - order it with use, ability religion, in the city" }.toList()
+            ).ifEmpty { listOf("nothing it can do now") }.joinToString(", ") + " - order it with use, ability religion, in the city" +
+                // What it has lost for good by acting, with what it did: a spent prophet's holy site, founding and enhancing (silence let a court promise them)
+                RulerUnits.closedForGood(unit)?.let { ". ${it.replaceFirstChar(Char::uppercase)}" }.orEmpty() }.toList()
         return mapOf(
             "faithPerTurn" to civ.stats.statsForNextTurn.faith.toInt(),
             "faithStored" to manager.storedFaith,
