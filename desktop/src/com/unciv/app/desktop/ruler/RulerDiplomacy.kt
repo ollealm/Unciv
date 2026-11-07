@@ -332,6 +332,9 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
         if (raw.length > WORDS_MAX) throw IllegalArgumentException("Words to another court are a line or two, at most $WORDS_MAX characters; these run to ${raw.length}")
         return raw.replace(Regex("\\s+"), " ")
     }
+    /** A peace or a friendship carries no words of its own: an envoy from the same court, waiting beside it, is named on its entry */
+    private fun envoyBeside(desk: Civilization, from: Civilization) =
+        if (envoysWaiting.keys.any { it.startsWith("${desk.civName}<${from.civName}: envoy ") }) " - an envoy from ${from.civName}'s court waits beside it, with words (envoys)" else ""
     /** What an order's reply says of the words it was given */
     private fun carried(to: Civilization, words: String?) = when {
         words == null -> ""
@@ -596,12 +599,12 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
                 return@mapNotNull null
             }
             friendshipOfferedOn.item(key, turn, announce,
-                fresh = { "${other.civName}: a Declaration of Friendship (just arrived; answerOffers accept or refuse, terms \"Declaration of Friendship\")" + nearVictoryNote(other) },
+                fresh = { "${other.civName}: a Declaration of Friendship (just arrived; answerOffers accept or refuse, terms \"Declaration of Friendship\")" + nearVictoryNote(other) + envoyBeside(civ, other) },
                 arrive = { log(civ, "${other.civName} proposes a Declaration of Friendship. It waits for your answer - accept or refuse it with answerOffers (terms \"Declaration of Friendship\"); unanswered, it lapses as refused in ${Prose.year(civ.gameInfo, DESK_WAITS)}.") },
                 lapse = {
                     refuseFriendship(civ, other)
                     log(civ, "${other.civName}'s proposal of a Declaration of Friendship went unanswered and lapsed as refused.") },
-                told = { left -> "${other.civName}: a Declaration of Friendship (${Desk.waits(civ.gameInfo, left, "lapses")}; answerOffers accept or refuse, terms \"Declaration of Friendship\")" + nearVictoryNote(other) })
+                told = { left -> "${other.civName}: a Declaration of Friendship (${Desk.waits(civ.gameInfo, left, "lapses")}; answerOffers accept or refuse, terms \"Declaration of Friendship\")" + nearVictoryNote(other) + envoyBeside(civ, other) })
         }
     }
 
@@ -1230,13 +1233,13 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
             val other = game.getCivilization(request.requestingCiv)
             val terms = describeOffer(request, game)
             peaceOfferedOn.item("${civ.civName}<${other.civName}", turn, announce,
-                fresh = { "${other.civName} offers $terms (just arrived, not yet entered in the log; order peace with ${other.civName} to accept)" },
+                fresh = { "${other.civName} offers $terms (just arrived, not yet entered in the log; order peace with ${other.civName} to accept)" + envoyBeside(civ, other) },
                 arrive = { log(civ, "${other.civName} offers peace: $terms. The offer waits for your answer - order peace with ${other.civName} to accept it; left unanswered it is withdrawn in ${Prose.year(civ.gameInfo, DESK_WAITS)}, which is how a peace is refused.") },
                 lapse = {
                     civ.tradeRequests.remove(request); request.decline(civ)
                     settle(request, civ, "lapsed")
                     log(civ, "${other.civName}'s offer of peace went unanswered and has been withdrawn.") },
-                told = { left -> "${other.civName} offers $terms (${Desk.waits(civ.gameInfo, left, "withdrawn")}; order peace with ${other.civName} to accept)" })
+                told = { left -> "${other.civName} offers $terms (${Desk.waits(civ.gameInfo, left, "withdrawn")}; order peace with ${other.civName} to accept)" + envoyBeside(civ, other) })
         }
     }
 
@@ -1288,7 +1291,7 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
                     "influence" to state.getDiplomacyManager(civ)?.getInfluence()?.toInt(),
                     "influenceFor250Gold" to state.cityStateFunctions.influenceGainedByGift(civ, 250))
             }.toList(),
-            "note" to "Offers: luxury/strategic resource names, 'Gold' (amount), 'Gold per turn' (amount), '${Constants.openBorders}', '${Constants.researchAgreement}', '${Constants.defensivePact}', '${Constants.acceptEmbassy}', 'declaration of war on <power>' (a call to war, where the lists carry it: in want, they declare it on accepting; in give, we do, and it needs the same leave as declareWar). A proposal to an unadvised power is answered by its officials on their turn; one to an advised court waits for that court's advisor, who answers at their next look-in. An answer does not send for you - watch the log - but an offer from an advised court does, a counteroffer among them. An offer, or an answer with answerOffers, may carry words (words: a line or two of your own) to an advised court, which its advisor reads as written; words alone go by the envoy order. An unadvised power has no one to read them."
+            "note" to "Offers: luxury/strategic resource names, 'Gold' (amount), 'Gold per turn' (amount), '${Constants.openBorders}', '${Constants.researchAgreement}', '${Constants.defensivePact}', '${Constants.acceptEmbassy}', 'declaration of war on <power>' (a call to war, where the lists carry it: in want, they declare it on accepting; in give, we do, and it needs the same leave as declareWar). A proposal to an unadvised power is answered by its officials on their turn; one to an advised court waits for that court's advisor, who answers at their next look-in. An answer does not send for you - watch the log - but an offer from an advised court does, a counteroffer among them. An offer, or an answer with answerOffers, may carry words (words: a line or two of your own) to an advised court, which its advisor reads as written; words alone go by the envoy order, and so do words with a peace or a friendship, sent beside it (their entry names it). An unadvised power has no one to read them."
         )
     }
 }
