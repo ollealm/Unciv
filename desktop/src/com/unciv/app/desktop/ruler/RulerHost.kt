@@ -888,7 +888,7 @@ object RulerHost {
     /** Kept until changed */
     private val STANDING_FIELDS = listOf("personality", "research", "policyBranches", "neverBuild", "officials", "goldReserve", "faithReserve", "garrisonEveryCity", "posture", "worldVote", "acknowledge")
     /** Done now */
-    private val IMMEDIATE_FIELDS = listOf("queue", "build", "purchase", "rearm", "cities", "units", "trade", "renew", "answerOffers", "answerDemands", "peace", "friendship", "gift",
+    private val IMMEDIATE_FIELDS = listOf("queue", "build", "purchase", "rearm", "cities", "units", "trade", "envoy", "renew", "answerOffers", "answerDemands", "peace", "friendship", "gift",
         "declareWar", "cityFocus", "marry", "denounce", "protect", "endProtection")
     /** Sent with every order by the orchestrator itself, never by the advisor: the war leave */
     private val ORCHESTRATOR_FIELDS = listOf("mayDeclareWar", "withRulersWord")
@@ -1139,7 +1139,7 @@ object RulerHost {
             "Bought $item in ${city.name} for $cost gold (${civ.gold} left).$note$refill"
         }
         // Answers before proposals: a counter is a refusal and a new offer in one order, and the new offer is refused as a mirror while the old one still waits
-        tryEach(json.get("answerOffers")) { diplomacy.answerOffer(civ, it.getString("power"), it.getString("answer"), it.getString("terms", null), leave) }
+        tryEach(json.get("answerOffers")) { diplomacy.answerOffer(civ, it.getString("power"), it.getString("answer"), it.getString("terms", null), leave, diplomacy.wordsOf(it)) }
         tryEach(json.get("answerDemands")) { entry ->
             val (told, warWith) = diplomacy.answerDemand(civ, entry.getString("power"), entry.getString("answer"), leave)
             if (warWith == null) told else {
@@ -1148,6 +1148,7 @@ object RulerHost {
             }
         }
         tryEach(json.get("trade")) { diplomacy.proposeTrade(civ, it, leave) }
+        tryEach(json.get("envoy")) { diplomacy.sendEnvoy(civ, it) }
         tryEach(json.get("renew")) { diplomacy.orderRenewal(civ, it.getString("power"), it.getString("terms", null)) }
         // A warning weighed and let stand: matched by its key (its first clause, counts and lists struck out) or by the start of its text, counts struck out
         // but a unit's #number kept whole - so "Great Prophet #378" is that prophet and no other
@@ -1662,6 +1663,7 @@ object RulerHost {
         }
         diplomacy.peaceOffers(civ, announce = true)
         diplomacy.tradeOffers(civ, announce = true)
+        diplomacy.envoys(civ, announce = true)
         diplomacy.friendshipOffers(civ, announce = true)
         diplomacy.demands(civ, announce = true)
         orders[civ.civName]?.let { standing ->
@@ -2751,6 +2753,7 @@ object RulerHost {
             "log" to condensed(chanceryLog(civ, logSince ?: (turn - ageTurns)).map { "${yearText(it["turn"] as Int)}: ${it["text"]}" }.filter { it !in ledger.second }),
             "peaceOffers" to diplomacy.peaceOffers(civ),
             "tradeOffers" to diplomacy.tradeOffers(civ) + diplomacy.friendshipOffers(civ),
+            "envoys" to diplomacy.envoys(civ),
             "demands" to diplomacy.demands(civ),
             "dealsLedger" to diplomacy.ledger(civ, lookInTurns + 1),
             // The posture with where its host at sea is bound: the generals' own craft, told, no decision asked

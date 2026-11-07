@@ -24,7 +24,7 @@ class Desk {
      *  One waiting item: what the briefing says of it, or null once it has lapsed. Before the bookkeeping has entered it, [fresh] (just arrived); at the
      *  bookkeeping, [arrive] enters it in the log; once its turns are up, [lapse] does what the kind does and says so. [told] says it with the turns left
      */
-    fun item(key: String, turn: Int, announce: Boolean, fresh: () -> String, arrive: () -> Unit, lapse: () -> Unit, told: (left: Int) -> String): String? {
+    fun <T> item(key: String, turn: Int, announce: Boolean, fresh: () -> T, arrive: () -> Unit, lapse: () -> Unit, told: (left: Int) -> T): T? {
         val start = since[key] ?: if (!announce) return fresh() else { arrive(); since[key] = turn; turn }
         if (announce && turn - start >= DESK_WAITS) { since.remove(key); lapse(); return null }
         return told((DESK_WAITS - (turn - start)).coerceAtLeast(0))
