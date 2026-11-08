@@ -1085,6 +1085,39 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
         return "The ${renewal.goods} deal with ${other.civName} ($words) ends in ${Prose.dated(civ.gameInfo, turns)}; when it ends it is proposed again on the same terms, as our own proposal, once.$lacking" + nearVictoryNote(other, trade.ourOffers + trade.theirOffers)
     }
 
+    /** The renew order with withdraw: a standing renewal with [name] is called back, picked as orderRenewal picks a deal - the exact terms, loosely, or the single
+     *  one - and "Declaration of Friendship" the friendship's (Olle, 2026-11-08: an advisor twice told its ruler it would cancel a renewal, and no order could).
+     *  A renewal already sent is a proposal on their desk, not this order's business: the refusal says so */
+    fun withdrawRenewal(civ: Civilization, name: String, terms: String?): String {
+        val other = civ.known(name)
+        val game = civ.gameInfo
+        val standing = renewals.filter { it.civ == civ.civName && it.partner == other.civName }
+        fun listed(renewal: Renewal) = if (renewal.friendship) FRIENDSHIP else renewal.terms
+        val friendship = terms != null && "friendship" in loosely(terms)
+        val renewal = when {
+            friendship -> standing.firstOrNull { it.friendship }
+            terms != null -> standing.firstOrNull { !it.friendship && it.terms.equals(sansTurns(terms.trim()), ignoreCase = true) } ?: standing.singleOrNull { !it.friendship && loosely(it.terms) == loosely(terms) }
+                ?: standing.singleOrNull { !it.friendship && loosely(it.terms).contains(loosely(terms)) }
+            standing.size > 1 -> throw IllegalArgumentException("${standing.size} renewals stand with ${other.civName}; say which with terms, as listed: ${standing.joinToString("; ") { listed(it) }}")
+            else -> standing.singleOrNull()
+        }
+        if (renewal == null) {
+            // Sent already: the deal ended and the proposal is out, answered as any proposal
+            val out = if (friendship) other.popupAlerts.any { it.type == AlertType.DeclarationOfFriendship && it.value == civ.civID }
+                else other.tradeRequests.any { it.requestingCiv == civ.civID && !isPeace(it) && (terms == null || loosely(termsOf(it.trade.reverse(), game)).contains(loosely(terms))) }
+            throw IllegalArgumentException((if (standing.isEmpty()) "No renewal stands with ${other.civName}" else "No renewal with ${other.civName} reads '$terms'; standing: ${standing.joinToString("; ") { listed(it) }}") +
+                (if (out) "; ${if (friendship) "our Declaration of Friendship" else "our proposal"} is already on ${other.civName}'s desk, answered as any proposal - this order cannot call it back" else ""))
+        }
+        renewals.remove(renewal)
+        val told = if (renewal.friendship) "the Declaration of Friendship with ${other.civName} is no longer to be proposed again when it lapses"
+            else "the ${renewal.goods} deal with ${other.civName} is no longer to be offered again when it ends"
+        log(civ, "By your order: $told.")
+        // A pact between friends whose renewal still stands needs the friendship taken again: without its renewal it cannot go out once both have ended
+        val waiting = if (renewal.friendship) standing.filter { it !== renewal && it.needsFriendship } else emptyList()
+        return "Withdrawn: ${told.replaceFirstChar { it.uppercase() }}" + (if (renewal.friendship) "" else " (${renewal.terms})") + "." +
+            (if (waiting.isEmpty()) "" else " The renewal of ${waiting.joinToString(" and ") { "the ${it.goods} deal" }} still stands and needs the friendship; unless one is in force when it ends, it cannot be offered again.")
+    }
+
     /** After the turn: each renewal ordered for a deal that has now ended is proposed again, as the ruler's own proposal; the order is spent either way.
      *  Friendships go first, then the deals that need them. [ended] and [replaced] are the turn's deals as dealsInForce words them ("Partner: terms") */
     fun renewEnded(civ: Civilization, ended: Collection<String>, replaced: Collection<String>) {

@@ -1149,7 +1149,7 @@ object RulerHost {
         }
         tryEach(json.get("trade")) { diplomacy.proposeTrade(civ, it, leave) }
         tryEach(json.get("envoy")) { diplomacy.sendEnvoy(civ, it) }
-        tryEach(json.get("renew")) { diplomacy.orderRenewal(civ, it.getString("power"), it.getString("terms", null)) }
+        tryEach(json.get("renew")) { if (it.getBoolean("withdraw", false)) diplomacy.withdrawRenewal(civ, it.getString("power"), it.getString("terms", null)) else diplomacy.orderRenewal(civ, it.getString("power"), it.getString("terms", null)) }
         // A warning weighed and let stand: matched by its key (its first clause, counts and lists struck out) or by the start of its text, counts struck out
         // but a unit's #number kept whole - so "Great Prophet #378" is that prophet and no other
         tryEach(json.get("acknowledge")) { entry ->
