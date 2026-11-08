@@ -1273,9 +1273,28 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
     private fun luxuries(civ: Civilization) = civ.getCivResourcesByName()
         .filter { it.value > 0 && civ.gameInfo.ruleset.tileResources[it.key]?.resourceType?.name == "Luxury" }
 
+    /** A luxury the mood counts, by where it comes from: [own] copies of our land, [traded] in, [fromCityStates], and [net] what we hold after what is traded away */
+    class LuxuryHeld(val own: Int, val traded: Int, val fromCityStates: Int, val net: Int) {
+        /** Our own and the last we hold: trading it away loses what it gives the mood (2026-11-08: both arms offered Spain our last Silver for Wine) */
+        val lastCopy get() = own > 0 && net == 1 && traded == 0 && fromCityStates == 0
+    }
+    fun luxuriesHeld(civ: Civilization): Map<String, LuxuryHeld> {
+        val net = civ.getCivResourcesByName()
+        return civ.detailedCivResources.filter { it.resource.resourceType == com.unciv.models.ruleset.tile.ResourceType.Luxury }.groupBy { it.resource.name }
+            .mapValues { (name, entries) -> LuxuryHeld(
+                own = entries.filter { it.amount > 0 && !it.isCityStateOrTradeOrigin() }.sumOf { it.amount },
+                traded = entries.filter { it.amount > 0 && it.origin == "Trade" }.sumOf { it.amount },
+                fromCityStates = entries.filter { it.amount > 0 && it.origin == Constants.cityStates }.sumOf { it.amount },
+                net = net[name] ?: 0) }
+            .filterValues { it.net > 0 }
+    }
+    /** The words that mark a last copy where it is offered */
+    fun lastCopyNote(perLuxury: Int) = "our last: trading it away loses its +$perLuxury"
+
     /** What could be traded with each major civ, for the options */
-    fun tradeOptions(civ: Civilization, leave: Boolean = true): Map<String, Any?> {
+    fun tradeOptions(civ: Civilization, leave: Boolean = true, perLuxury: Int = 4): Map<String, Any?> {
         val resources = civ.getCivResourcesByName()
+        val lastCopies = luxuriesHeld(civ).filterValues { it.lastCopy }.keys
         return mapOf(
             "ourLuxuries" to luxuries(civ),
             "ourSpareLuxuries" to resources.filter { it.value > 1 && civ.gameInfo.ruleset.tileResources[it.key]?.resourceType?.name == "Luxury" }.keys.toList(),
@@ -1283,7 +1302,8 @@ class RulerDiplomacy(private val log: (Civilization, String) -> Unit, private va
             "with" to civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() && !civ.isAtWarWith(it) }.map { other ->
                 val logic = TradeLogic(civ, other)
                 mapOf("civ" to other.civName,
-                    "weCanOffer" to logic.ourAvailableOffers.filter { it.type !in hiddenOffers && it.amount > 0 && (leave || it.type != TradeOfferType.WarDeclaration) }.map { it.word(civ.gameInfo) + if (it.amount > 1) " x${it.amount}" else "" },
+                    "weCanOffer" to logic.ourAvailableOffers.filter { it.type !in hiddenOffers && it.amount > 0 && (leave || it.type != TradeOfferType.WarDeclaration) }.map { it.word(civ.gameInfo) + (if (it.amount > 1) " x${it.amount}" else "") +
+                        if (it.type == TradeOfferType.Luxury_Resource && it.name in lastCopies) " (${lastCopyNote(perLuxury)})" else "" },
                     "theyCanOffer" to logic.theirAvailableOffers.filter { it.type !in hiddenOffers && it.amount > 0 }.map { it.word(civ.gameInfo) + if (it.amount > 1) " x${it.amount}" else "" })
             }.toList(),
             "cityStates" to civ.getKnownCivs().filter { it.isCityState && it.isAlive() }.map { state ->
