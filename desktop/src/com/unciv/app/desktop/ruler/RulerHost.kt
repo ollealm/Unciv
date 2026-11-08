@@ -2695,8 +2695,9 @@ object RulerHost {
             "officialsSpentLastTurn" to officialsSpent[civ.civName]?.takeIf { it.isNotEmpty() },
             "happiness" to civ.getHappiness(),
             // techsKnown was cut after the removal league (Run 31, 2026-10-04): the known techs cost two refusals in 108 turns - the research reply says "already known".
-            // The mood's parts came back for Run 36's courts, who asked for them on a large map late (Run 31's removal was a small map early): only while the mood is below zero, grouped
-            "happinessBreakdown" to civ.getHappiness().takeIf { it < 0 }?.let { moodParts(civ) },
+            // The mood at every sign, with what a city founded or taken would do to it (mood block, 2026-11-08): told only below zero, the cost of a city came
+            // once the people were already unhappy, and no advisor weighed a conquest against it (0 of 5 replies; 5 of 5 with the block)
+            "mood" to mood(civ),
             // Warnings the advisor acknowledged fold to their first clause while they stand
             *warnings(civ, sites).partition { it.key in (orders[civ.civName]?.acknowledged ?: emptyList<String>()) }.let { (acknowledged, shown) ->
                 arrayOf("warnings" to shown.map { it.text }, "warningsAcknowledged" to acknowledged.map { firstClause(it.text) }.ifEmpty { null }) },
@@ -3022,21 +3023,147 @@ object RulerHost {
      *  figure never brings it back (Greece acknowledged one warning ten times in twenty turns) - but a unit's #number kept, so one prophet is never another */
     private fun ackKey(warning: String) = countsStruck(firstClause(warning).replace(Regex("\\s*\\([^)]*\\)"), "")).replace(Regex("\\s+"), " ").trim().lowercase()
 
-    /** The mood's sum by kind of source, as the game counts it; no per-city split, the cities carry their own unhappiness */
+    /** The mood's sum by kind of source, as the game counts it; no per-city split, the cities carry their own unhappiness. The parts add up to the figure */
     private fun moodParts(civ: Civilization): Map<String, Int> {
         val parts = LinkedHashMap<String, Float>()
         for ((source, value) in civ.stats.getHappinessBreakdown()) {
             val part = when {
+                source == "Base happiness" -> "base"
                 source == "Cities" || source == "Occupied City" -> "cities"
-                source == "Population" -> "population"
+                source == "Population" -> "citizens"
                 "Luxur" in source -> "luxuries"
-                source == "Buildings" -> "buildings"
-                source == "Policies" || source == "Wonders" || source == "Religion" -> "policiesWondersAndFaith"
+                source == "Buildings" || source == "Wonders" -> "buildings"
+                source == "Policies" -> "policies"
+                source == "Religion" -> "faith"
+                source == "City-States" -> "cityStates"
+                source == "Natural Wonders" -> "naturalWonders"
                 else -> "other"
             }
             parts[part] = (parts[part] ?: 0f) + value
         }
-        return listOf("cities", "population", "luxuries", "buildings", "policiesWondersAndFaith", "other").associateWith { Math.round(parts[it] ?: 0f) }.filterValues { it != 0 }
+        val rounded = listOf("base", "cities", "citizens", "luxuries", "buildings", "policies", "faith", "cityStates", "naturalWonders", "other").associateWith { Math.round(parts[it] ?: 0f) }.toMutableMap()
+        // The game rounds the sum, not each part: what the parts' rounding leaves goes to the citizens, whose discounts make the fractions
+        rounded["citizens"] = rounded["citizens"]!! + civ.getHappiness() - rounded.values.sum()
+        return rounded.filterValues { it != 0 }
+    }
+
+    /** The people's mood, facts only, at every sign (data/harness/mood-block-2026-11-08/REPORT.md): the figure and its parts, what a city founded now or taken
+     *  would leave, our luxuries and the ones a power we know would trade, and the mood buildings. The costs are the engine's own formula
+     *  (CityStats.updateCityHappiness, CityConquestFunctions.conquerCity), reckoned without playing anything out */
+    private fun mood(civ: Civilization): Map<String, Any?> {
+        val figure = civ.getHappiness()
+        val raw = civ.stats.getHappinessBreakdown().values.sum()
+        val per = perLuxury(civ)
+        val held = diplomacy.luxuriesHeld(civ)
+        val leaves = { delta: Float -> Math.round(raw + delta) }
+        val first = cityMood(civ, 1, occupied = false)
+        return linkedMapOf(
+            "now" to signed(figure) + when {
+                figure <= -10 -> ": no city grows at -10 or below, and production suffers"
+                figure < 0 -> ": below zero every city's growth is cut by three quarters, and production suffers; at -10 none grows"
+                else -> "; below zero every city's growth is cut by three quarters, and at -10 none grows"
+            },
+            "parts" to moodParts(civ),
+            "aNewCity" to "a city founded now costs ${amount(-first.total)} (${amount(first.forCity)} for the city, ${amount(first.perCitizen)} for its first citizen" +
+                (if (first.policies > 0) ", less ${amount(first.policies)} from our policies" else "") + "), and ${amount(first.perCitizen)} for each citizen it grows: " +
+                "one new city leaves ${signed(leaves(first.total))}, two leave ${signed(leaves(2 * first.total))}",
+            "aTakenCity" to takenCities(civ, held, per, figure, leaves),
+            "ourLuxuries" to ourLuxuries(held, per),
+            "luxuriesWeLack" to luxuriesWeLack(civ, held, per),
+            "moodBuildings" to moodBuildings(civ))
+    }
+
+    private fun signed(n: Int) = if (n > 0) "+$n" else "$n"
+    /** A cost as the advisor reads it: whole where it is whole, else to two places (a citizen at 0.95 under Meritocracy) */
+    private fun amount(value: Float) = java.math.BigDecimal(value.toDouble()).setScale(2, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()
+
+    /** What one city of ours at [pop] does to the mood, by CityStats.updateCityHappiness: [forCity] and [perCitizen] are costs (positive), [policies] what
+     *  our policies give such a city, [total] the change to the mood. [occupied] is a city taken from another and annexed, until it has a Courthouse */
+    private class CityMood(val forCity: Float, val perCitizen: Float, val citizens: Float, val policies: Float) { val total get() = policies - forCity - citizens }
+    private fun cityMood(civ: Civilization, pop: Int, occupied: Boolean): CityMood {
+        var modifier = civ.getDifficulty().unhappinessModifier
+        if (!civ.hasPlayerStanding()) modifier *= civ.gameInfo.getDifficulty().aiUnhappinessModifier
+        val forCities = 1 + civ.getMatchingUniques(com.unciv.models.ruleset.unique.UniqueType.UnhappinessFromCitiesPercentage).sumOf { it.params[0].toDouble() }.toFloat() / 100
+        // The city filters a city of ours meets that we can tell without the city: every city, and a city not occupied
+        fun meets(filter: String) = filter == "in all cities" || filter == "All" || (!occupied && (filter == "in all non-occupied cities" || filter == "Non-occupied"))
+        // Only the citizens themselves are counted: a city new to us has no specialists or followers we can reckon
+        val discount = civ.getMatchingUniques(com.unciv.models.ruleset.unique.UniqueType.UnhappinessFromPopulationTypePercentageChange)
+            .filter { it.params[1] == "Population" && meets(it.params[2]) }.sumOf { it.params[0].toDouble() }.toFloat() / 100
+        val perCitizen = (1 + discount).coerceAtLeast(0f) * modifier * (if (occupied) 2 else 1)
+        val policies = civ.getMatchingUniques(com.unciv.models.ruleset.unique.UniqueType.StatsPerCity).filter { meets(it.params[1]) }.sumOf { it.stats.happiness.toDouble() }.toFloat() +
+            civ.getMatchingUniques(com.unciv.models.ruleset.unique.UniqueType.StatsPerPopulation).filter { meets(it.params[2]) }.sumOf { it.stats.happiness.toDouble() * (pop / it.params[1].toInt()) }.toFloat()
+        return CityMood(forCity = (if (occupied) 5 else 3) * modifier * forCities + (if (occupied) 2 else 0), perCitizen = perCitizen, citizens = perCitizen * pop, policies = policies)
+    }
+
+    /** A city taken: the rule, then the nearest three cities of other powers we have seen (warEstimate's), each with what it would leave as a puppet and annexed */
+    private fun takenCities(civ: Civilization, held: Map<String, RulerDiplomacy.LuxuryHeld>, per: Int, figure: Int, leaves: (Float) -> Int): String {
+        val puppet = cityMood(civ, 0, occupied = false)
+        val annexed = cityMood(civ, 0, occupied = true)
+        val rule = "a city taken loses about a quarter of its people; as a puppet it costs ${amount(puppet.forCity)} and ${amount(puppet.perCitizen)} a citizen, " +
+            "annexed ${amount(annexed.forCity)} and ${amount(annexed.perCitizen)} a citizen until it has a Courthouse; one we founded counts as our own; " +
+            "the mood buildings it keeps and any luxury new to us count for us"
+        val seen = civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() }.flatMap { other -> other.cities.filter { it.getCenterTile().isExplored(civ) } }
+            .sortedBy { city -> civ.cities.minOfOrNull { it.getCenterTile().aerialDistanceTo(city.getCenterTile()) } ?: Int.MAX_VALUE }.take(3).toList()
+        if (seen.isEmpty()) return "$rule. We have seen no city of another power"
+        val nets = seen.map { city ->
+            // CityConquestFunctions.conquerCity: a city of more than one loses 1 and a quarter of its people
+            val pop = city.population.population.let { if (it > 1) it - 1 - it / 4 else it }
+            val ours = city.foundingCivObject == civ
+            // What it brings: the mood of the buildings that outlast the capture. CityConquestFunctions decides that by a roll seeded by the city's tile: the
+            // plunder's gold draws first, then each ordinary building one in three; national wonders and its owner's free buildings go when it changes hands
+            val roll = kotlin.random.Random(city.getCenterTile().position.hashCode()).also { it.nextInt(40) }
+            val free = city.civ.civConstructions.getFreeBuildingNames(city).toSet()
+            val kept = city.cityConstructions.getBuiltBuildings().toList().filter { b -> when {
+                b.hasUnique(com.unciv.models.ruleset.unique.UniqueType.NotDestroyedWhenCityCaptured) || b.isWonder -> true
+                b.hasUnique(com.unciv.models.ruleset.unique.UniqueType.IndicatesCapital, city.state) || b.hasUnique(com.unciv.models.ruleset.unique.UniqueType.MovesToNewCapital, city.state) -> false
+                b.hasUnique(com.unciv.models.ruleset.unique.UniqueType.DestroyedWhenCityCaptured) -> false
+                else -> roll.nextInt(100) >= 34
+            } }.filter { b -> b.name !in free && !(b.isNationalWonder && !b.hasUnique(com.unciv.models.ruleset.unique.UniqueType.NotDestroyedWhenCityCaptured)) }
+            val courthouse = kept.any { it.hasUnique(com.unciv.models.ruleset.unique.UniqueType.RemovesAnnexUnhappiness) }
+            val brings = kept.sumOf { it.happiness.toDouble() }.toFloat() + per * city.getResourcesGeneratedByCity().asSequence()
+                .filter { it.amount > 0 && it.resource.resourceType == com.unciv.models.ruleset.tile.ResourceType.Luxury && it.resource.name !in held }.map { it.resource.name }.distinct().count()
+            val asPuppet = cityMood(civ, pop, occupied = false).total + brings
+            val asAnnexed = (if (ours || courthouse) asPuppet else cityMood(civ, pop, occupied = true).total + brings)
+            Triple(city, leaves(asPuppet) - figure, leaves(asAnnexed) - figure)
+        }
+        return "$rule. The nearest, with what each brings: " + nets.mapIndexed { at, (city, asPuppet, asAnnexed) ->
+            "${city.name} (${city.civ.civName}) " + if (at == 0) "${signed(asPuppet)} as a puppet, ${signed(asAnnexed)} annexed" else "${signed(asPuppet)} and ${signed(asAnnexed)}" }.joinToString("; ")
+    }
+
+    private fun ourLuxuries(held: Map<String, RulerDiplomacy.LuxuryHeld>, per: Int): String {
+        if (held.isEmpty()) return "none: each distinct luxury would add +$per"
+        val last = held.filterValues { it.lastCopy }.keys.toList()
+        return listOfNotNull(
+            held.filterValues { it.own == 0 && it.traded > 0 }.keys.toList().takeIf { it.isNotEmpty() }?.let { "${andList(it)} by trade" },
+            held.filterValues { it.own == 0 && it.traded == 0 }.keys.toList().takeIf { it.isNotEmpty() }?.let { "${andList(it)} from city-states" },
+            held.filterValues { it.own > 0 }.keys.toList().takeIf { it.isNotEmpty() }?.let { "${andList(it)} our own" },
+            last.takeIf { it.isNotEmpty() }?.let { if (it.size == 1) "${it[0]} the last copy: trading it away loses its +$per" else "${andList(it)} each the last copy: trading one away loses its +$per" }
+        ).joinToString("; ")
+    }
+
+    /** Each luxury we lack that a power we know would trade us (the trade options' theyCanOffer), with what it adds and who offers it */
+    private fun luxuriesWeLack(civ: Civilization, held: Map<String, RulerDiplomacy.LuxuryHeld>, per: Int): String? {
+        val traders = LinkedHashMap<String, MutableList<String>>()
+        for (other in civ.getKnownCivs().filter { it.isMajorCiv() && it.isAlive() && !civ.isAtWarWith(it) })
+            for (offer in com.unciv.logic.trade.TradeLogic(civ, other).theirAvailableOffers)
+                if (offer.type == com.unciv.logic.trade.TradeOfferType.Luxury_Resource && offer.amount > 0 && offer.name !in held) traders.getOrPut(offer.name) { ArrayList() } += other.civName
+        if (traders.isEmpty()) return "none that a power we know offers"
+        return "each +$per: " + traders.entries.joinToString("; ") { (luxury, by) -> "$luxury from ${andList(by.distinct())}" }
+    }
+
+    /** The mood buildings we can raise now, with their +N; with none, the next one or two and the technology each waits for */
+    private fun moodBuildings(civ: Civilization): String {
+        val ruleset = civ.gameInfo.ruleset
+        val raisers = ruleset.buildings.values.filter { it.happiness > 0 && civ.getEquivalentBuilding(it) == it }
+        val now = raisers.mapNotNull { b -> civ.cities.filter { b.isBuildable(it.cityConstructions) }.takeIf { it.isNotEmpty() }?.let { b to it } }
+        if (now.isNotEmpty()) return now.joinToString(", ") { (b, cities) -> "${b.name} +${b.happiness.toInt()} (" +
+            (if (b.isWonder) "a wonder" else if (cities.size == civ.cities.size && cities.size > 1) "every city" else andList(cities.map { it.name })) + ")" }
+        val builtAnywhere = civ.gameInfo.getCities().flatMap { it.cityConstructions.getBuiltBuildings() }.map { it.name }.toSet()
+        val next = raisers.filter { b -> b.requiredTech?.let { !civ.tech.isResearched(it) } == true && (b.uniqueTo == null || b.uniqueTo == civ.civName) &&
+                !(b.isWonder && b.name in builtAnywhere) && civ.cities.any { !it.cityConstructions.isBuilt(b.name) } }
+            .sortedWith(compareBy({ civ.tech.getRequiredTechsToDestination(ruleset.technologies[it.requiredTech]!!).size }, { -it.happiness })).take(2)
+        if (next.isEmpty()) return "none to build now, and none waits on a technology"
+        return "none to build now. Next: " + next.joinToString(", ") { b -> "${b.name} +${b.happiness.toInt()} (" + (if (b.isWonder) "a wonder, " else if (!b.isNationalWonder) "in each city, " else "") + "once ${b.requiredTech} is ours)" }
     }
 
     /** What one more distinct luxury adds to the mood, as getHappinessBreakdown counts it */
@@ -3053,8 +3180,8 @@ object RulerHost {
         // Without one the key is read from the words (ackKey); before, a defender swapped for another as weak, or a held general seen at another place,
         // brought an acknowledged line back in full (Rome, Run 20; the Iroquois, Run 29; Greece's pacts, Run 18)
         val about = HashMap<String, String>()
-        if (civ.getHappiness() < 0) warnings += "The people are unhappy (${civ.getHappiness()}): ${if (civ.getHappiness() <= -10) "no city grows at all" else "every city's growth is cut by three quarters"} while the mood is below zero, and production suffers - farming for food does little until the mood is mended. " +
-            "The mood is a sum, and happinessBreakdown shows its parts: every citizen costs one and every city a few; each distinct luxury not yet ours would add ${perLuxury(civ)}, and buildings, policies and wonders what they say (the build lists mark a building's mood as +N). A wide, populous realm settles a little below zero and growth is its brake; what raises it is a luxury not yet ours, a mood building not yet raised, a policy or wonder that gives it, a belief of our religion, or fewer and smaller cities."
+        // The first sentence alone: what the mood is made of and what mends it is the briefing's mood (2026-11-08)
+        if (civ.getHappiness() < 0) warnings += "The people are unhappy (${civ.getHappiness()}): ${if (civ.getHappiness() <= -10) "no city grows at all" else "every city's growth is cut by three quarters"} while the mood is below zero, and production suffers - farming for food does little until the mood is mended."
         if (civ.tech.currentTechnologyName() == null) warnings += "Research is idle - give research goals."
         val standing = orders[civ.civName]
         val goalsLeft = standing?.research?.count { !reached(civ, it) } ?: 0
@@ -3072,7 +3199,7 @@ object RulerHost {
         }
         for (unit in civ.units.getCivUnits()) if (unit.isGreatPerson() && units.orders[unit.id]?.action == "hold")
             warnings += "${unit.name} #${unit.id} ${RulerCampaigns.atPlaceOf(civ, unit.getTile())} awaits orders.".also { about[it] = "${unit.name} #${unit.id} awaits orders" }
-        if (civ.getHappiness() in 0..2) warnings += "The people's mood is thin (+${civ.getHappiness()}): one more city or a lost luxury tips them into unrest."
+        if (civ.getHappiness() in 0..2) warnings += "The people's mood is thin (+${civ.getHappiness()}): mood.aNewCity says what one more city would do."
         // The rearm order's own test (RulerUnits.newerArms), so the warning never sends the advisor to an order that then finds no one to re-arm
         val oldArms = civ.units.getCivUnits().filter { it.baseUnit.isLandUnit && units.newerArms(it).isNotEmpty() }.toList()
         val (outdated, waiting) = oldArms.partition { unit -> units.newerArms(unit).any { unit.upgrade.canUpgrade(it) } }
@@ -3483,7 +3610,7 @@ object RulerHost {
                     "Diplomacy" to "effort spent on city-states and friendships - and whether the officials court city-states with gold at all: 0, never (they never pay for an alliance another power holds beyond one gift's reach)",
                     "Loyal" to "how much they honour friendships",
                     "DeclareWar" to "how warlike their building and keeping is (the Great Wall, a standing army); they never declare war on their own - war is the ruler's")),
-            "diplomacy" to diplomacy.tradeOptions(civ, leave),
+            "diplomacy" to diplomacy.tradeOptions(civ, leave, perLuxury(civ)),
             // What each city can build, with how long it takes in years and its price in gold - and in faith where faith buys it (a Missionary is bought, never built)
             "buildable" to civ.cities.associate { city ->
                 city.name to (ruleset.buildings.values.asSequence() + ruleset.units.values.asSequence())
